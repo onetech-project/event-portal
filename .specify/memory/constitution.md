@@ -1,16 +1,30 @@
 <!--
 Sync Impact Report
-Version change: [TEMPLATE] → 1.0.0 (initial ratification)
-Modified principles: N/A (first fill from template placeholders)
-Added sections:
-  - Core Principles I-VI (Modular Monolith, Domain Isolation, DTO Isolation, Transactional
-    Integrity & Idempotency, Payment Gateway Abstraction, Guest-First MVP Scope Discipline)
-  - Technology Stack Requirements
-  - Critical Data Flow Rules
-  - Governance
-Removed sections: none (template placeholders replaced)
-Deferred items: TODO(RATIFICATION_DATE) — original adoption date not provided by user
-Templates requiring follow-up: none — this command only updates the constitution file itself.
+Version change: 1.0.0 → 1.1.0 (MINOR — materially expanded guidance, no principle removed
+or redefined; all 1.0.0 rules remain in force unchanged)
+
+Trigger: a cross-artifact review of specs/001-003 against PRD.md, ARCHITECTURE.md, and
+SCHEMA.md found five critical defects. Three of them traced back to ambiguities this
+document left open rather than to spec-authoring mistakes, so they are closed here to
+prevent recurrence.
+
+Modified sections:
+  - Principle IV (Transactional Integrity & Idempotency) — added the prohibition on
+    external network calls inside the checkout transaction; added `failure` to the
+    enumerated webhook statuses that restore quota.
+  - Principle VI (Guest-First MVP Scope Discipline) — clarified that "associated Order"
+    means referenced by `order_items` OR `attendees` (both are ON DELETE RESTRICT).
+  - Technology Stack Requirements — recorded that no object storage exists in this MVP
+    and QR images are therefore generated on demand.
+  - Critical Data Flow Rules — added the quota-is-remaining rule.
+
+Added principles: none. Removed sections: none.
+
+Deferred items resolved: RATIFICATION_DATE set to 2026-07-31, the date this constitution
+was first adopted. Correct it if the project's actual adoption predates that.
+
+Templates requiring follow-up: none. specs/001-003 were already updated to match every
+rule below before this amendment was written.
 -->
 
 # Event Ticketing MVP Constitution
@@ -45,15 +59,23 @@ independently.
 Checkout (`POST /api/v1/checkout`) MUST wrap creation of `orders`, `order_items`,
 `attendees`, and the atomic deduction of `ticket_types` quota in a single SQL
 transaction (`BEGIN ... COMMIT`), passed explicitly or via context as `pgx.Tx`.
+That transaction MUST NOT contain any external network call — notably the payment
+gateway's `CreateTransaction`, which MUST be invoked only after the transaction has
+committed, with its result persisted by a subsequent short transaction and a failed
+call compensated by cancelling the order and restoring its quota.
 Payment webhook handlers MUST be idempotent: if an order's status is already `PAID`,
 the handler MUST return `200 OK` immediately without reprocessing. Webhooks receiving
-`expire`, `cancel`, or `deny` MUST atomically update order status to `EXPIRED`/
-`CANCELLED` and restore the deducted quota in `ticket_types`. Post-payment work (PDF
-generation, QR generation, SMTP dispatch) MUST run in a non-blocking goroutine so the
-webhook responds `200 OK` instantly; `email_sent` MUST be set only after successful
-delivery.
+`expire`, `cancel`, `deny`, or `failure` MUST atomically update order status to
+`EXPIRED`/`CANCELLED` and restore the deducted quota in `ticket_types`. Post-payment
+work (PDF generation, QR generation, SMTP dispatch) MUST run in a non-blocking
+goroutine so the webhook responds `200 OK` instantly; `email_sent` MUST be set only
+after successful delivery.
 Rationale: Prevents overselling, double-processing of payments, and slow/blocked
-webhook responses that payment providers may retry or flag as failing.
+webhook responses that payment providers may retry or flag as failing. The
+no-network-call rule exists because the quota-deducting `UPDATE` holds a row lock
+until commit: a gateway round-trip inside that transaction would serialize every
+concurrent buyer of the same ticket type behind it, collapsing checkout throughput to
+roughly one order per gateway round-trip.
 
 ### V. Payment Gateway Abstraction
 The `internal/payment` domain MUST expose a `Gateway` interface
@@ -66,7 +88,10 @@ with Domain Isolation (Principle II).
 Ticket purchase MUST work end-to-end for unauthenticated guest users (browse → dynamic
 attendee entry → checkout → pay → receive QR/PDF ticket by email) without requiring
 account creation. Deletion of an `Event` or `Ticket Type` that has at least one
-associated `Order` MUST be rejected with `400 Bad Request`. Features explicitly out of
+associated `Order` MUST be rejected with `400 Bad Request`; "associated" means
+referenced by an `order_items` row OR an `attendees` row, since SCHEMA.md declares
+`ON DELETE RESTRICT` on both foreign keys and guarding only one of them surfaces a raw
+constraint violation instead of the required `400`. Features explicitly out of
 scope for this MVP (microservices deployment, Kafka/RabbitMQ, Redis, Kubernetes, CQRS,
 Event Sourcing, loyalty points, leaderboards, multi-organizer, refunds, coupons,
 promotions, waiting rooms, queue systems, seat selection, multi-currency,
@@ -86,6 +111,11 @@ into enterprise/scale concerns directly threatens that timeline.
   implementation is Midtrans SNAP Sandbox.
 * **Email & PDF**: SMTP via `go-mail/mail` or `net/smtp`; PDF via `maroto` or
   `gofpdf`; QR codes via `go-qrcode`.
+* **No object storage**: this MVP has no file storage, no CDN, and no static-asset
+  serving. QR images MUST therefore be generated on demand from `ticket_code` at
+  render time (initial delivery, resend, and any future download), and
+  `tickets.qr_code_url` MUST be left empty. `events.banner_url` is a plain URL string
+  supplied by the admin — there is no upload endpoint.
 * **Schema**: `SCHEMA.md` is the absolute source of truth for the PostgreSQL schema
   and MUST match what `sqlc` generates from `migrations/`. Any schema change MUST
   update `SCHEMA.md` in the same change.
@@ -101,6 +131,13 @@ into enterprise/scale concerns directly threatens that timeline.
 * Quota (`ticket_types.quota`) MUST never go negative; enforce via the `CHECK (quota
   >= 0)` constraint and atomic deduction inside the checkout transaction (Principle
   IV) — application code MUST NOT rely on optimistic checks alone.
+* Quota semantics: `ticket_types.quota` is the **remaining** quota — the live counter
+  that checkout decrements and that cancel/expire/deny/failure restore. It is NOT the
+  original allocation, and SCHEMA.md defines no `quota_total` column. Any admin-facing
+  surface exposing this field MUST label it as remaining (never "Total"), and any
+  sold-count shown alongside it MUST be derived (`SUM(order_items.quantity)`), never
+  stored. Rationale: treating this column as a static total lets an admin edit reset it
+  above the true remainder, silently creating tickets that were never allocated.
 
 ## Governance
 
@@ -121,5 +158,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 1.0.0 | **Ratified**: TODO(RATIFICATION_DATE): original adoption date not
-provided | **Last Amended**: 2026-07-31
+**Version**: 1.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-07-31
