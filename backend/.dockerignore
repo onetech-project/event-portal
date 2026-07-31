@@ -1,0 +1,24 @@
+# Keep the build context small and free of anything that would invalidate the
+# dependency layer or leak local state into the image.
+
+# Local configuration and secrets.
+.env
+.env.*
+!.env.example
+
+# Build output.
+/api
+/seedadmin
+*.exe
+
+# Tests and tooling that the image never runs.
+scripts/
+**/*_test.go
+
+# Editor and VCS noise.
+.git
+.gitignore
+.golangci.yml
+.idea/
+.vscode/
+*.swp

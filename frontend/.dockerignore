@@ -1,0 +1,29 @@
+# Keep the build context small. node_modules in particular must not be copied:
+# the deps stage installs them for the image's own platform.
+node_modules
+.next
+out
+build
+
+# Local configuration and secrets.
+.env
+.env.*
+!.env.example
+
+# Tests and tooling the image never runs.
+**/*.test.ts
+**/*.test.tsx
+vitest.config.mts
+vitest.setup.ts
+coverage
+
+# Editor and VCS noise.
+.git
+.gitignore
+.idea/
+.vscode/
+*.swp
+
+# Agent instructions, not application code.
+AGENTS.md
+CLAUDE.md

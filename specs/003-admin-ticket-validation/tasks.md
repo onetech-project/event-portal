@@ -31,7 +31,7 @@ specs/001-guest-purchase-flow.
 
 **Purpose**: Feature-specific scaffolding not already covered by prior features
 
-- [ ] T001 [P] Add a browser QR-decoding library (e.g., a `getUserMedia`-based JS/
+- [x] T001 [P] Add a browser QR-decoding library (e.g., a `getUserMedia`-based JS/
       WASM decoder) to `frontend/package.json`
 
 ---
@@ -45,14 +45,14 @@ be implemented
 also depends on `internal/ticket` (repository/DTOs) and `internal/notification`
 (PDF/SMTP) already existing from specs/001, and the JWT middleware from specs/002
 
-- [ ] T002 Add ticket code normalization helper that normalizes the **input only**
+- [x] T002 Add ticket code normalization helper that normalizes the **input only**
       (trim surrounding whitespace, then uppercase) shared by lookup and mark-used,
       in `backend/internal/ticket/normalize.go`. The normalized string is bound to a
       plain equality predicate (`WHERE ticket_code = $1`); never wrap the column in
       `UPPER()`/`LOWER()` — stored codes are already canonical (specs/001) and
       `idx_tickets_ticket_code` is a plain btree that a function on the column would
       make unusable
-- [ ] T003 [P] Add `ValidationResult` DTO in `backend/internal/ticket/dto.go`
+- [x] T003 [P] Add `ValidationResult` DTO in `backend/internal/ticket/dto.go`
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
 
@@ -69,22 +69,22 @@ code (expect Invalid) — per quickstart.md Scenarios 1 and 3.
 
 ### Implementation for User Story 1
 
-- [ ] T004 [US1] Implement ticket lookup-by-normalized-code query — exact match
+- [x] T004 [US1] Implement ticket lookup-by-normalized-code query — exact match
       `WHERE ticket_code = $1` so `idx_tickets_ticket_code` is used, joining
       attendee name, ticket type name, event name — in
       `backend/internal/ticket/repository.go` (depends on T002)
-- [ ] T005 [US1] Implement `ticket` service `Validate(code)` mapping ticket
+- [x] T005 [US1] Implement `ticket` service `Validate(code)` mapping ticket
       status to `VALID`/`ALREADY_USED`/`INVALID` (not-found and `REVOKED` both map
       to `INVALID`) in `backend/internal/ticket/service.go` (depends on T003, T004)
-- [ ] T006 [US1] Implement `POST /api/v1/admin/tickets/validate` handler in
+- [x] T006 [US1] Implement `POST /api/v1/admin/tickets/validate` handler in
       `backend/internal/ticket/handler.go`, registered behind JWT middleware in
       `backend/cmd/api/main.go` (depends on T005)
-- [ ] T007 [P] [US1] Build `frontend/app/admin/validate/page.tsx` with manual code
+- [x] T007 [P] [US1] Build `frontend/app/admin/validate/page.tsx` with manual code
       input calling the validate endpoint
-- [ ] T008 [US1] Add camera QR scan capture in
+- [x] T008 [US1] Add camera QR scan capture in
       `frontend/components/admin/qr-scanner.tsx`, feeding decoded text into the
       same validate call as manual entry (depends on T001, T007)
-- [ ] T009 [P] [US1] Build `frontend/components/admin/validation-result-card.tsx`
+- [x] T009 [P] [US1] Build `frontend/components/admin/validation-result-card.tsx`
       showing Valid/Already Used/Invalid with attendee/ticket-type/event details
 
 **Checkpoint**: User Story 1 fully functional and independently testable
@@ -101,23 +101,23 @@ invalid ticket is rejected (per quickstart.md Scenario 2).
 
 ### Implementation for User Story 2
 
-- [ ] T010 [US2] Implement guarded mark-used update (`UPDATE tickets SET status =
+- [x] T010 [US2] Implement guarded mark-used update (`UPDATE tickets SET status =
       'USED', updated_at = now() WHERE ticket_code = $1 AND status = 'ACTIVE'
       RETURNING id`, with `$1` the normalized input code) in
       `backend/internal/ticket/repository.go`. The `updated_at = now()` write is
       what records the transition — the LOCKED schema has no `used_at` column and
       none may be added (depends on T002)
-- [ ] T011 [US2] Implement `ticket` service `MarkUsed(code)` returning a
+- [x] T011 [US2] Implement `ticket` service `MarkUsed(code)` returning a
       not-found (404) or already-used/invalid (409) distinction based on rows
       affected in `backend/internal/ticket/service.go` (depends on T010)
-- [ ] T012 [US2] Implement `POST /api/v1/admin/tickets/:code/use` handler in
+- [x] T012 [US2] Implement `POST /api/v1/admin/tickets/:code/use` handler in
       `backend/internal/ticket/handler.go`, registered in
       `backend/cmd/api/main.go`, normalizing the `:code` path segment with T002's
       helper. This endpoint is a deliberate, documented addition to PRD §1.5's
       LOCKED API list (rationale in contracts/api.md and spec.md): `validate` must
       stay side-effect-free, so the `ACTIVE -> USED` transition needs its own
       endpoint (depends on T011)
-- [ ] T013 [US2] Add a "Mark Used" action button to
+- [x] T013 [US2] Add a "Mark Used" action button to
       `frontend/components/admin/validation-result-card.tsx`, calling the
       mark-used endpoint and refreshing the displayed result (depends on T009,
       T012)
@@ -137,7 +137,7 @@ non-Paid order (per quickstart.md Scenario 4).
 
 ### Implementation for User Story 3
 
-- [ ] T014 [US3] Implement `notification` service `ResendTicketEmail(orderID)` in
+- [x] T014 [US3] Implement `notification` service `ResendTicketEmail(orderID)` in
       `backend/internal/notification/service.go`: fetch the order (buyer email,
       status) plus its attendees and their existing `ticket_code` values through the
       narrow `OrderChecker` interface established in specs/002 and implemented by
@@ -148,7 +148,7 @@ non-Paid order (per quickstart.md Scenario 4).
       at render time (`tickets.qr_code_url` is empty and unused — there is no object
       storage); reuse the PDF-render + SMTP-send path from specs/001 (depends on
       prior features' `pdf.go`/`smtp.go`)
-- [ ] T015 [US3] Implement `POST /api/v1/admin/orders/:id/resend-email` handler
+- [x] T015 [US3] Implement `POST /api/v1/admin/orders/:id/resend-email` handler
       in `backend/internal/notification/handler.go`, registered behind JWT
       middleware in `backend/cmd/api/main.go` — where the `order` domain's
       `OrderChecker` implementation is also injected into the `notification`
@@ -156,7 +156,7 @@ non-Paid order (per quickstart.md Scenario 4).
       specs/002 — setting `orders.email_sent = true` on successful delivery
       (FR-011, same as the initial post-payment send) and returning
       `400 ORDER_NOT_PAID` for non-`PAID` orders (depends on T014)
-- [ ] T016 [P] [US3] Add a "Resend Ticket Email" action to the admin orders list at
+- [x] T016 [P] [US3] Add a "Resend Ticket Email" action to the admin orders list at
       `frontend/app/admin/orders/page.tsx` from specs/002 (whose
       `GET /api/v1/admin/orders` data is served by
       `backend/internal/order/handler.go`), or to a small order-detail view, calling
@@ -168,14 +168,14 @@ non-Paid order (per quickstart.md Scenario 4).
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T017 [P] Add structured error codes (`ALREADY_USED`, `ORDER_NOT_PAID`)
+- [x] T017 [P] Add structured error codes (`ALREADY_USED`, `ORDER_NOT_PAID`)
       consistently across `internal/ticket` and `internal/notification` handlers
-- [ ] T018 Run `quickstart.md` end-to-end (validate → mark used → re-validate →
+- [x] T018 Run `quickstart.md` end-to-end (validate → mark used → re-validate →
       resend) and fix discrepancies; confirm a lowercase/whitespace-padded code
       resolves identically to the canonical one, that resend leaves every
       `ticket_code` byte-identical while producing fresh QR images, and that
       `orders.email_sent` is `true` afterwards
-- [ ] T019 [P] Review `internal/ticket` `dto.go` to confirm no sqlc-generated
+- [x] T019 [P] Review `internal/ticket` `dto.go` to confirm no sqlc-generated
       struct leaks into HTTP responses (Constitution Principle III)
 
 ---

@@ -1,0 +1,112 @@
+# Observability stack: Alloy collects, Loki/Tempo/Prometheus store, Grafana reads.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Grafana is on http://localhost:3001 (anonymous admin, local only).
+#
+# Signal flow:
+#   API  --OTLP--> Alloy --> Tempo         (traces)
+#   API  --stdout--> Docker --> Alloy --> Loki   (logs, with trace_id)
+#   API  <--scrape-- Prometheus            (metrics)
+
+services:
+  api:
+    environment:
+      # Turning this on is what makes the API export traces; it is empty in the
+      # base file so the app runs standalone without a collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: alloy:4317
+      OTEL_SERVICE_NAME: ticketing-api
+    depends_on:
+      alloy:
+        condition: service_started
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: ticketing-alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only socket access: Alloy discovers containers and tails their
+      # stdout. It never needs to control the daemon.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "12345:12345" # Alloy UI: inspect the pipeline when a signal goes missing
+    depends_on:
+      - loki
+      - tempo
+      - prometheus
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: ticketing-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+
+  tempo:
+    image: grafana/tempo:2.7.0
+    container_name: ticketing-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: "0:0" # the image's default user cannot write the mounted volume
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: ticketing-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      # Required so Alloy and Tempo's metrics generator can remote-write here.
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: ticketing-grafana
+    restart: unless-stopped
+    environment:
+      # Local only. Never carry this into a deployed environment.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000" # 3000 is the frontend
+    depends_on:
+      - loki
+      - tempo
+      - prometheus
+
+volumes:
+  alloy-data:
+  loki-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:

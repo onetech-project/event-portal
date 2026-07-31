@@ -32,20 +32,20 @@ Web app per plan.md: `backend/internal/<domain>/`, `backend/cmd/api/`,
 
 **Purpose**: Project initialization and basic structure
 
-- [ ] T001 Create `backend/` (Go module, `cmd/api/main.go` entrypoint) and
+- [x] T001 Create `backend/` (Go module, `cmd/api/main.go` entrypoint) and
       `frontend/` (Next.js App Router + TypeScript) project skeletons per plan.md
-- [ ] T002 Add backend dependencies: Echo v4, sqlc, pgx, go-qrcode, maroto/gofpdf,
+- [x] T002 Add backend dependencies: Echo v4, sqlc, pgx, go-qrcode, maroto/gofpdf,
       go-mail (or net/smtp), Midtrans SNAP client, in `backend/go.mod`
-- [ ] T003 Add frontend dependencies: TanStack Query, React Hook Form, Zod,
+- [x] T003 Add frontend dependencies: TanStack Query, React Hook Form, Zod,
       TailwindCSS, in `frontend/package.json`
-- [ ] T004 [P] Configure Go linting/formatting (`gofmt`, `golangci-lint`) in
+- [x] T004 [P] Configure Go linting/formatting (`gofmt`, `golangci-lint`) in
       `backend/.golangci.yml`
-- [ ] T005 [P] Configure frontend linting/formatting (ESLint, Prettier) in
+- [x] T005 [P] Configure frontend linting/formatting (ESLint, Prettier) in
       `frontend/.eslintrc.json`
-- [ ] T006 Write `backend/migrations/0001_init.sql` from SCHEMA.md verbatim (all 8
+- [x] T006 Write `backend/migrations/0001_init.sql` from SCHEMA.md verbatim (all 8
       tables + the 4 indexes, no additions — SCHEMA.md is LOCKED) and set up
       `sqlc.yaml` pointing at it
-- [ ] T007 Add `docker-compose.yml` at repo root with a PostgreSQL service and
+- [x] T007 Add `docker-compose.yml` at repo root with a PostgreSQL service and
       volume-mounted migrations
 
 ---
@@ -57,22 +57,22 @@ be implemented
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T008 Implement DB connection pool setup (`pgxpool`) in
+- [x] T008 Implement DB connection pool setup (`pgxpool`) in
       `backend/pkg/db/db.go`
-- [ ] T009 [P] Implement config loading (env vars: DB DSN, Midtrans keys, SMTP
+- [x] T009 [P] Implement config loading (env vars: DB DSN, Midtrans keys, SMTP
       creds) in `backend/pkg/config/config.go`
-- [ ] T010 [P] Implement structured logger in `backend/pkg/logger/logger.go`
-- [ ] T011 Run `sqlc generate` to produce typed query structs from
+- [x] T010 [P] Implement structured logger in `backend/pkg/logger/logger.go`
+- [x] T011 Run `sqlc generate` to produce typed query structs from
       `backend/migrations/0001_init.sql` into `backend/internal/*/sqlc/` (or a
       shared `backend/pkg/sqlc/` package per domain table ownership)
-- [ ] T012 Wire Echo router, global error-handling middleware, and health check
+- [x] T012 Wire Echo router, global error-handling middleware, and health check
       in `backend/cmd/api/main.go`
-- [ ] T013 Define `EventProvider` interface (`CheckAndDeductQuota`, `RestoreQuota`)
+- [x] T013 Define `EventProvider` interface (`CheckAndDeductQuota`, `RestoreQuota`)
       contract in `backend/internal/event/service.go` (implementation completed in
       US2); document in the doc comment that `ticket_types.quota` is the REMAINING
       quota, decremented at checkout and restored on cancel/expire/deny (spec
       FR-018)
-- [ ] T014 [P] Scaffold `frontend/lib/api-client.ts` (base fetch wrapper,
+- [x] T014 [P] Scaffold `frontend/lib/api-client.ts` (base fetch wrapper,
       `cache: 'no-store'` default for GET) and `frontend/lib/env.ts`
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
@@ -90,23 +90,23 @@ available quota, with no account required.
 
 ### Implementation for User Story 1
 
-- [ ] T015 [P] [US1] Add `event` domain DTOs (`EventSummary`, `EventDetail`,
+- [x] T015 [P] [US1] Add `event` domain DTOs (`EventSummary`, `EventDetail`,
       `TicketTypeSummary`) in `backend/internal/event/dto.go`; `quota_remaining`
       maps 1:1 onto `ticket_types.quota` (no arithmetic — it already IS the
       remaining count) and `banner_url` is passed through verbatim as the
       admin-supplied URL string (nullable; no upload/storage exists)
-- [ ] T016 [P] [US1] Implement `event` repository read queries (list published
+- [x] T016 [P] [US1] Implement `event` repository read queries (list published
       events, get event by slug with ticket types + remaining quota) in
       `backend/internal/event/repository.go`
-- [ ] T017 [US1] Implement `event` service methods `ListPublishedEvents` and
+- [x] T017 [US1] Implement `event` service methods `ListPublishedEvents` and
       `GetPublishedEventBySlug` in `backend/internal/event/service.go` (depends on
       T015, T016)
-- [ ] T018 [US1] Implement `GET /api/v1/events` and `GET /api/v1/events/:slug`
+- [x] T018 [US1] Implement `GET /api/v1/events` and `GET /api/v1/events/:slug`
       handlers in `backend/internal/event/handler.go`, registered in
       `backend/cmd/api/main.go`
-- [ ] T019 [P] [US1] Build `frontend/app/events/page.tsx` (published events list,
+- [x] T019 [P] [US1] Build `frontend/app/events/page.tsx` (published events list,
       `no-store` fetch)
-- [ ] T020 [P] [US1] Build `frontend/app/events/[slug]/page.tsx` (event detail +
+- [x] T020 [P] [US1] Build `frontend/app/events/[slug]/page.tsx` (event detail +
       ticket type list with remaining quota, `no-store` fetch)
 
 **Checkpoint**: User Story 1 fully functional and independently testable via
@@ -127,51 +127,51 @@ with its quota restored (spec FR-021).
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] Implement `CheckAndDeductQuota(ctx, tx, ticketTypeID, qty)` and its
+- [x] T021 [US2] Implement `CheckAndDeductQuota(ctx, tx, ticketTypeID, qty)` and its
       mirror `RestoreQuota(ctx, tx, ticketTypeID, qty)` on the `EventProvider`
       interface in `backend/internal/event/service.go` — guarded
       `UPDATE ticket_types SET quota = quota - $qty WHERE id = $id AND quota >= $qty
       RETURNING quota` for deduct (no rows affected ⇒ insufficient-quota error) and
       `SET quota = quota + $qty` for restore; both take the caller's `pgx.Tx`
       (depends on T013, T016)
-- [ ] T022 [P] [US2] Add `order` domain DTOs (`CheckoutRequest`, `OrderResponse`)
+- [x] T022 [P] [US2] Add `order` domain DTOs (`CheckoutRequest`, `OrderResponse`)
       in `backend/internal/order/dto.go`
-- [ ] T023 [P] [US2] Implement `order` repository writes in
+- [x] T023 [P] [US2] Implement `order` repository writes in
       `backend/internal/order/repository.go`: insert order (with `status='PENDING'`,
       `payment_url` NULL), insert order items, insert attendees, plus
       `UpdatePaymentDetails(orderID, url, provider)` and
       `MarkCancelled(orderID)` used by TX2 and the compensation path
-- [ ] T024 [US2] Define `payment.Gateway` interface (`CreateTransaction`,
+- [x] T024 [US2] Define `payment.Gateway` interface (`CreateTransaction`,
       `VerifyWebhook`) in `backend/internal/payment/gateway.go`
-- [ ] T025 [US2] Implement Midtrans SNAP Sandbox adapter for `CreateTransaction` in
+- [x] T025 [US2] Implement Midtrans SNAP Sandbox adapter for `CreateTransaction` in
       `backend/internal/payment/midtrans.go` (depends on T024)
-- [ ] T026 [US2] Implement checkout **TX1** in `backend/internal/order/service.go`:
+- [x] T026 [US2] Implement checkout **TX1** in `backend/internal/order/service.go`:
       pre-validate attendee count == total quantity, open `pgx.Tx`, validate each
       ticket type's sales window, call `EventProvider.CheckAndDeductQuota` per line
       item, recompute the total from current prices, insert order/order_items/
       attendees, `COMMIT`. No external network call may occur inside this
       transaction — this is the single transaction ARCHITECTURE.md §3.4 requires
       (depends on T021, T022, T023)
-- [ ] T027 [US2] After TX1 commits, call `Gateway.CreateTransaction` **outside any
+- [x] T027 [US2] After TX1 commits, call `Gateway.CreateTransaction` **outside any
       transaction**, then open **TX2** to persist `payment_url`/`payment_provider`
       and commit, returning `payment_url` to the guest, in
       `backend/internal/order/service.go` (depends on T025, T026)
-- [ ] T028 [US2] Implement the compensating transaction for gateway failure in
+- [x] T028 [US2] Implement the compensating transaction for gateway failure in
       `backend/internal/order/service.go`: set the order to `CANCELLED` and restore
       each line item's quota via `EventProvider.RestoreQuota` in one transaction,
       then return a `PAYMENT_INITIATION_FAILED` error (spec FR-021) (depends on
       T023, T026, T027)
-- [ ] T029 [US2] Generate a unique `order_number` (e.g., date-based + random
+- [x] T029 [US2] Generate a unique `order_number` (e.g., date-based + random
       suffix, checked against the `orders.order_number` unique constraint) in
       `backend/internal/order/service.go`
-- [ ] T030 [US2] Implement `POST /api/v1/checkout` handler with request validation
+- [x] T030 [US2] Implement `POST /api/v1/checkout` handler with request validation
       and error mapping (400 for validation/insufficient quota, 502 for
       `PAYMENT_INITIATION_FAILED`) in `backend/internal/order/handler.go`,
       registered in `backend/cmd/api/main.go` (depends on T027, T028)
-- [ ] T031 [P] [US2] Build `frontend/app/checkout/page.tsx`: ticket type quantity
+- [x] T031 [P] [US2] Build `frontend/app/checkout/page.tsx`: ticket type quantity
       selectors, buyer info form, dynamic per-attendee name/email fields (React
       Hook Form + Zod), submit to checkout endpoint, surface the 502 retry message
-- [ ] T032 [P] [US2] Build `frontend/app/orders/[orderNumber]/page.tsx` to redirect
+- [x] T032 [P] [US2] Build `frontend/app/orders/[orderNumber]/page.tsx` to redirect
       the guest to the returned `payment_url`
 
 **Checkpoint**: User Stories 1 AND 2 both work independently
@@ -194,13 +194,13 @@ land the order in `CANCELLED` with quota restored, and that `pending` /
 
 ### Implementation for User Story 3
 
-- [ ] T033 [P] [US3] Implement `payment` repository to append a `payments` row per
+- [x] T033 [P] [US3] Implement `payment` repository to append a `payments` row per
       notification received in `backend/internal/payment/repository.go`, storing the
       provider's **raw** `transaction_status` and full payload (so `deny` vs
       `failure` stays distinguishable even though both map to `CANCELLED`)
-- [ ] T034 [US3] Implement `VerifyWebhook` (Midtrans signature-key verification) in
+- [x] T034 [US3] Implement `VerifyWebhook` (Midtrans signature-key verification) in
       `backend/internal/payment/midtrans.go` (depends on T024)
-- [ ] T035 [US3] Implement the total provider-status → order-status mapping as a
+- [x] T035 [US3] Implement the total provider-status → order-status mapping as a
       pure function in `backend/internal/payment/status.go`, per the Payment Status
       Mapping table in spec.md: `settlement` → PAID; `capture`+`fraud_status=accept`
       → PAID; `capture`+`fraud_status=challenge` → remain PENDING (no quota change);
@@ -209,7 +209,7 @@ land the order in `CANCELLED` with quota restored, and that `pending` /
       `failure` → CANCELLED + restore. Unknown statuses return an explicit
       "unhandled" result that the handler logs loudly rather than silently ignoring
       (depends on T024)
-- [ ] T036 [US3] Implement `POST /api/v1/payment/webhook/:provider` handler in
+- [x] T036 [US3] Implement `POST /api/v1/payment/webhook/:provider` handler in
       `backend/internal/payment/handler.go`: verify signature (401 on failure),
       append the `payments` row, load order, short-circuit `200 OK` if already
       `PAID`, else apply the T035 mapping — for restoring outcomes open one
@@ -217,28 +217,28 @@ land the order in `CANCELLED` with quota restored, and that `pending` /
       and restores quota via `EventProvider.RestoreQuota` (so a replayed cancel
       cannot restore twice); always answer `200 OK` for authenticated notifications
       (depends on T021, T033, T034, T035)
-- [ ] T037 [P] [US3] Add `ticket` domain DTOs and repository (insert one ticket per
+- [x] T037 [P] [US3] Add `ticket` domain DTOs and repository (insert one ticket per
       attendee persisting **only** the unique `ticket_code`, leaving `qr_code_url`
       NULL per spec FR-022) in `backend/internal/ticket/dto.go` and
       `backend/internal/ticket/repository.go`
-- [ ] T038 [US3] Implement ticket code generation in
+- [x] T038 [US3] Implement ticket code generation in
       `backend/internal/ticket/service.go`: canonical form at write time —
       uppercase, fixed length, unambiguous charset excluding `I`, `O`, `0`, `1`
       (e.g. `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`), retried on the `ticket_code`
       unique-constraint violation. No QR image or URL is generated or stored here
       (depends on T037)
-- [ ] T039 [P] [US3] Implement PDF rendering (maroto/gofpdf, one PDF with all of an
+- [x] T039 [P] [US3] Implement PDF rendering (maroto/gofpdf, one PDF with all of an
       order's tickets) in `backend/internal/notification/pdf.go`, generating each
       QR **on demand** from the ticket's `ticket_code` with `go-qrcode` into an
       in-memory image embedded in the PDF — never read from or written to storage
-- [ ] T040 [P] [US3] Implement SMTP email dispatch in
+- [x] T040 [P] [US3] Implement SMTP email dispatch in
       `backend/internal/notification/smtp.go`
-- [ ] T041 [US3] Implement `notification` service `SendTicketEmail(order)`
+- [x] T041 [US3] Implement `notification` service `SendTicketEmail(order)`
       orchestrating PDF render + SMTP send + setting `orders.email_sent = true` in
       `backend/internal/notification/service.go`; it must be safely re-runnable for
       the admin resend path, re-rendering QR codes from the stored `ticket_code`
       (depends on T039, T040)
-- [ ] T042 [US3] Wire the webhook handler's Paid path to launch a non-blocking
+- [x] T042 [US3] Wire the webhook handler's Paid path to launch a non-blocking
       goroutine calling ticket generation (T038) then `SendTicketEmail` (T041),
       returning `200 OK` before that work completes, in
       `backend/internal/payment/handler.go` (depends on T036, T038, T041)
@@ -260,23 +260,23 @@ verify that hammering the endpoint trips the rate limit with `429`.
 
 ### Implementation for User Story 4
 
-- [ ] T043 [P] [US4] Implement ticket-by-code read query in
+- [x] T043 [P] [US4] Implement ticket-by-code read query in
       `backend/internal/ticket/repository.go` using an **exact** match
       (`WHERE ticket_code = $1`) so `idx_tickets_ticket_code` is used; never
       `UPPER(ticket_code) = UPPER($1)`, which would force a sequential scan since
       SCHEMA.md is locked and no functional index exists (depends on T037)
-- [ ] T044 [US4] Implement `GET /api/v1/tickets/:code` handler in
+- [x] T044 [US4] Implement `GET /api/v1/tickets/:code` handler in
       `backend/internal/ticket/handler.go`: normalize the input in Go (trim +
       uppercase) before the exact-match lookup, return only `ticket_code`,
       `status`, `event_name`, `attendee_name` (attendee email and all buyer data
       MUST be omitted — spec FR-016), flat 404 on not found; registered in
       `backend/cmd/api/main.go` (depends on T043)
-- [ ] T045 [US4] Apply per-IP rate limiting to the `GET /api/v1/tickets/:code`
+- [x] T045 [US4] Apply per-IP rate limiting to the `GET /api/v1/tickets/:code`
       route (Echo `middleware.RateLimiter` with the in-memory store — no Redis,
       which is out of scope per PRD.md §1.6), returning `429` over the limit, with
       the limit configurable via `backend/pkg/config/config.go`; registered in
       `backend/cmd/api/main.go` (spec FR-020) (depends on T044)
-- [ ] T046 [P] [US4] Build `frontend/app/tickets/[code]/page.tsx` ticket lookup
+- [x] T046 [P] [US4] Build `frontend/app/tickets/[code]/page.tsx` ticket lookup
       page
 
 **Checkpoint**: All four user stories independently functional
@@ -287,16 +287,16 @@ verify that hammering the endpoint trips the rate limit with `429`.
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T047 [P] Add structured error codes (e.g., `INSUFFICIENT_QUOTA`,
+- [x] T047 [P] Add structured error codes (e.g., `INSUFFICIENT_QUOTA`,
       `ATTENDEE_COUNT_MISMATCH`, `TICKET_TYPE_NOT_ON_SALE`,
       `PAYMENT_INITIATION_FAILED`, `RATE_LIMITED`) consistently across
       `order`/`event`/`ticket` handlers
-- [ ] T048 [P] Add request logging (order number, ticket code, webhook provider and
+- [x] T048 [P] Add request logging (order number, ticket code, webhook provider and
       raw provider status) across `order`/`payment`/`ticket` handlers using the
       logger from T010
-- [ ] T049 Run `quickstart.md` end-to-end against a local Docker Compose stack and
+- [x] T049 Run `quickstart.md` end-to-end against a local Docker Compose stack and
       fix any discrepancies found
-- [ ] T050 [P] Review all domain `dto.go` files to confirm no sqlc-generated
+- [x] T050 [P] Review all domain `dto.go` files to confirm no sqlc-generated
       struct is returned directly in any HTTP response (Constitution Principle III)
       and that no public response leaks attendee/buyer email or `qr_code_url`
 

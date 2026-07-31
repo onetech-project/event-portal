@@ -1,0 +1,60 @@
+# Single-binary Tempo with local storage.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Short flush windows so a trace is queryable seconds after the request, which
+  # is what makes this useful while developing.
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 48h
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /var/tempo/generator/traces
+  processor:
+    local_blocks:
+      filter_server_spans: false
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      # service-graphs and span-metrics turn traces into RED metrics
+      # (rate/errors/duration) automatically, so the dashboards get request
+      # statistics per endpoint without any extra application code.
+      processors:
+        - service-graphs
+        - span-metrics
+        - local-blocks
+
+usage_report:
+  reporting_enabled: false

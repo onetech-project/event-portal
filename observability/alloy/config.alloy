@@ -1,0 +1,130 @@
+// Grafana Alloy: the single collector every signal passes through.
+//
+// Traces arrive over OTLP from the API and are forwarded to Tempo. Container
+// stdout is discovered from the Docker socket and shipped to Loki. Keeping both
+// in one agent means the services only ever talk to Alloy, and swapping a
+// backend is a change here rather than in application config.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ---- Traces: OTLP in, Tempo out --------------------------------------------
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  // Batching keeps the export call count low; the timeout bounds how long a
+  // span waits when traffic is sparse, which matters most in local development.
+  timeout = "2s"
+
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// ---- Logs: Docker stdout in, Loki out --------------------------------------
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+// Container names arrive as "/name"; the label is rewritten so queries read
+// {container="ticketing-api"} rather than carrying the leading slash.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  labels     = { job = "docker" }
+  forward_to = [loki.process.app_logs.receiver]
+}
+
+loki.process "app_logs" {
+  // The API logs JSON, so trace_id and level are lifted out of the line. That is
+  // what lets Grafana jump from a log line straight to its trace, and what makes
+  // level a first-class filter instead of a substring match.
+  stage.json {
+    expressions = {
+      level    = "level",
+      trace_id = "trace_id",
+      service  = "service_name",
+    }
+  }
+
+  // Only low-cardinality values become labels. trace_id stays a field: promoting
+  // it would create a stream per request and melt Loki's index.
+  stage.labels {
+    values = {
+      level   = "",
+      service = "",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// ---- Metrics: scrape the API and hand off to Prometheus ---------------------
+
+prometheus.scrape "api" {
+  targets = [
+    { __address__ = "api:8080", job = "ticketing-api", __metrics_path__ = "/metrics" },
+  ]
+
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}

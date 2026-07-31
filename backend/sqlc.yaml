@@ -1,0 +1,67 @@
+version: "2"
+# One sqlc package per domain (Constitution Principle I/II): each domain generates
+# only the structs its own queries touch, so no domain compiles against another
+# domain's tables. Schema source is the single locked migration from SCHEMA.md.
+sql:
+  - &admin
+    engine: "postgresql"
+    schema: "migrations/0001_init.sql"
+    queries: "internal/admin/queries"
+    gen:
+      go: &gen
+        package: "adminsql"
+        out: "internal/admin/adminsql"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type: "github.com/google/uuid.NullUUID"
+          - db_type: "pg_catalog.numeric"
+            go_type: "github.com/shopspring/decimal.Decimal"
+          - db_type: "pg_catalog.numeric"
+            nullable: true
+            go_type: "github.com/shopspring/decimal.NullDecimal"
+          - db_type: "pg_catalog.timestamptz"
+            go_type: "time.Time"
+          - db_type: "pg_catalog.timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+  - <<: *admin
+    queries: "internal/event/queries"
+    gen:
+      go:
+        <<: *gen
+        package: "eventsql"
+        out: "internal/event/eventsql"
+
+  - <<: *admin
+    queries: "internal/order/queries"
+    gen:
+      go:
+        <<: *gen
+        package: "ordersql"
+        out: "internal/order/ordersql"
+
+  - <<: *admin
+    queries: "internal/payment/queries"
+    gen:
+      go:
+        <<: *gen
+        package: "paymentsql"
+        out: "internal/payment/paymentsql"
+
+  - <<: *admin
+    queries: "internal/ticket/queries"
+    gen:
+      go:
+        <<: *gen
+        package: "ticketsql"
+        out: "internal/ticket/ticketsql"

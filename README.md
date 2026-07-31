@@ -1,0 +1,145 @@
+# Event Ticketing MVP
+
+Guests browse events, buy tickets without an account, pay through a gateway, and
+receive QR tickets by email. Admins manage the catalog, watch sales, and validate
+tickets at the door.
+
+The authoritative specifications live in [PRD.md](PRD.md),
+[ARCHITECTURE.md](ARCHITECTURE.md), [SCHEMA.md](SCHEMA.md), and
+[.specify/memory/constitution.md](.specify/memory/constitution.md), with per-feature
+specs under [specs/](specs/).
+
+## Layout
+
+```
+backend/     Go modular monolith (Echo v4, sqlc, pgx)
+  cmd/api/          entry point, routing, and the ONLY place domains meet
+  cmd/seedadmin/    creates a local admin account
+  internal/         one package per domain: admin, event, order, payment,
+                    ticket, notification
+  pkg/              shared non-domain utilities (db, config, logger, money, …)
+  migrations/       SQL schema, verbatim from SCHEMA.md
+frontend/    Next.js App Router, TypeScript, TailwindCSS, TanStack Query
+```
+
+Each domain owns its tables and exposes `dto.go`, `repository.go`, `service.go`,
+and `handler.go`. Domains never import one another: a domain declares the
+interface it needs from its neighbours, and `cmd/api/adapters.go` connects them.
+`cmd/api/architecture_test.go` enforces that automatically.
+
+## Running it
+
+Everything in containers:
+
+```bash
+docker compose up -d          # Postgres, API (:8080), frontend (:3000), Mailpit (:8025)
+docker compose exec api /app/seedadmin -email admin@example.com -password 'a-strong-password'
+```
+
+Or the app locally against a containerised database:
+
+```bash
+docker compose up -d postgres
+cp backend/.env.example backend/.env     # loaded automatically by godotenv
+cd backend
+go run ./cmd/seedadmin -email admin@example.com -password 'a-strong-password'
+go run ./cmd/api                          # :8080
+
+cd ../frontend
+npm install
+cp .env.example .env.local
+npm run dev                               # :3000
+```
+
+Guests start at `/events`; admins sign in at `/admin/login`.
+
+Host ports are configurable — `API_PORT`, `FRONTEND_PORT`, `POSTGRES_PORT` — so the
+stack can coexist with a server you are already running locally.
+
+## Observability
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+| | |
+|---|---|
+| Grafana | http://localhost:3001 (anonymous admin, local only) |
+| Prometheus | http://localhost:9090 |
+| Alloy pipeline UI | http://localhost:12345 |
+
+Grafana arrives with all three datasources and a **Ticketing API — Overview**
+dashboard already provisioned.
+
+```
+API  --OTLP-->  Alloy  -->  Tempo         traces (HTTP spans + every SQL query)
+API  --stdout-->  Alloy  -->  Loki        JSON logs, labelled by level and service
+API  <--scrape--  Prometheus              RED metrics + Go runtime stats
+```
+
+The three signals are joined, which is the point of running all of them:
+
+- Every log line emitted during a request carries `trace_id` and `span_id`, so a
+  Loki line links straight to its trace in Tempo.
+- Tempo links back to the log lines for a trace, and to its request-rate metrics.
+- Prometheus exemplars carry a trace id, so a latency spike on a graph is one
+  click from the trace that caused it.
+
+Traces cover the database too: `pool.acquire` and per-query spans nest under the
+HTTP span, so a slow checkout is attributed to a statement rather than guessed at.
+
+Without this stack the app runs unchanged — `OTEL_EXPORTER_OTLP_ENDPOINT` is empty
+by default, tracing installs a no-op provider, and incoming trace context is still
+propagated.
+
+## Docker images
+
+Both are multi-stage.
+
+- **Backend** — static binary built with `CGO_ENABLED=0`, shipped on
+  `distroless/static` as a non-root user. No shell, no package manager, ~37 MB.
+- **Frontend** — Next.js `output: "standalone"`, so the runtime stage carries only
+  the traced `node_modules` and `server.js` and never runs an install. Note that
+  `NEXT_PUBLIC_API_BASE_URL` is inlined at *build* time, so changing it needs a
+  rebuild, not a restart.
+
+## Tests
+
+```bash
+cd backend && ./scripts/test.sh ./...   # Go: unit + database-backed
+cd frontend && npx vitest run           # TypeScript: logic + components
+```
+
+The Go suite talks to a real PostgreSQL. `scripts/test.sh` points at a
+`ticketing_test` database and runs packages one at a time, since each truncates the
+shared schema on setup. Database-backed tests skip themselves when
+`TEST_DATABASE_URL` is unset, so the suite still runs on a bare checkout:
+
+```bash
+cd backend && ./scripts/setup-test-db.sh
+```
+
+## Things worth knowing before changing anything
+
+- **`ticket_types.quota` is the REMAINING quota**, not an original allocation.
+  Checkout decrements it; cancel, expire, deny, and failure restore it. There is
+  no stored total, and `sold` is always derived from `SUM(order_items.quantity)`.
+- **Checkout is TX1 → gateway → TX2.** Order, items, attendees, and the quota
+  deduction commit together; the provider call happens outside any transaction
+  (holding a quota row lock across a network round trip would serialize every
+  concurrent buyer), and a failed call is compensated by cancelling the order and
+  restoring its quota.
+- **The webhook is idempotent.** An already-`PAID` order short-circuits, and every
+  status change is guarded on the order still being `PENDING`, so a replayed
+  notification cannot restore quota twice.
+- **No object storage exists.** `tickets.qr_code_url` stays NULL and QR images are
+  rendered on demand from `ticket_code`; `events.banner_url` is a plain URL an
+  admin supplies.
+- **SCHEMA.md is locked.** Ticket-code lookups are exact matches against the
+  existing index — normalize the input, never wrap the column in `UPPER()`.
+
+## Local end-to-end runs
+
+`MIDTRANS_BASE_URL` overrides the SNAP endpoint, so the whole purchase flow —
+checkout, webhook, ticket generation, email — can be exercised against a stub
+gateway and a local SMTP catcher without touching the network.
