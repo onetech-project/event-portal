@@ -7,6 +7,9 @@ import "strings"
 // Order statuses this mapping can produce. They match the CHECK constraint on
 // orders.status in SCHEMA.md, which is LOCKED.
 const (
+	// OrderStatusPending is the only status an order can transition out of. Every
+	// path that moves an order guards on it.
+	OrderStatusPending   = "PENDING"
 	OrderStatusPaid      = "PAID"
 	OrderStatusCancelled = "CANCELLED"
 	OrderStatusExpired   = "EXPIRED"

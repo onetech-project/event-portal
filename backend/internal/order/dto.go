@@ -41,12 +41,72 @@ type CheckoutRequest struct {
 	Attendees  []CheckoutAttendee `json:"attendees"`
 }
 
-// OrderResponse is the 201 body returned once the payment URL exists.
+// OrderResponse is the 201 body returned once the payment session exists.
+//
+// PaymentURL is retained for compatibility and audit only: the guest is no
+// longer sent anywhere, they are routed in-app to the order page, which renders
+// the QR itself (spec FR-009).
 type OrderResponse struct {
 	OrderNumber string      `json:"order_number"`
 	Status      string      `json:"status"`
 	TotalAmount money.Money `json:"total_amount"`
 	PaymentURL  string      `json:"payment_url"`
+}
+
+// PublicOrderEvent names the event an order belongs to. The slug is what lets an
+// expired order offer a way back to buy again.
+type PublicOrderEvent struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+// PublicOrderItem is one purchased line on the guest's own order page.
+type PublicOrderItem struct {
+	TicketTypeName string      `json:"ticket_type_name"`
+	Quantity       int32       `json:"quantity"`
+	UnitPrice      money.Money `json:"unit_price"`
+	Subtotal       money.Money `json:"subtotal"`
+}
+
+// PaymentInstruction is everything the guest needs in order to pay, and nothing
+// else. It is present only while the order is actually payable — see
+// PublicOrderDetail.Payment.
+type PaymentInstruction struct {
+	// Method is the payment instrument, not the provider: what the guest is
+	// looking at is a QRIS code regardless of who acquires it.
+	Method   string      `json:"method"`
+	Provider string      `json:"provider"`
+	Amount   money.Money `json:"amount"`
+	// ExpiresAt is the server's deadline. Paired with PublicOrderDetail.ServerTime
+	// it lets the client render a countdown that a wrong device clock cannot skew.
+	ExpiresAt time.Time `json:"expires_at"`
+	// QRImagePath is where the QR is rendered on demand. A path rather than a
+	// full URL so the client stays origin-agnostic.
+	QRImagePath string `json:"qr_image_path"`
+}
+
+// PublicOrderDetail is the guest's own view of an order
+// (GET /api/v1/orders/:orderNumber).
+//
+// It is unauthenticated and keyed only by order number, so what it omits matters
+// as much as what it carries: no ticket codes, no attendee list, no provider
+// transaction id, nothing about any other order (spec FR-022).
+type PublicOrderDetail struct {
+	OrderNumber string            `json:"order_number"`
+	Status      string            `json:"status"`
+	TotalAmount money.Money       `json:"total_amount"`
+	BuyerName   string            `json:"buyer_name"`
+	BuyerEmail  string            `json:"buyer_email"`
+	CreatedAt   *time.Time        `json:"created_at"`
+	Event       PublicOrderEvent  `json:"event"`
+	Items       []PublicOrderItem `json:"items"`
+	// ServerTime is this response's clock reading. The client offsets its own
+	// clock by the difference before counting down (spec FR-012, SC-005).
+	ServerTime time.Time `json:"server_time"`
+	// Payment is nil unless the order is genuinely payable: PENDING, with an
+	// instruction recorded, and not past its deadline. A client must render a QR
+	// only when this is present (spec FR-014).
+	Payment *PaymentInstruction `json:"payment"`
 }
 
 // OrderSummary is an admin read-only order row (GET /api/v1/admin/orders).

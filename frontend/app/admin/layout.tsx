@@ -1,17 +1,11 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { AdminNav } from "@/components/admin/admin-nav";
 import { Loading } from "@/components/ui/feedback";
-import { isAuthenticated } from "@/lib/auth";
-
-/** Re-reads the token when another tab signs in or out. */
-function subscribeToAuth(onChange: () => void) {
-  window.addEventListener("storage", onChange);
-  return () => window.removeEventListener("storage", onChange);
-}
+import { readSession, subscribeToSession, type SessionState } from "@/lib/auth";
 
 /**
  * Guards every /admin/* page except login.
@@ -19,32 +13,42 @@ function subscribeToAuth(onChange: () => void) {
  * This is a convenience redirect, not a security boundary — the API rejects any
  * request without a valid token regardless of what the browser renders.
  *
- * The token lives in localStorage, which does not exist during the server
- * render, so it is read through useSyncExternalStore with an unauthenticated
- * server snapshot; the real value arrives at hydration.
+ * The session lives in localStorage, which does not exist during the server
+ * render *or* during hydration, so it is resolved in an effect that runs after
+ * mount. Until then the state is "loading" and nothing redirects. Reading it
+ * any earlier is what made every refresh bounce to the login screen: the first
+ * client render necessarily sees no session, and a redirect fired from that
+ * render never gives the real value a chance to arrive.
  */
 export default function AdminLayout({ children }: Readonly<{ children: ReactNode }>) {
   const pathname = usePathname();
   const router = useRouter();
   const isLoginPage = pathname === "/admin/login";
 
-  const authed = useSyncExternalStore(
-    subscribeToAuth,
-    () => isAuthenticated(),
-    () => false,
-  );
+  const [session, setSession] = useState<SessionState>({ status: "loading" });
 
   useEffect(() => {
-    if (!isLoginPage && !authed) {
-      router.replace("/admin/login");
-    }
-  }, [authed, isLoginPage, router]);
+    const sync = () => setSession(readSession());
+    sync();
+    // Covers a sign-out in this tab and in any other one.
+    return subscribeToSession(sync);
+  }, []);
+
+  useEffect(() => {
+    if (isLoginPage || session.status !== "anonymous") return;
+
+    // Remember where they were headed so signing in does not dump them on the
+    // admin home, and say why the session ended when we know.
+    const params = new URLSearchParams({ next: pathname });
+    if (session.reason === "expired") params.set("reason", "expired");
+    router.replace(`/admin/login?${params.toString()}`);
+  }, [session, isLoginPage, pathname, router]);
 
   if (isLoginPage) {
     return <>{children}</>;
   }
 
-  if (!authed) {
+  if (session.status !== "authenticated") {
     return <Loading label="Checking your session…" />;
   }
 

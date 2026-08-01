@@ -4,7 +4,8 @@
 INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_amount, status)
 VALUES ($1, $2, $3, $4, $5, 'PENDING')
 RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-          payment_provider, payment_url, email_sent, created_at, updated_at;
+          payment_provider, payment_url, email_sent, created_at, updated_at,
+          payment_qr_string, payment_expires_at;
 
 -- name: CreateOrderItem :one
 INSERT INTO order_items (order_id, ticket_type_id, quantity, price)
@@ -21,9 +22,16 @@ SELECT EXISTS (SELECT 1 FROM orders WHERE order_number = $1) AS taken;
 
 -- Payment lifecycle --------------------------------------------------------
 
+-- Stamps everything the guest's payment page needs: the provider's QR-image URL
+-- (audit/fallback), the raw QRIS payload the image is rendered from, and the
+-- deadline the countdown and the expiry sweeper both read.
 -- name: UpdatePaymentDetails :execrows
 UPDATE orders
-SET payment_url = $2, payment_provider = $3, updated_at = now()
+SET payment_url = $2,
+    payment_provider = $3,
+    payment_qr_string = $4,
+    payment_expires_at = $5,
+    updated_at = now()
 WHERE id = $1;
 
 -- name: UpdateOrderStatusIfPending :execrows
@@ -38,17 +46,34 @@ UPDATE orders SET email_sent = TRUE, updated_at = now() WHERE id = $1;
 
 -- Reads --------------------------------------------------------------------
 
+-- The trailing two columns are listed in migration order (0002 appended them
+-- after updated_at), which is what lets sqlc reuse the single Order struct
+-- instead of emitting a near-identical row type per query.
 -- name: GetOrderByID :one
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at
+       payment_provider, payment_url, email_sent, created_at, updated_at,
+       payment_qr_string, payment_expires_at
 FROM orders
 WHERE id = $1;
 
 -- name: GetOrderByNumber :one
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at
+       payment_provider, payment_url, email_sent, created_at, updated_at,
+       payment_qr_string, payment_expires_at
 FROM orders
 WHERE order_number = $1;
+
+-- Orders whose payment deadline has passed but which nothing has moved yet.
+-- Oldest first, so the longest-held quota is released soonest. Uses the partial
+-- index idx_orders_payment_expiry, which covers exactly this predicate.
+-- name: ListOrdersDueForExpiry :many
+SELECT id, order_number, status, payment_expires_at
+FROM orders
+WHERE status = 'PENDING'
+  AND payment_expires_at IS NOT NULL
+  AND payment_expires_at <= $1
+ORDER BY payment_expires_at
+LIMIT $2;
 
 -- name: ListOrderItemsByOrderID :many
 SELECT id, order_id, ticket_type_id, quantity, price

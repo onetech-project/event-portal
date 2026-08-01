@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// minPaymentExpiry is the floor the payment provider itself documents: below 15
+// minutes its expiry scheduler stops expiring transactions reliably, which would
+// leave a code payable after the countdown we showed the guest hit zero.
+const minPaymentExpiry = 15 * time.Minute
+
 // Config holds every setting the API needs. Values are read once at startup so a
 // misconfigured deployment fails fast rather than at first request.
 type Config struct {
@@ -25,10 +30,20 @@ type Config struct {
 	MidtransServerKey    string
 	MidtransClientKey    string
 	MidtransIsProduction bool
-	// MidtransBaseURL overrides the SNAP endpoint. Left empty it is derived from
-	// MidtransIsProduction; setting it lets local and CI runs point at a stub
+	// MidtransBaseURL overrides the Core API endpoint. Left empty it is derived
+	// from MidtransIsProduction; setting it lets local and CI runs point at a stub
 	// gateway so the full purchase flow can be exercised without the network.
 	MidtransBaseURL string
+
+	// PaymentExpiry is how long a QRIS code stays payable. The provider's own
+	// expiry scheduler is only reliable at 15 minutes or more, so anything shorter
+	// is rejected outright rather than silently producing codes that outlive the
+	// deadline we show the guest.
+	PaymentExpiry time.Duration
+	// PaymentSweepInterval is how often abandoned orders past their deadline are
+	// expired and their quota returned. It bounds how stale quota can get when no
+	// provider notification arrives.
+	PaymentSweepInterval time.Duration
 
 	SMTPHost     string
 	SMTPPort     int
@@ -147,6 +162,9 @@ func Load() (*Config, error) {
 		MidtransIsProduction: l.boolean("MIDTRANS_IS_PRODUCTION", false),
 		MidtransBaseURL:      l.str("MIDTRANS_BASE_URL", ""),
 
+		PaymentExpiry:        l.duration("PAYMENT_EXPIRY", 15*time.Minute),
+		PaymentSweepInterval: l.duration("PAYMENT_SWEEP_INTERVAL", 30*time.Second),
+
 		SMTPHost:     l.str("SMTP_HOST", "localhost"),
 		SMTPPort:     l.integer("SMTP_PORT", 1025),
 		SMTPUsername: l.str("SMTP_USERNAME", ""),
@@ -165,6 +183,19 @@ func Load() (*Config, error) {
 		// hides exactly the rare failure you went looking for.
 		TraceSampleRatio: l.float("OTEL_TRACES_SAMPLER_ARG", 1.0),
 		MetricsEnabled:   l.boolean("METRICS_ENABLED", true),
+	}
+
+	// Checked after loading rather than inside the duration helper: a bad value
+	// must be reported alongside every other configuration problem, not instead of
+	// them.
+	if cfg.PaymentExpiry < minPaymentExpiry {
+		l.errs = append(l.errs, fmt.Errorf(
+			"PAYMENT_EXPIRY must be at least %s (the payment provider's expiry scheduler is unreliable below that), got %s",
+			minPaymentExpiry, cfg.PaymentExpiry))
+	}
+	if cfg.PaymentSweepInterval <= 0 {
+		l.errs = append(l.errs, fmt.Errorf(
+			"PAYMENT_SWEEP_INTERVAL must be positive, got %s", cfg.PaymentSweepInterval))
 	}
 
 	if len(l.errs) > 0 {

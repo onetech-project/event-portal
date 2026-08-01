@@ -152,6 +152,36 @@ func (r *Repository) TicketTypeNamesByIDs(ctx context.Context, ids []uuid.UUID) 
 	return names, nil
 }
 
+// TicketTypeDisplayRecord labels one ticket type with the event it belongs to.
+type TicketTypeDisplayRecord struct {
+	TicketTypeName string
+	EventName      string
+	EventSlug      string
+}
+
+// TicketTypeDisplaysByIDs resolves ticket type ids to their display labels and
+// owning event in one query. The order domain uses it to title a guest's order
+// page without JOINing ticket_types/events itself — tables it does not own.
+func (r *Repository) TicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeDisplayRecord, error) {
+	displays := make(map[uuid.UUID]TicketTypeDisplayRecord, len(ids))
+	if len(ids) == 0 {
+		return displays, nil
+	}
+
+	rows, err := r.queries.ListTicketTypeDisplaysByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list ticket type displays: %w", err)
+	}
+	for _, row := range rows {
+		displays[row.ID] = TicketTypeDisplayRecord{
+			TicketTypeName: row.Name,
+			EventName:      row.EventName,
+			EventSlug:      row.EventSlug,
+		}
+	}
+	return displays, nil
+}
+
 // DeleteTicketTypesByEventID removes an event's ticket types inside the caller's
 // transaction. ticket_types.event_id is ON DELETE RESTRICT, so this must happen
 // before the event row itself can be deleted.

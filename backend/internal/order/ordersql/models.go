@@ -20,18 +20,20 @@ type Attendee struct {
 }
 
 type Order struct {
-	ID              uuid.UUID
-	OrderNumber     string
-	BuyerName       string
-	BuyerEmail      string
-	BuyerPhone      string
-	TotalAmount     decimal.Decimal
-	Status          string
-	PaymentProvider *string
-	PaymentUrl      *string
-	EmailSent       *bool
-	CreatedAt       *time.Time
-	UpdatedAt       *time.Time
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        string
+	BuyerEmail       string
+	BuyerPhone       string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
 }
 
 type OrderItem struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,12 +23,26 @@ import (
 type stubGateway struct {
 	result *payment.WebhookResult
 	err    error
+	// statusResult/statusErr let a test make a provider status read differ from
+	// what its webhook says — the case reconciliation exists for.
+	statusResult *payment.WebhookResult
+	statusErr    error
 }
 
 func (g *stubGateway) Name() string { return "midtrans" }
 
-func (g *stubGateway) CreateTransaction(context.Context, payment.TransactionRequest) (string, error) {
-	return "", errors.New("not used in these tests")
+func (g *stubGateway) CreateTransaction(context.Context, payment.TransactionRequest) (payment.PaymentSession, error) {
+	return payment.PaymentSession{}, errors.New("not used in these tests")
+}
+
+func (g *stubGateway) FetchStatus(context.Context, string) (*payment.WebhookResult, error) {
+	if g.statusErr != nil {
+		return nil, g.statusErr
+	}
+	if g.statusResult != nil {
+		return g.statusResult, nil
+	}
+	return g.result, g.err
 }
 
 func (g *stubGateway) VerifyWebhook([]byte, string) (*payment.WebhookResult, error) {
@@ -49,7 +64,29 @@ func (a orderAdapter) OrderByNumber(ctx context.Context, number string) (payment
 	if err != nil {
 		return payment.OrderRef{}, err
 	}
-	return payment.OrderRef{ID: rec.ID, OrderNumber: rec.OrderNumber, Status: rec.Status}, nil
+	return payment.OrderRef{
+		ID:               rec.ID,
+		OrderNumber:      rec.OrderNumber,
+		Status:           rec.Status,
+		PaymentExpiresAt: rec.PaymentExpiresAt,
+	}, nil
+}
+
+func (a orderAdapter) DueForExpiry(ctx context.Context, now time.Time, limit int32) ([]payment.OrderRef, error) {
+	candidates, err := a.repo.ListOrdersDueForExpiry(ctx, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]payment.OrderRef, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, payment.OrderRef{
+			ID:               candidate.ID,
+			OrderNumber:      candidate.OrderNumber,
+			Status:           candidate.Status,
+			PaymentExpiresAt: candidate.PaymentExpiresAt,
+		})
+	}
+	return out, nil
 }
 
 func (a orderAdapter) LineItems(ctx context.Context, orderID uuid.UUID) ([]payment.LineItem, error) {

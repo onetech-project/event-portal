@@ -5,7 +5,11 @@ version: "2"
 sql:
   - &admin
     engine: "postgresql"
-    schema: "migrations/0001_init.sql"
+    # Every migration, in order: sqlc replays them to build the schema it
+    # generates against, so omitting one silently hides its columns.
+    schema:
+      - "migrations/0001_init.sql"
+      - "migrations/0002_payment_qris.sql"
     queries: "internal/admin/queries"
     gen:
       go: &gen

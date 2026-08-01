@@ -21,6 +21,11 @@ docker exec "$CONTAINER" psql -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS
 docker exec "$CONTAINER" psql -U "$USER" -d postgres -c "CREATE DATABASE $DB OWNER $USER;" > /dev/null
 
 echo "applying migrations…"
-docker exec -i "$CONTAINER" psql -U "$USER" -d "$DB" -q < migrations/0001_init.sql
+# Every migration in filename order, the same order Postgres runs them in from
+# docker-entrypoint-initdb.d — adding a migration must not mean editing this.
+for migration in migrations/*.sql; do
+  echo "  $(basename "$migration")"
+  docker exec -i "$CONTAINER" psql -U "$USER" -d "$DB" -q -v ON_ERROR_STOP=1 < "$migration"
+done
 
 echo "$DB is ready."

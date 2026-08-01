@@ -47,7 +47,10 @@ export function AdminNav() {
           variant="ghost"
           className="ml-auto"
           onClick={() => {
-            clearToken();
+            // clearToken notifies this tab as well as the others, so the guard
+            // above stops rendering admin content immediately rather than
+            // waiting for the navigation to land.
+            clearToken("signed-out");
             router.replace("/admin/login");
           }}
         >

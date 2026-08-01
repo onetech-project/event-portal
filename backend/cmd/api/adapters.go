@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -59,7 +60,7 @@ type gatewayAdapter struct{ gateway payment.Gateway }
 
 func (a gatewayAdapter) Name() string { return a.gateway.Name() }
 
-func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.PaymentRequest) (string, error) {
+func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.PaymentRequest) (order.PaymentSession, error) {
 	items := make([]payment.TransactionItem, 0, len(req.Items))
 	for _, item := range req.Items {
 		items = append(items, payment.TransactionItem{
@@ -67,7 +68,7 @@ func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.Payment
 		})
 	}
 
-	return a.gateway.CreateTransaction(ctx, payment.TransactionRequest{
+	session, err := a.gateway.CreateTransaction(ctx, payment.TransactionRequest{
 		OrderNumber:   req.OrderNumber,
 		GrossAmount:   req.GrossAmount,
 		CustomerName:  req.CustomerName,
@@ -75,6 +76,17 @@ func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.Payment
 		CustomerPhone: req.CustomerPhone,
 		Items:         items,
 	})
+	if err != nil {
+		return order.PaymentSession{}, err
+	}
+
+	return order.PaymentSession{
+		ProviderRef: session.ProviderRef,
+		QRString:    session.QRString,
+		QRImageURL:  session.QRImageURL,
+		ExpiresAt:   session.ExpiresAt,
+		RedirectURL: session.RedirectURL,
+	}, nil
 }
 
 // --- payment.OrderProvider: the webhook's view of the order domain ---------
@@ -89,7 +101,30 @@ func (a paymentOrderAdapter) OrderByNumber(ctx context.Context, orderNumber stri
 	if err != nil {
 		return payment.OrderRef{}, err
 	}
-	return payment.OrderRef{ID: rec.ID, OrderNumber: rec.OrderNumber, Status: rec.Status}, nil
+	return payment.OrderRef{
+		ID:               rec.ID,
+		OrderNumber:      rec.OrderNumber,
+		Status:           rec.Status,
+		PaymentExpiresAt: rec.PaymentExpiresAt,
+	}, nil
+}
+
+func (a paymentOrderAdapter) DueForExpiry(ctx context.Context, now time.Time, limit int32) ([]payment.OrderRef, error) {
+	candidates, err := a.orders.ListOrdersDueForExpiry(ctx, now, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]payment.OrderRef, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, payment.OrderRef{
+			ID:               candidate.ID,
+			OrderNumber:      candidate.OrderNumber,
+			Status:           candidate.Status,
+			PaymentExpiresAt: candidate.PaymentExpiresAt,
+		})
+	}
+	return out, nil
 }
 
 func (a paymentOrderAdapter) LineItems(ctx context.Context, orderID uuid.UUID) ([]payment.LineItem, error) {
@@ -171,4 +206,21 @@ func (a orderEventLookupAdapter) TicketTypeNames(ctx context.Context, ids []uuid
 
 func (a orderEventLookupAdapter) TicketTypeIDsForEvent(ctx context.Context, eventID uuid.UUID) ([]uuid.UUID, error) {
 	return a.events.TicketTypeIDsForEvent(ctx, eventID)
+}
+
+func (a orderEventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]order.TicketTypeDisplay, error) {
+	records, err := a.events.TicketTypeDisplays(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	displays := make(map[uuid.UUID]order.TicketTypeDisplay, len(records))
+	for id, record := range records {
+		displays[id] = order.TicketTypeDisplay{
+			TicketTypeName: record.TicketTypeName,
+			EventName:      record.EventName,
+			EventSlug:      record.EventSlug,
+		}
+	}
+	return displays, nil
 }

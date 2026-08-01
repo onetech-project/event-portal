@@ -91,9 +91,12 @@ export async function adminFetch<T>(
     });
   } catch (error) {
     // Drop a token the server has rejected, so the next navigation goes to the
-    // login screen instead of retrying a credential that will never work.
+    // login screen instead of retrying a credential that will never work. It is
+    // recorded as an expiry: from the admin's side a token the server refuses is
+    // indistinguishable from one that timed out, and that is the more useful
+    // thing to tell them.
     if (error instanceof ApiError && error.status === 401) {
-      clearToken();
+      clearToken("expired");
     }
     throw error;
   }

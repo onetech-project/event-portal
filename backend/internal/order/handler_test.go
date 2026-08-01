@@ -25,7 +25,7 @@ func newCheckoutAPI(t *testing.T) (*echo.Echo, checkoutFixture) {
 
 	e := echo.New()
 	e.HTTPErrorHandler = httpx.ErrorHandler(testsupport.DiscardLogger())
-	order.NewHandler(f.svc, testsupport.DiscardLogger()).RegisterPublicRoutes(e.Group("/api/v1"))
+	order.NewHandler(f.svc, f.public, testsupport.DiscardLogger()).RegisterPublicRoutes(e.Group("/api/v1"))
 	return e, f
 }
 

@@ -43,7 +43,52 @@ export type OrderResponse = {
   order_number: string;
   status: string;
   total_amount: string;
+  /**
+   * Retained for audit only. The guest is routed in-app to `/orders/{number}`;
+   * nothing navigates here.
+   */
   payment_url: string;
+};
+
+export type OrderStatus = "PENDING" | "PAID" | "CANCELLED" | "EXPIRED";
+
+export type PaymentInstruction = {
+  method: string;
+  provider: string;
+  amount: string;
+  /** Server-owned deadline; the countdown is rendered against it. */
+  expires_at: string;
+  /** Path the QR image is rendered from, on demand. */
+  qr_image_path: string;
+};
+
+export type PublicOrderItem = {
+  ticket_type_name: string;
+  quantity: number;
+  unit_price: string;
+  subtotal: string;
+};
+
+export type PublicOrderDetail = {
+  order_number: string;
+  status: OrderStatus;
+  total_amount: string;
+  buyer_name: string;
+  buyer_email: string;
+  created_at: string | null;
+  event: { name: string; slug: string };
+  items: PublicOrderItem[];
+  /** The server's clock at response time, used to correct a wrong device clock. */
+  server_time: string;
+  /** Present only while the order is genuinely payable. */
+  payment: PaymentInstruction | null;
+};
+
+export type PaymentRefreshResponse = {
+  order_number: string;
+  status: OrderStatus;
+  changed: boolean;
+  checked_at: string;
 };
 
 export type PublicTicket = {

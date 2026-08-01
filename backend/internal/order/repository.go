@@ -38,6 +38,12 @@ type OrderRecord struct {
 	PaymentURL      *string
 	EmailSent       *bool
 	CreatedAt       *time.Time
+	// PaymentQRString and PaymentExpiresAt are nil for orders created before the
+	// in-app QRIS flow, and for any order whose charge never completed. Readers
+	// must treat nil as "no payment instruction" rather than rendering an empty
+	// code.
+	PaymentQRString  *string
+	PaymentExpiresAt *time.Time
 }
 
 // OrderItemRecord is the internal view of an order_items row.
@@ -139,12 +145,36 @@ func (r *Repository) OrderNumberExists(ctx context.Context, orderNumber string) 
 
 // --- Payment lifecycle ----------------------------------------------------
 
-// UpdatePaymentDetails stamps the gateway's payment URL and provider (TX2).
-func (r *Repository) UpdatePaymentDetails(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, paymentURL, provider string) error {
+// PaymentDetails is what TX2 stamps onto an order once the gateway has opened a
+// payment session: where the provider hosts the QR image, the payload the image
+// is rendered from, and when the whole thing stops being payable.
+type PaymentDetails struct {
+	PaymentURL string
+	Provider   string
+	QRString   string
+	ExpiresAt  time.Time
+}
+
+// UpdatePaymentDetails stamps the gateway's payment details onto the order (TX2).
+func (r *Repository) UpdatePaymentDetails(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, details PaymentDetails) error {
+	// Zero values are stored as NULL rather than as an empty string or the zero
+	// time: a reader must be able to tell "no payment instruction" from one that
+	// happens to be blank, because it decides whether a QR is shown at all.
+	var qrString *string
+	if details.QRString != "" {
+		qrString = &details.QRString
+	}
+	var expiresAt *time.Time
+	if !details.ExpiresAt.IsZero() {
+		expiresAt = &details.ExpiresAt
+	}
+
 	affected, err := r.queries.WithTx(tx).UpdatePaymentDetails(ctx, ordersql.UpdatePaymentDetailsParams{
-		ID:              orderID,
-		PaymentUrl:      &paymentURL,
-		PaymentProvider: &provider,
+		ID:               orderID,
+		PaymentUrl:       &details.PaymentURL,
+		PaymentProvider:  &details.Provider,
+		PaymentQrString:  qrString,
+		PaymentExpiresAt: expiresAt,
 	})
 	if err != nil {
 		return fmt.Errorf("update payment details: %w", err)
@@ -153,6 +183,41 @@ func (r *Repository) UpdatePaymentDetails(ctx context.Context, tx pgx.Tx, orderI
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ExpiryCandidate is a PENDING order whose payment deadline has passed.
+type ExpiryCandidate struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	Status           string
+	PaymentExpiresAt *time.Time
+}
+
+// ListOrdersDueForExpiry returns orders past their payment deadline that nothing
+// has moved yet, oldest first, capped at limit.
+//
+// It is deliberately a read: the transition itself runs through the same guarded
+// update every other path uses, so a sweep that races a webhook cannot restore
+// the same quota twice.
+func (r *Repository) ListOrdersDueForExpiry(ctx context.Context, now time.Time, limit int32) ([]ExpiryCandidate, error) {
+	rows, err := r.queries.ListOrdersDueForExpiry(ctx, ordersql.ListOrdersDueForExpiryParams{
+		PaymentExpiresAt: &now,
+		Limit:            limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list orders due for expiry: %w", err)
+	}
+
+	out := make([]ExpiryCandidate, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, ExpiryCandidate{
+			ID:               row.ID,
+			OrderNumber:      row.OrderNumber,
+			Status:           row.Status,
+			PaymentExpiresAt: row.PaymentExpiresAt,
+		})
+	}
+	return out, nil
 }
 
 // UpdateOrderStatusIfPending applies a status transition only while the order is
@@ -334,6 +399,9 @@ func toOrderRecord(row ordersql.Order) OrderRecord {
 		PaymentURL:      row.PaymentUrl,
 		EmailSent:       row.EmailSent,
 		CreatedAt:       row.CreatedAt,
+
+		PaymentQRString:  row.PaymentQrString,
+		PaymentExpiresAt: row.PaymentExpiresAt,
 	}
 }
 

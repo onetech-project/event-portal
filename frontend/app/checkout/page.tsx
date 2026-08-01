@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo } from "react";
 import { useForm } from "react-hook-form";
 
@@ -38,6 +38,7 @@ function parseSelection(params: URLSearchParams): { ticketTypeId: string; quanti
 
 function CheckoutForm() {
   const params = useSearchParams();
+  const router = useRouter();
   const slug = params.get("slug") ?? "";
   const selection = useMemo(() => parseSelection(params), [params]);
 
@@ -67,12 +68,13 @@ function CheckoutForm() {
     },
   });
 
-  // The payment URL is on another origin, so a client-side route push will not do.
+  // The guest stays on the site: the order page shows the QRIS code and updates
+  // itself when the payment lands (spec FR-009).
   useEffect(() => {
-    if (checkout.data?.payment_url) {
-      window.location.href = checkout.data.payment_url;
+    if (checkout.data?.order_number) {
+      router.replace(`/orders/${encodeURIComponent(checkout.data.order_number)}`);
     }
-  }, [checkout.data]);
+  }, [checkout.data, router]);
 
   const nameOf = (ticketTypeId: string) =>
     event?.ticket_types.find((t) => t.id === ticketTypeId)?.name ?? "Ticket";

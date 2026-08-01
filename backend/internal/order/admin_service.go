@@ -10,7 +10,17 @@ import (
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
 
-// EventLookup is the contract the admin read views need from the event domain,
+// TicketTypeDisplay is everything the order views need to label a line: the
+// ticket type's own name plus the event it belongs to. The order domain holds
+// only the ticket type id, and both other values live in tables the event domain
+// owns.
+type TicketTypeDisplay struct {
+	TicketTypeName string
+	EventName      string
+	EventSlug      string
+}
+
+// EventLookup is the contract the order read views need from the event domain,
 // declared here by its consumer (ARCHITECTURE.md §3.2).
 //
 // It exists so these views can label and filter rows by event without JOINing
@@ -22,6 +32,9 @@ type EventLookup interface {
 	// TicketTypeIDsForEvent resolves an event to its ticket type ids, which this
 	// domain then matches against its own foreign keys.
 	TicketTypeIDsForEvent(ctx context.Context, eventID uuid.UUID) ([]uuid.UUID, error)
+	// TicketTypeDisplays resolves ticket type ids to their display labels and
+	// owning event, batched — one lookup per page, never one per row.
+	TicketTypeDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeDisplay, error)
 }
 
 // OrderFilter narrows the admin order list. A nil field means "no filter".

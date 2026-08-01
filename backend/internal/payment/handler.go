@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -35,6 +36,57 @@ func NewHandler(svc *Service, log *logger.Logger) *Handler {
 // not by a browser, and is authenticated by signature rather than by session.
 func (h *Handler) RegisterPublicRoutes(g *echo.Group) {
 	g.POST("/payment/webhook/:provider", h.webhook)
+}
+
+// RegisterRefreshRoute mounts the guest's "check payment status" endpoint.
+//
+// It is mounted separately from the webhook because it must sit behind a
+// per-IP rate limit: unlike the polled read endpoint, every call here costs an
+// outbound provider round-trip.
+func (h *Handler) RegisterRefreshRoute(g *echo.Group) {
+	g.POST("/orders/:orderNumber/payment/refresh", h.refreshStatus)
+}
+
+// refreshResponse is what the guest's button gets back. `changed` is what lets
+// the page say "payment confirmed" versus "still waiting" rather than nothing.
+type refreshResponse struct {
+	OrderNumber string    `json:"order_number"`
+	Status      string    `json:"status"`
+	Changed     bool      `json:"changed"`
+	CheckedAt   time.Time `json:"checked_at"`
+}
+
+func (h *Handler) refreshStatus(c echo.Context) error {
+	ctx := c.Request().Context()
+	orderNumber := c.Param("orderNumber")
+
+	result, err := h.svc.RefreshStatus(ctx, orderNumber)
+	if errors.Is(err, ErrOrderNotFound) {
+		return apperr.NotFound(apperr.CodeOrderNotFound, "Order not found.")
+	}
+	if errors.Is(err, ErrProviderHasNoRecord) {
+		// The order exists; the provider simply has nothing to say about it. That
+		// is a status we could not confirm, not a missing order — telling the
+		// guest their own order does not exist would be wrong.
+		return apperr.Wrap(err, http.StatusBadGateway, apperr.CodePaymentStatusUnavailable,
+			"We could not confirm this payment with the provider. Please try again shortly.")
+	}
+	if err != nil {
+		// The provider being unreachable is not the guest's problem and not a bug
+		// in this system: the order is untouched, the page keeps polling, and the
+		// button stays available.
+		h.log.ErrorContext(ctx, "could not reconcile order status with the provider",
+			"order_number", orderNumber, "error", err.Error())
+		return apperr.Wrap(err, http.StatusBadGateway, apperr.CodePaymentStatusUnavailable,
+			"We could not reach the payment provider just now. Your payment is unaffected — please try again shortly.")
+	}
+
+	return c.JSON(http.StatusOK, refreshResponse{
+		OrderNumber: result.OrderNumber,
+		Status:      result.Status,
+		Changed:     result.Changed,
+		CheckedAt:   time.Now().UTC(),
+	})
 }
 
 func (h *Handler) webhook(c echo.Context) error {

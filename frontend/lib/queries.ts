@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { adminFetch, apiFetch } from "./api-client";
+import { adminFetch, ApiError, apiFetch } from "./api-client";
 import type {
   AttendeeSummary,
   CheckoutRequest,
@@ -14,6 +14,8 @@ import type {
   MarkUsedResponse,
   OrderResponse,
   OrderSummary,
+  PaymentRefreshResponse,
+  PublicOrderDetail,
   PublicTicket,
   ResendResponse,
   TicketTypeAdminView,
@@ -28,6 +30,7 @@ export const queryKeys = {
   events: ["events"] as const,
   event: (slug: string) => ["events", slug] as const,
   ticket: (code: string) => ["tickets", code] as const,
+  order: (orderNumber: string) => ["orders", orderNumber] as const,
   adminEvents: ["admin", "events"] as const,
   adminEvent: (id: string) => ["admin", "events", id] as const,
   adminTicketTypes: (eventId: string) => ["admin", "ticket-types", eventId] as const,
@@ -58,6 +61,71 @@ export function useCheckout() {
   return useMutation({
     mutationFn: (body: CheckoutRequest) =>
       apiFetch<OrderResponse>("/checkout", { method: "POST", body }),
+  });
+}
+
+/** Order statuses that can never change again, so nothing needs to keep asking. */
+const FINAL_ORDER_STATUSES: ReadonlySet<string> = new Set([
+  "PAID",
+  "CANCELLED",
+  "EXPIRED",
+]);
+
+export function isFinalOrderStatus(status: string | undefined): boolean {
+  return status !== undefined && FINAL_ORDER_STATUSES.has(status);
+}
+
+/** How often an unpaid order is re-read while its page is open. */
+export const ORDER_POLL_INTERVAL_MS = 3_000;
+
+/**
+ * The guest's own order page.
+ *
+ * While the order is awaiting payment this polls every few seconds, which is
+ * how the page flips itself to "paid" seconds after the provider's webhook
+ * lands without the guest touching anything. Once the status is final the
+ * interval is switched off: a settled page must place no further load on the
+ * API.
+ */
+export function useOrderDetail(orderNumber: string) {
+  return useQuery({
+    queryKey: queryKeys.order(orderNumber),
+    queryFn: () =>
+      apiFetch<PublicOrderDetail>(`/orders/${encodeURIComponent(orderNumber)}`),
+    enabled: orderNumber !== "",
+    // Live payment status: never serve it from a cache.
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    refetchInterval: (query) =>
+      isFinalOrderStatus(query.state.data?.status) ? false : ORDER_POLL_INTERVAL_MS,
+    // Keep polling while the tab is backgrounded, so a guest who switched to
+    // their banking app to pay comes back to an already-updated page.
+    refetchIntervalInBackground: true,
+    // An unknown order number stays unknown; retrying just repeats the 404.
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 404) && failureCount < 3,
+  });
+}
+
+/**
+ * Asks the server to reconcile an order against the payment provider.
+ *
+ * This is the "check payment status" button. It exists because the webhook can
+ * be delayed, lost, or — in local development — undeliverable, and a button
+ * that only re-read our own database would be useless in exactly those cases.
+ */
+export function useRefreshPaymentStatus(orderNumber: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<PaymentRefreshResponse>(
+        `/orders/${encodeURIComponent(orderNumber)}/payment/refresh`,
+        { method: "POST" },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.order(orderNumber) }),
   });
 }
 

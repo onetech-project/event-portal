@@ -48,6 +48,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	// spec FR-020: the public ticket lookup is rate limited per client IP.
 	assert.Positive(t, cfg.TicketLookupRateLimit)
 	assert.GreaterOrEqual(t, float64(cfg.TicketLookupBurst), cfg.TicketLookupRateLimit)
+	assert.Equal(t, 15*time.Minute, cfg.PaymentExpiry, "the provider's documented QRIS default")
+	assert.Equal(t, 30*time.Second, cfg.PaymentSweepInterval)
 }
 
 func TestLoadOverridesDefaultsFromEnv(t *testing.T) {
@@ -58,6 +60,8 @@ func TestLoadOverridesDefaultsFromEnv(t *testing.T) {
 	t.Setenv("TICKET_LOOKUP_RATE_LIMIT", "2")
 	t.Setenv("TICKET_LOOKUP_BURST", "7")
 	t.Setenv("SMTP_PORT", "2525")
+	t.Setenv("PAYMENT_EXPIRY", "30m")
+	t.Setenv("PAYMENT_SWEEP_INTERVAL", "10s")
 
 	cfg, err := config.Load()
 
@@ -68,6 +72,32 @@ func TestLoadOverridesDefaultsFromEnv(t *testing.T) {
 	assert.InDelta(t, 2.0, cfg.TicketLookupRateLimit, 0.001)
 	assert.Equal(t, 7, cfg.TicketLookupBurst)
 	assert.Equal(t, 2525, cfg.SMTPPort)
+	assert.Equal(t, 30*time.Minute, cfg.PaymentExpiry)
+	assert.Equal(t, 10*time.Second, cfg.PaymentSweepInterval)
+}
+
+// Below 15 minutes the provider stops expiring transactions reliably, so a code
+// could still be payable after the countdown we showed the guest reached zero.
+// Startup refuses rather than shipping that inconsistency.
+func TestLoadRejectsPaymentExpiryBelowProviderFloor(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYMENT_EXPIRY", "5m")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAYMENT_EXPIRY")
+	assert.Contains(t, err.Error(), "15m")
+}
+
+func TestLoadRejectsNonPositiveSweepInterval(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYMENT_SWEEP_INTERVAL", "0s")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAYMENT_SWEEP_INTERVAL")
 }
 
 // The SNAP endpoint is derived from the environment flag unless explicitly

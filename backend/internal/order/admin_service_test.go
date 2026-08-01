@@ -26,6 +26,23 @@ func (a eventLookupAdapter) TicketTypeIDsForEvent(ctx context.Context, eventID u
 	return a.svc.TicketTypeIDsForEvent(ctx, eventID)
 }
 
+func (a eventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]order.TicketTypeDisplay, error) {
+	records, err := a.svc.TicketTypeDisplays(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	displays := make(map[uuid.UUID]order.TicketTypeDisplay, len(records))
+	for id, record := range records {
+		displays[id] = order.TicketTypeDisplay{
+			TicketTypeName: record.TicketTypeName,
+			EventName:      record.EventName,
+			EventSlug:      record.EventSlug,
+		}
+	}
+	return displays, nil
+}
+
 type adminOrderFixture struct {
 	svc   *order.AdminService
 	pool  *testsupport.Pool

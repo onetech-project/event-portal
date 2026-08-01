@@ -1,6 +1,10 @@
 package payment
 
-import "github.com/shopspring/decimal"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 // The payment domain's data-transfer shapes.
 //
@@ -26,6 +30,30 @@ type TransactionRequest struct {
 	CustomerEmail string
 	CustomerPhone string
 	Items         []TransactionItem
+}
+
+// PaymentSession is what a gateway hands back after opening a payment session.
+//
+// It is deliberately wider than the single URL the SNAP redirect flow needed: a
+// QRIS charge yields a payload the guest scans and a deadline it stops working
+// at, neither of which a bare URL can carry. Every field is provider-neutral, so
+// the order domain still learns nothing about who is processing the payment
+// (Constitution Principle V).
+type PaymentSession struct {
+	// ProviderRef is the provider's own transaction id, kept for support.
+	ProviderRef string
+	// QRString is the raw QRIS payload. The QR image is rendered from it on
+	// demand — this MVP stores no files.
+	QRString string
+	// QRImageURL is the provider-hosted image of the same payload, retained as an
+	// audit trail and fallback. It is not a page the guest is sent to.
+	QRImageURL string
+	// ExpiresAt is when the payment stops being accepted, as the provider
+	// computed it. It is the source of the guest's countdown.
+	ExpiresAt time.Time
+	// RedirectURL is empty for QRIS. It exists so a gateway that can only
+	// redirect still fits this interface without another shape change.
+	RedirectURL string
 }
 
 // WebhookResult is a verified provider notification, normalized across gateways.

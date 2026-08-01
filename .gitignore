@@ -1,0 +1,20 @@
+# Go build and test output
+*.exe
+*.test
+*.out
+vendor/
+
+# Environment files — .env.example is the committed template
+.env
+.env.*
+!.env.example
+
+# Editors and OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.tmp
+
+# Logs
+*.log

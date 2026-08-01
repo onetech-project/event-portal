@@ -12,141 +12,318 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
 
-// Sandbox and production SNAP endpoints. The concrete one is chosen at wiring time
-// from config so nothing else in the codebase knows which environment is active.
+// Sandbox and production Core API endpoints. The concrete one is chosen at wiring
+// time from config so nothing else in the codebase knows which environment is
+// active.
+//
+// Note the host: Core API lives on api.*, not the app.* host the old SNAP
+// redirect used. Pointing this at app.* fails with a confusing 404.
 const (
-	SnapSandboxBaseURL    = "https://app.sandbox.midtrans.com"
-	SnapProductionBaseURL = "https://app.midtrans.com"
+	CoreAPISandboxBaseURL    = "https://api.sandbox.midtrans.com"
+	CoreAPIProductionBaseURL = "https://api.midtrans.com"
 )
 
-const snapTransactionsPath = "/snap/v1/transactions"
+const (
+	chargePath = "/v2/charge"
+	// qrisAcquirer decides which network acquires the payment. GoPay issues a
+	// standard interoperable QRIS payload, so any QRIS-capable app can scan it;
+	// airpay_shopee would narrow that to Shopee's own apps.
+	qrisAcquirer = "gopay"
+)
 
-// MidtransGateway is the Midtrans SNAP implementation of Gateway.
+// MidtransGateway is the Midtrans Core API implementation of Gateway.
 //
-// It speaks the SNAP HTTP API directly rather than through the vendor SDK so the
-// base URL and HTTP client are injectable, which is what makes the request shape
-// and the signature check testable without reaching the network.
+// It speaks the HTTP API directly rather than through the vendor SDK so the base
+// URL and HTTP client are injectable, which is what makes the request shape, the
+// response parsing, and the signature check testable without reaching the
+// network.
 type MidtransGateway struct {
 	serverKey  string
 	baseURL    string
 	httpClient *http.Client
+	// paymentExpiry is how long an issued QRIS code stays payable. It is sent to
+	// the provider so both sides agree on the deadline rather than each computing
+	// their own.
+	paymentExpiry time.Duration
 }
 
 // NewMidtransGateway builds the gateway. baseURL selects sandbox or production.
-func NewMidtransGateway(serverKey, baseURL string, httpClient *http.Client) *MidtransGateway {
+func NewMidtransGateway(serverKey, baseURL string, paymentExpiry time.Duration, httpClient *http.Client) *MidtransGateway {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &MidtransGateway{
-		serverKey:  serverKey,
-		baseURL:    strings.TrimSuffix(baseURL, "/"),
-		httpClient: httpClient,
+		serverKey:     serverKey,
+		baseURL:       strings.TrimSuffix(baseURL, "/"),
+		httpClient:    httpClient,
+		paymentExpiry: paymentExpiry,
 	}
+}
+
+// authHeader is HTTP Basic with the server key as username and no password,
+// which is how every Core API endpoint authenticates.
+func (g *MidtransGateway) authHeader() string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(g.serverKey+":"))
 }
 
 // Name identifies this provider on orders and payment log rows.
 func (g *MidtransGateway) Name() string { return "midtrans" }
 
-type snapRequest struct {
-	TransactionDetails snapTransactionDetails `json:"transaction_details"`
-	CustomerDetails    snapCustomerDetails    `json:"customer_details"`
-	ItemDetails        []snapItemDetail       `json:"item_details,omitempty"`
+type chargeRequest struct {
+	PaymentType        string             `json:"payment_type"`
+	TransactionDetails transactionDetails `json:"transaction_details"`
+	CustomerDetails    customerDetails    `json:"customer_details"`
+	ItemDetails        []itemDetail       `json:"item_details,omitempty"`
+	QRIS               qrisDetails        `json:"qris"`
+	CustomExpiry       customExpiry       `json:"custom_expiry"`
 }
 
-type snapTransactionDetails struct {
+type transactionDetails struct {
 	OrderID     string `json:"order_id"`
 	GrossAmount int64  `json:"gross_amount"`
 }
 
-type snapCustomerDetails struct {
+type customerDetails struct {
 	FirstName string `json:"first_name"`
 	Email     string `json:"email"`
 	Phone     string `json:"phone"`
 }
 
-type snapItemDetail struct {
+type itemDetail struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Price    int64  `json:"price"`
 	Quantity int32  `json:"quantity"`
 }
 
-type snapResponse struct {
-	Token         string   `json:"token"`
-	RedirectURL   string   `json:"redirect_url"`
-	ErrorMessages []string `json:"error_messages"`
+type qrisDetails struct {
+	Acquirer string `json:"acquirer"`
 }
 
-// CreateTransaction opens a SNAP payment session and returns its redirect URL.
-func (g *MidtransGateway) CreateTransaction(ctx context.Context, req TransactionRequest) (string, error) {
+type customExpiry struct {
+	ExpiryDuration int    `json:"expiry_duration"`
+	Unit           string `json:"unit"`
+}
+
+type chargeAction struct {
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+}
+
+type chargeResponse struct {
+	StatusCode        string         `json:"status_code"`
+	StatusMessage     string         `json:"status_message"`
+	TransactionID     string         `json:"transaction_id"`
+	OrderID           string         `json:"order_id"`
+	GrossAmount       string         `json:"gross_amount"`
+	TransactionStatus string         `json:"transaction_status"`
+	FraudStatus       string         `json:"fraud_status"`
+	PaymentType       string         `json:"payment_type"`
+	QRString          string         `json:"qr_string"`
+	ExpiryTime        string         `json:"expiry_time"`
+	Actions           []chargeAction `json:"actions"`
+	ValidationMessage []string       `json:"validation_messages"`
+}
+
+// qrCodeAction returns the URL of the provider-hosted QR image, if it offered one.
+func (r chargeResponse) qrCodeAction() string {
+	for _, action := range r.Actions {
+		if action.Name == "generate-qr-code" {
+			return action.URL
+		}
+	}
+	return ""
+}
+
+// CreateTransaction opens a QRIS payment session and returns the payload the
+// guest scans plus the deadline it stops working at.
+func (g *MidtransGateway) CreateTransaction(ctx context.Context, req TransactionRequest) (PaymentSession, error) {
 	// Midtrans requires whole rupiah for IDR, and requires item prices to sum to
 	// gross_amount. Truncating both consistently keeps that invariant.
-	items := make([]snapItemDetail, 0, len(req.Items))
+	items := make([]itemDetail, 0, len(req.Items))
 	for _, item := range req.Items {
-		items = append(items, snapItemDetail{
+		items = append(items, itemDetail{
 			ID:       item.ID,
-			Name:     truncateRunes(item.Name, 50), // SNAP rejects longer names
+			Name:     truncateRunes(item.Name, 50), // the API rejects longer names
 			Price:    toRupiah(item.Price),
 			Quantity: item.Quantity,
 		})
 	}
 
-	payload := snapRequest{
-		TransactionDetails: snapTransactionDetails{
+	payload := chargeRequest{
+		PaymentType: "qris",
+		TransactionDetails: transactionDetails{
 			OrderID:     req.OrderNumber,
 			GrossAmount: toRupiah(req.GrossAmount),
 		},
-		CustomerDetails: snapCustomerDetails{
+		CustomerDetails: customerDetails{
 			FirstName: req.CustomerName,
 			Email:     req.CustomerEmail,
 			Phone:     req.CustomerPhone,
 		},
 		ItemDetails: items,
+		QRIS:        qrisDetails{Acquirer: qrisAcquirer},
+		CustomExpiry: customExpiry{
+			// Minutes because the provider's scheduler works in whole minutes and
+			// documents 15 as its reliable floor; config enforces that floor.
+			ExpiryDuration: int(g.paymentExpiry.Minutes()),
+			Unit:           "minute",
+		},
 	}
 
-	body, err := json.Marshal(payload)
+	raw, status, err := g.do(ctx, http.MethodPost, chargePath, payload)
 	if err != nil {
-		return "", fmt.Errorf("midtrans: encode request: %w", err)
+		return PaymentSession{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.baseURL+snapTransactionsPath, bytes.NewReader(body))
+	var parsed chargeResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return PaymentSession{}, fmt.Errorf("midtrans: decode charge response (status %d): %w", status, err)
+	}
+	if status < 200 || status >= 300 {
+		return PaymentSession{}, fmt.Errorf("midtrans: charge returned %d: %s %s",
+			status, parsed.StatusMessage, strings.Join(parsed.ValidationMessage, "; "))
+	}
+	if parsed.QRString == "" {
+		// Without the payload there is nothing to render, and sending the guest to
+		// a page with no code is worse than failing checkout: the compensating
+		// transaction releases their seats so they can retry.
+		return PaymentSession{}, errors.New("midtrans: charge response contained no qr_string")
+	}
+
+	expiresAt, err := parseExpiryTime(parsed.ExpiryTime)
 	if err != nil {
-		return "", fmt.Errorf("midtrans: build request: %w", err)
+		return PaymentSession{}, err
+	}
+
+	return PaymentSession{
+		ProviderRef: parsed.TransactionID,
+		QRString:    parsed.QRString,
+		QRImageURL:  parsed.qrCodeAction(),
+		ExpiresAt:   expiresAt,
+	}, nil
+}
+
+type statusResponse struct {
+	// StatusCode is Midtrans's own logical code, carried in the body as a string.
+	// It does not always match the HTTP status: an unknown transaction comes back
+	// as HTTP 200 with "404" in here, so trusting the HTTP status alone reads that
+	// as a valid answer with an empty transaction_status.
+	StatusCode        string `json:"status_code"`
+	TransactionID     string `json:"transaction_id"`
+	OrderID           string `json:"order_id"`
+	TransactionStatus string `json:"transaction_status"`
+	FraudStatus       string `json:"fraud_status"`
+	PaymentType       string `json:"payment_type"`
+	StatusMessage     string `json:"status_message"`
+}
+
+// FetchStatus reads the provider's authoritative status for an order.
+//
+// The result is deliberately the same shape a verified notification produces, so
+// the caller runs it through the identical status mapping and transition path —
+// which is what makes a reconciliation exactly as idempotent as a webhook.
+func (g *MidtransGateway) FetchStatus(ctx context.Context, orderNumber string) (*WebhookResult, error) {
+	// Order numbers are generated by this system from an alphanumeric alphabet,
+	// but escaping keeps a future format change from silently building a broken
+	// path.
+	path := "/v2/" + url.PathEscape(orderNumber) + "/status"
+
+	raw, status, err := g.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed statusResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("midtrans: decode status response (status %d): %w", status, err)
+	}
+	// The provider has no record of this order: nothing to reconcile, and not an
+	// error the caller can act on differently. Checked against both codes because
+	// Midtrans reports this as HTTP 200 with "404" in the body.
+	if status == http.StatusNotFound || parsed.StatusCode == "404" {
+		return nil, ErrOrderNotFound
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("midtrans: status returned %d: %s", status, parsed.StatusMessage)
+	}
+	// Anything else non-2xx in the body is a real failure — an auth problem, say.
+	// Falling through would hand the caller an empty transaction_status, which
+	// reads as "unrecognized status" and hides the cause.
+	if parsed.StatusCode != "" && !strings.HasPrefix(parsed.StatusCode, "2") {
+		return nil, fmt.Errorf("midtrans: status returned code %s: %s", parsed.StatusCode, parsed.StatusMessage)
+	}
+
+	return &WebhookResult{
+		OrderNumber:       parsed.OrderID,
+		TransactionID:     parsed.TransactionID,
+		TransactionStatus: parsed.TransactionStatus,
+		FraudStatus:       parsed.FraudStatus,
+		PaymentType:       parsed.PaymentType,
+		RawPayload:        raw,
+	}, nil
+}
+
+// do performs one authenticated Core API call and returns the raw body and HTTP
+// status. Both endpoints share the auth, headers, and body-size bound.
+func (g *MidtransGateway) do(ctx context.Context, method, path string, payload any) ([]byte, int, error) {
+	var body io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, fmt.Errorf("midtrans: encode request: %w", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, g.baseURL+path, body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("midtrans: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(g.serverKey+":")))
+	httpReq.Header.Set("Authorization", g.authHeader())
 
 	resp, err := g.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("midtrans: call SNAP: %w", err)
+		return nil, 0, fmt.Errorf("midtrans: call %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("midtrans: read SNAP response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("midtrans: read %s response: %w", path, err)
 	}
-
-	var parsed snapResponse
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", fmt.Errorf("midtrans: decode SNAP response (status %d): %w", resp.StatusCode, err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("midtrans: SNAP returned %d: %s",
-			resp.StatusCode, strings.Join(parsed.ErrorMessages, "; "))
-	}
-	if parsed.RedirectURL == "" {
-		return "", errors.New("midtrans: SNAP response contained no redirect_url")
-	}
-	return parsed.RedirectURL, nil
+	return raw, resp.StatusCode, nil
 }
+
+// parseExpiryTime reads the provider's expiry_time, which is formatted in
+// Jakarta local time with no zone marker. Parsing it as UTC would shift the
+// guest's countdown by seven hours.
+func parseExpiryTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, errors.New("midtrans: charge response contained no expiry_time")
+	}
+
+	parsed, err := time.ParseInLocation("2006-01-02 15:04:05", value, jakarta)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("midtrans: parse expiry_time %q: %w", value, err)
+	}
+	return parsed.UTC(), nil
+}
+
+// jakarta is the zone Midtrans reports timestamps in (WIB, UTC+7). It is built
+// from a fixed offset rather than the tzdata name so the parse cannot fail on a
+// container image without zone files.
+var jakarta = time.FixedZone("WIB", 7*60*60)
 
 type midtransNotification struct {
 	OrderID           string `json:"order_id"`

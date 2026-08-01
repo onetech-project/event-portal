@@ -116,8 +116,22 @@ shared schema on setup. Database-backed tests skip themselves when
 `TEST_DATABASE_URL` is unset, so the suite still runs on a bare checkout:
 
 ```bash
-cd backend && ./scripts/setup-test-db.sh
+cd backend && ./scripts/setup-test-db.sh   # recreates it and applies every migration
 ```
+
+## Migrations
+
+`backend/migrations/` is mounted at `/docker-entrypoint-initdb.d`, which Postgres
+runs **only when the data volume is empty**. A new migration is therefore picked
+up automatically on a fresh volume and must be applied by hand to a database that
+already exists:
+
+```bash
+psql "$DATABASE_URL" -f backend/migrations/0002_payment_qris.sql
+```
+
+`sqlc.yaml` lists every migration under `schema:` — omitting one silently hides
+its columns from the generated code.
 
 ## Things worth knowing before changing anything
 
@@ -132,14 +146,38 @@ cd backend && ./scripts/setup-test-db.sh
 - **The webhook is idempotent.** An already-`PAID` order short-circuits, and every
   status change is guarded on the order still being `PENDING`, so a replayed
   notification cannot restore quota twice.
+- **Three paths can settle an order**, and they all go through that same guarded
+  transition: the provider webhook, the guest pressing "check payment status"
+  (which reconciles against the provider), and the in-process expiry sweeper. That
+  is what lets them race without restoring quota twice or issuing two sets of
+  tickets.
+- **The guest never leaves the site to pay.** Checkout opens a QRIS charge and
+  routes to `/orders/{order_number}`, which renders the QR from the stored payload
+  on demand, counts down to the server's deadline, and polls until the status is
+  final.
 - **No object storage exists.** `tickets.qr_code_url` stays NULL and QR images are
   rendered on demand from `ticket_code`; `events.banner_url` is a plain URL an
   admin supplies.
 - **SCHEMA.md is locked.** Ticket-code lookups are exact matches against the
   existing index — normalize the input, never wrap the column in `UPPER()`.
 
+## Payment configuration
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MIDTRANS_BASE_URL` | derived from `MIDTRANS_IS_PRODUCTION` | **Core API** host — `https://api.sandbox.midtrans.com`, not the `app.sandbox` host SNAP used. Pointing it at `app.*` fails with a confusing 404. |
+| `PAYMENT_EXPIRY` | `15m` | How long a QRIS code stays payable. 15 minutes is the provider's own default *and* its documented floor: below it the provider's expiry scheduler is unreliable, so startup rejects the value. |
+| `PAYMENT_SWEEP_INTERVAL` | `30s` | How often abandoned orders past their deadline are expired and their quota returned. |
+
 ## Local end-to-end runs
 
-`MIDTRANS_BASE_URL` overrides the SNAP endpoint, so the whole purchase flow —
+`MIDTRANS_BASE_URL` overrides the Core API endpoint, so the whole purchase flow —
 checkout, webhook, ticket generation, email — can be exercised against a stub
 gateway and a local SMTP catcher without touching the network.
+
+Against the real sandbox, the provider cannot reach a webhook on `localhost`. Pay
+the transaction at the QRIS simulator
+(<https://simulator.sandbox.midtrans.com/qris/index>) and press **Check payment
+status** on the order page: it reconciles directly with the provider through the
+same code path the webhook uses, so the flow completes end to end without a public
+URL.

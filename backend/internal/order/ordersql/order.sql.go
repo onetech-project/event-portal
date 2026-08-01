@@ -7,6 +7,7 @@ package ordersql
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -48,7 +49,8 @@ const createOrder = `-- name: CreateOrder :one
 INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_amount, status)
 VALUES ($1, $2, $3, $4, $5, 'PENDING')
 RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-          payment_provider, payment_url, email_sent, created_at, updated_at
+          payment_provider, payment_url, email_sent, created_at, updated_at,
+          payment_qr_string, payment_expires_at
 `
 
 type CreateOrderParams struct {
@@ -82,6 +84,8 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order
 		&i.EmailSent,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -120,12 +124,16 @@ func (q *Queries) CreateOrderItem(ctx context.Context, arg CreateOrderItemParams
 const getOrderByID = `-- name: GetOrderByID :one
 
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at
+       payment_provider, payment_url, email_sent, created_at, updated_at,
+       payment_qr_string, payment_expires_at
 FROM orders
 WHERE id = $1
 `
 
 // Reads --------------------------------------------------------------------
+// The trailing two columns are listed in migration order (0002 appended them
+// after updated_at), which is what lets sqlc reuse the single Order struct
+// instead of emitting a near-identical row type per query.
 func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error) {
 	row := q.db.QueryRow(ctx, getOrderByID, id)
 	var i Order
@@ -142,13 +150,16 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.EmailSent,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
 
 const getOrderByNumber = `-- name: GetOrderByNumber :one
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at
+       payment_provider, payment_url, email_sent, created_at, updated_at,
+       payment_qr_string, payment_expires_at
 FROM orders
 WHERE order_number = $1
 `
@@ -169,6 +180,8 @@ func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (Ord
 		&i.EmailSent,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
 	)
 	return i, err
 }
@@ -348,16 +361,31 @@ type ListOrdersAdminParams struct {
 	TicketTypeIds []uuid.UUID
 }
 
+type ListOrdersAdminRow struct {
+	ID              uuid.UUID
+	OrderNumber     string
+	BuyerName       string
+	BuyerEmail      string
+	BuyerPhone      string
+	TotalAmount     decimal.Decimal
+	Status          string
+	PaymentProvider *string
+	PaymentUrl      *string
+	EmailSent       *bool
+	CreatedAt       *time.Time
+	UpdatedAt       *time.Time
+}
+
 // Admin read-only views ----------------------------------------------------
-func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams) ([]Order, error) {
+func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams) ([]ListOrdersAdminRow, error) {
 	rows, err := q.db.Query(ctx, listOrdersAdmin, arg.Status, arg.TicketTypeIds)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Order{}
+	items := []ListOrdersAdminRow{}
 	for rows.Next() {
-		var i Order
+		var i ListOrdersAdminRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrderNumber,
@@ -371,6 +399,56 @@ func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams
 			&i.EmailSent,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrdersDueForExpiry = `-- name: ListOrdersDueForExpiry :many
+SELECT id, order_number, status, payment_expires_at
+FROM orders
+WHERE status = 'PENDING'
+  AND payment_expires_at IS NOT NULL
+  AND payment_expires_at <= $1
+ORDER BY payment_expires_at
+LIMIT $2
+`
+
+type ListOrdersDueForExpiryParams struct {
+	PaymentExpiresAt *time.Time
+	Limit            int32
+}
+
+type ListOrdersDueForExpiryRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	Status           string
+	PaymentExpiresAt *time.Time
+}
+
+// Orders whose payment deadline has passed but which nothing has moved yet.
+// Oldest first, so the longest-held quota is released soonest. Uses the partial
+// index idx_orders_payment_expiry, which covers exactly this predicate.
+func (q *Queries) ListOrdersDueForExpiry(ctx context.Context, arg ListOrdersDueForExpiryParams) ([]ListOrdersDueForExpiryRow, error) {
+	rows, err := q.db.Query(ctx, listOrdersDueForExpiry, arg.PaymentExpiresAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrdersDueForExpiryRow{}
+	for rows.Next() {
+		var i ListOrdersDueForExpiryRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderNumber,
+			&i.Status,
+			&i.PaymentExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -463,19 +541,34 @@ func (q *Queries) UpdateOrderStatusIfPending(ctx context.Context, arg UpdateOrde
 const updatePaymentDetails = `-- name: UpdatePaymentDetails :execrows
 
 UPDATE orders
-SET payment_url = $2, payment_provider = $3, updated_at = now()
+SET payment_url = $2,
+    payment_provider = $3,
+    payment_qr_string = $4,
+    payment_expires_at = $5,
+    updated_at = now()
 WHERE id = $1
 `
 
 type UpdatePaymentDetailsParams struct {
-	ID              uuid.UUID
-	PaymentUrl      *string
-	PaymentProvider *string
+	ID               uuid.UUID
+	PaymentUrl       *string
+	PaymentProvider  *string
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
 }
 
 // Payment lifecycle --------------------------------------------------------
+// Stamps everything the guest's payment page needs: the provider's QR-image URL
+// (audit/fallback), the raw QRIS payload the image is rendered from, and the
+// deadline the countdown and the expiry sweeper both read.
 func (q *Queries) UpdatePaymentDetails(ctx context.Context, arg UpdatePaymentDetailsParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updatePaymentDetails, arg.ID, arg.PaymentUrl, arg.PaymentProvider)
+	result, err := q.db.Exec(ctx, updatePaymentDetails,
+		arg.ID,
+		arg.PaymentUrl,
+		arg.PaymentProvider,
+		arg.PaymentQrString,
+		arg.PaymentExpiresAt,
+	)
 	if err != nil {
 		return 0, err
 	}

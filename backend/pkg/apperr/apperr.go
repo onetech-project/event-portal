@@ -19,6 +19,9 @@ const (
 	CodeTicketTypeNotFound      = "TICKET_TYPE_NOT_FOUND"
 	CodeEventNotFound           = "EVENT_NOT_FOUND"
 	CodePaymentInitiationFailed = "PAYMENT_INITIATION_FAILED"
+	// CodePaymentStatusUnavailable reports that the payment provider could not be
+	// reached for a status check. The order is untouched; the caller may retry.
+	CodePaymentStatusUnavailable = "PAYMENT_STATUS_UNAVAILABLE"
 	CodeTicketNotFound          = "TICKET_NOT_FOUND"
 	CodeRateLimited             = "RATE_LIMITED"
 	CodeInvalidSignature        = "INVALID_SIGNATURE"

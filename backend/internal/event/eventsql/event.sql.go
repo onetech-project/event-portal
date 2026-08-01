@@ -372,6 +372,47 @@ func (q *Queries) ListPublishedEvents(ctx context.Context) ([]ListPublishedEvent
 	return items, nil
 }
 
+const listTicketTypeDisplaysByIDs = `-- name: ListTicketTypeDisplaysByIDs :many
+SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug
+FROM ticket_types tt
+JOIN events e ON e.id = tt.event_id
+WHERE tt.id = ANY($1::uuid[])
+`
+
+type ListTicketTypeDisplaysByIDsRow struct {
+	ID        uuid.UUID
+	Name      string
+	EventName string
+	EventSlug string
+}
+
+// Both tables belong to this domain, so the JOIN stays inside the boundary the
+// order domain is not allowed to cross itself.
+func (q *Queries) ListTicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UUID) ([]ListTicketTypeDisplaysByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listTicketTypeDisplaysByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTicketTypeDisplaysByIDsRow{}
+	for rows.Next() {
+		var i ListTicketTypeDisplaysByIDsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.EventName,
+			&i.EventSlug,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTicketTypeIDsByEventID = `-- name: ListTicketTypeIDsByEventID :many
 SELECT id FROM ticket_types WHERE event_id = $1
 `

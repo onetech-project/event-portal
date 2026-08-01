@@ -15,10 +15,18 @@ var ErrInvalidSignature = errors.New("payment: invalid webhook signature")
 type Gateway interface {
 	// Name identifies the provider, stored on the order and the payment log.
 	Name() string
-	// CreateTransaction opens a payment session and returns the URL to send the
-	// guest to. It performs a network call and MUST NOT be invoked inside a
+	// CreateTransaction opens a payment session and returns what the guest needs
+	// to pay it. It performs a network call and MUST NOT be invoked inside a
 	// database transaction (Constitution Principle IV).
-	CreateTransaction(ctx context.Context, req TransactionRequest) (string, error)
+	CreateTransaction(ctx context.Context, req TransactionRequest) (PaymentSession, error)
 	// VerifyWebhook authenticates a raw notification payload and normalizes it.
 	VerifyWebhook(payload []byte, signature string) (*WebhookResult, error)
+	// FetchStatus reads the provider's authoritative status for an order.
+	//
+	// It exists because a notification can be delayed, lost, or — in local
+	// development — undeliverable to a machine the provider cannot reach. The
+	// result is normalized onto the same shape a notification produces so both
+	// feed the identical status-mapping and transition path, which is what keeps
+	// reconciliation idempotent.
+	FetchStatus(ctx context.Context, orderNumber string) (*WebhookResult, error)
 }

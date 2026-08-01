@@ -65,12 +65,35 @@ type PaymentRequest struct {
 	Items         []PaymentItem
 }
 
+// PaymentSession is what the gateway hands back once a payment session exists.
+//
+// Mirrored here rather than imported so the order domain never depends on the
+// payment package (Constitution Principle II); the composition root translates
+// between the two shapes.
+type PaymentSession struct {
+	// ProviderRef is the provider's transaction id, kept for support.
+	ProviderRef string
+	// QRString is the raw QRIS payload the guest's banking app scans. The image
+	// is rendered from it on demand, never stored.
+	QRString string
+	// QRImageURL is the provider-hosted image of the same payload, persisted as
+	// an audit trail rather than as somewhere to send the guest.
+	QRImageURL string
+	// ExpiresAt is the provider-computed deadline that becomes the order's
+	// payment_expires_at, and from there the guest's countdown.
+	ExpiresAt time.Time
+	// RedirectURL is empty for QRIS; it exists for a gateway that can only
+	// redirect.
+	RedirectURL string
+}
+
 // PaymentGateway is the contract checkout needs from the payment domain, again
 // declared by its consumer. Swapping providers therefore never touches this
 // package (Constitution Principle V).
 type PaymentGateway interface {
 	// Name identifies the provider, persisted on the order.
 	Name() string
-	// CreateTransaction opens a payment session and returns the guest-facing URL.
-	CreateTransaction(ctx context.Context, req PaymentRequest) (string, error)
+	// CreateTransaction opens a payment session and returns what the guest needs
+	// in order to pay it.
+	CreateTransaction(ctx context.Context, req PaymentRequest) (PaymentSession, error)
 }

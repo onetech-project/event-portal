@@ -3,6 +3,7 @@ package order_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -112,13 +113,19 @@ func TestOrderNumberExists(t *testing.T) {
 	assert.False(t, free)
 }
 
-func TestUpdatePaymentDetailsStampsTheURLAndProvider(t *testing.T) {
+func TestUpdatePaymentDetailsStampsTheWholePaymentInstruction(t *testing.T) {
 	repo, pool := newRepo(t)
 	ctx := context.Background()
 	seeded := testsupport.SeedOrder(t, pool, "ORD-PAYURL", "PENDING")
+	expiresAt := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
 
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
-		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, "https://pay.example.com/x", "midtrans")
+		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
+			PaymentURL: "https://pay.example.com/x",
+			Provider:   "midtrans",
+			QRString:   "00020101021226620014COM.EXAMPLE",
+			ExpiresAt:  expiresAt,
+		})
 	})
 
 	require.NoError(t, err)
@@ -128,6 +135,86 @@ func TestUpdatePaymentDetailsStampsTheURLAndProvider(t *testing.T) {
 	assert.Equal(t, "https://pay.example.com/x", *got.PaymentURL)
 	require.NotNil(t, got.PaymentProvider)
 	assert.Equal(t, "midtrans", *got.PaymentProvider)
+	require.NotNil(t, got.PaymentQRString)
+	assert.Equal(t, "00020101021226620014COM.EXAMPLE", *got.PaymentQRString)
+	require.NotNil(t, got.PaymentExpiresAt)
+	assert.WithinDuration(t, expiresAt, *got.PaymentExpiresAt, time.Second)
+}
+
+// An order whose charge never produced an instruction must read back as "no
+// instruction", not as an empty code with a zero deadline — the read model keys
+// off nil to decide whether to show a QR at all.
+func TestUpdatePaymentDetailsLeavesEmptyInstructionFieldsNull(t *testing.T) {
+	repo, pool := newRepo(t)
+	ctx := context.Background()
+	seeded := testsupport.SeedOrder(t, pool, "ORD-NOQR", "PENDING")
+
+	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
+			PaymentURL: "https://pay.example.com/x",
+			Provider:   "midtrans",
+		})
+	})
+
+	require.NoError(t, err)
+	got, err := repo.GetOrderByID(ctx, seeded.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.PaymentQRString)
+	assert.Nil(t, got.PaymentExpiresAt)
+}
+
+func TestListOrdersDueForExpiryReturnsOnlyLapsedPendingOrders(t *testing.T) {
+	repo, pool := newRepo(t)
+	ctx := context.Background()
+
+	lapsed := testsupport.SeedOrder(t, pool, "ORD-LAPSED", "PENDING")
+	live := testsupport.SeedOrder(t, pool, "ORD-LIVE", "PENDING")
+	settled := testsupport.SeedOrder(t, pool, "ORD-SETTLED", "PAID")
+	noDeadline := testsupport.SeedOrder(t, pool, "ORD-NODEADLINE", "PENDING")
+
+	setExpiry(t, pool, lapsed.ID, -2*time.Minute)
+	setExpiry(t, pool, live.ID, 5*time.Minute)
+	setExpiry(t, pool, settled.ID, -2*time.Minute)
+
+	due, err := repo.ListOrdersDueForExpiry(ctx, time.Now(), 10)
+
+	require.NoError(t, err)
+	require.Len(t, due, 1, "only a PENDING order past its deadline is due")
+	assert.Equal(t, "ORD-LAPSED", due[0].OrderNumber)
+
+	// Named so the intent of seeding it is not lost: an order with no deadline
+	// (one created before this feature) must never be swept.
+	_ = noDeadline
+}
+
+func TestListOrdersDueForExpiryReturnsOldestFirstAndHonoursTheLimit(t *testing.T) {
+	repo, pool := newRepo(t)
+	ctx := context.Background()
+
+	newest := testsupport.SeedOrder(t, pool, "ORD-NEWEST", "PENDING")
+	oldest := testsupport.SeedOrder(t, pool, "ORD-OLDEST", "PENDING")
+	middle := testsupport.SeedOrder(t, pool, "ORD-MIDDLE", "PENDING")
+
+	setExpiry(t, pool, newest.ID, -1*time.Minute)
+	setExpiry(t, pool, oldest.ID, -30*time.Minute)
+	setExpiry(t, pool, middle.ID, -10*time.Minute)
+
+	// The longest-held quota is released first, so a batch limit cannot starve
+	// the orders that have been sitting on seats the longest.
+	due, err := repo.ListOrdersDueForExpiry(ctx, time.Now(), 2)
+
+	require.NoError(t, err)
+	require.Len(t, due, 2)
+	assert.Equal(t, "ORD-OLDEST", due[0].OrderNumber)
+	assert.Equal(t, "ORD-MIDDLE", due[1].OrderNumber)
+}
+
+func setExpiry(t *testing.T, pool *testsupport.Pool, orderID uuid.UUID, offset time.Duration) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE orders SET payment_expires_at = now() + $2::interval WHERE id = $1`,
+		orderID, offset.String())
+	require.NoError(t, err)
 }
 
 func TestUpdateOrderStatusIfPendingAppliesTheTransitionOnce(t *testing.T) {

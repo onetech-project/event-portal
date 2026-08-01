@@ -52,7 +52,9 @@ CREATE TABLE orders (
     total_amount NUMERIC(12, 2) NOT NULL,
     status VARCHAR(50) NOT NULL CHECK (status IN ('PENDING', 'PAID', 'CANCELLED', 'EXPIRED')),
     payment_provider VARCHAR(50), 
-    payment_url TEXT,
+    payment_url TEXT, -- provider's generate-qr-code action URL (audit/fallback); not a page the guest is sent to
+    payment_qr_string TEXT, -- raw QRIS payload; the QR image is rendered from this on demand, never stored
+    payment_expires_at TIMESTAMP WITH TIME ZONE, -- server-owned payment deadline: countdown, sweeper, expired state
     email_sent BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -105,3 +107,7 @@ CREATE INDEX idx_events_slug ON events(slug);
 CREATE INDEX idx_orders_order_number ON orders(order_number);
 CREATE INDEX idx_tickets_ticket_code ON tickets(ticket_code);
 CREATE INDEX idx_ticket_types_event_id ON ticket_types(event_id);
+
+-- The expiry sweeper's only query: PENDING orders whose payment deadline passed.
+-- Partial, so it stays roughly the size of the live payment window.
+CREATE INDEX idx_orders_payment_expiry ON orders (payment_expires_at) WHERE status = 'PENDING';

@@ -78,7 +78,7 @@ func (s *Service) Checkout(ctx context.Context, req CheckoutRequest) (OrderRespo
 		return OrderResponse{}, err
 	}
 
-	paymentURL, err := s.gateway.CreateTransaction(ctx, s.paymentRequestFor(created, total, reserved, req))
+	session, err := s.gateway.CreateTransaction(ctx, s.paymentRequestFor(created, total, reserved, req))
 	if err != nil {
 		s.log.ErrorContext(ctx, "payment initiation failed; compensating",
 			"order_number", created.OrderNumber, "provider", s.gateway.Name(), "error", err.Error())
@@ -88,7 +88,14 @@ func (s *Service) Checkout(ctx context.Context, req CheckoutRequest) (OrderRespo
 	}
 
 	if err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return s.repo.UpdatePaymentDetails(ctx, tx, created.ID, paymentURL, s.gateway.Name())
+		return s.repo.UpdatePaymentDetails(ctx, tx, created.ID, PaymentDetails{
+			// The provider's hosted QR image is recorded for audit; the guest is
+			// shown an image we render ourselves from QRString.
+			PaymentURL: session.QRImageURL,
+			Provider:   s.gateway.Name(),
+			QRString:   session.QRString,
+			ExpiresAt:  session.ExpiresAt,
+		})
 	}); err != nil {
 		// The payment session exists but we could not record it. Compensating here
 		// would strand a live payment session against a cancelled order, so the
@@ -107,7 +114,10 @@ func (s *Service) Checkout(ctx context.Context, req CheckoutRequest) (OrderRespo
 		OrderNumber: created.OrderNumber,
 		Status:      created.Status,
 		TotalAmount: money.From(total),
-		PaymentURL:  paymentURL,
+		// Retained for compatibility and audit. The client no longer navigates
+		// here: it routes in-app to the order page, which renders the QR itself
+		// (spec FR-009).
+		PaymentURL: session.QRImageURL,
 	}, nil
 }
 

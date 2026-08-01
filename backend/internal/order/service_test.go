@@ -54,22 +54,35 @@ func (a eventProviderAdapter) RestoreQuota(ctx context.Context, tx pgx.Tx, id uu
 // fakeGateway stands in for the payment provider so checkout can be driven through
 // both its success and its failure path without a network.
 type fakeGateway struct {
-	mu    sync.Mutex
-	url   string
-	err   error
-	calls []order.PaymentRequest
+	mu        sync.Mutex
+	url       string
+	qrString  string
+	expiresAt time.Time
+	err       error
+	calls     []order.PaymentRequest
+	// onCall runs inside CreateTransaction, which is where a test can observe
+	// what the database looks like at the moment the gateway is called.
+	onCall func(order.PaymentRequest)
 }
 
 func (g *fakeGateway) Name() string { return "fakegw" }
 
-func (g *fakeGateway) CreateTransaction(_ context.Context, req order.PaymentRequest) (string, error) {
+func (g *fakeGateway) CreateTransaction(_ context.Context, req order.PaymentRequest) (order.PaymentSession, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls = append(g.calls, req)
-	if g.err != nil {
-		return "", g.err
+	if g.onCall != nil {
+		g.onCall(req)
 	}
-	return g.url, nil
+	if g.err != nil {
+		return order.PaymentSession{}, g.err
+	}
+	return order.PaymentSession{
+		ProviderRef: "txn-" + req.OrderNumber,
+		QRString:    g.qrString,
+		QRImageURL:  g.url,
+		ExpiresAt:   g.expiresAt,
+	}, nil
 }
 
 func (g *fakeGateway) callCount() int {
@@ -86,6 +99,7 @@ func (g *fakeGateway) lastCall() order.PaymentRequest {
 
 type checkoutFixture struct {
 	svc     *order.Service
+	public  *order.PublicService
 	pool    *testsupport.Pool
 	gateway *fakeGateway
 	repo    *order.Repository
@@ -96,11 +110,17 @@ func newCheckoutFixture(t *testing.T) checkoutFixture {
 	pool := testsupport.RequirePool(t)
 
 	repo := order.NewRepository(pool)
-	gw := &fakeGateway{url: "https://pay.example.com/session"}
-	provider := eventProviderAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())}
+	gw := &fakeGateway{
+		url:       "https://pay.example.com/session",
+		qrString:  "00020101021226620014COM.EXAMPLE.QRIS",
+		expiresAt: time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second),
+	}
+	events := event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())
+	provider := eventProviderAdapter{svc: events}
 
 	return checkoutFixture{
 		svc:     order.NewService(pool, repo, provider, gw, testsupport.DiscardLogger()),
+		public:  order.NewPublicService(repo, eventLookupAdapter{svc: events}),
 		pool:    pool,
 		gateway: gw,
 		repo:    repo,
@@ -156,6 +176,14 @@ func TestCheckoutCreatesAnOrderDeductsQuotaAndReturnsAPaymentURL(t *testing.T) {
 	assert.Equal(t, "https://pay.example.com/session", *stored.PaymentURL)
 	require.NotNil(t, stored.PaymentProvider)
 	assert.Equal(t, "fakegw", *stored.PaymentProvider)
+
+	// The payment instruction the guest's page renders: the payload it scans and
+	// the deadline it counts down to. Without both, the order page has nothing to
+	// show (spec FR-011, FR-012).
+	require.NotNil(t, stored.PaymentQRString)
+	assert.Equal(t, "00020101021226620014COM.EXAMPLE.QRIS", *stored.PaymentQRString)
+	require.NotNil(t, stored.PaymentExpiresAt)
+	assert.WithinDuration(t, f.gateway.expiresAt, *stored.PaymentExpiresAt, time.Second)
 
 	items, err := f.repo.ListOrderItemsByOrderID(ctx, stored.ID)
 	require.NoError(t, err)
@@ -314,6 +342,30 @@ func TestCheckoutRejectsATicketTypeWhoseSalesHaveClosed(t *testing.T) {
 	var appErr *apperr.Error
 	require.True(t, errors.As(err, &appErr))
 	assert.Equal(t, apperr.CodeTicketTypeNotOnSale, appErr.Code)
+}
+
+// The quota-deducting UPDATE holds a row lock until commit, so a gateway
+// round-trip inside TX1 would serialize every concurrent buyer of the same
+// ticket type behind it (Constitution Principle IV). This asserts the shape that
+// prevents it: by the time the gateway is called, TX1 has already committed and
+// the order is readable on another connection.
+func TestCheckoutCallsTheGatewayOutsideTheReservingTransaction(t *testing.T) {
+	f := newCheckoutFixture(t)
+	tt := f.seedSellableEvent(t, 10)
+	ctx := context.Background()
+
+	var committedDuringCall bool
+	f.gateway.onCall = func(req order.PaymentRequest) {
+		// A separate connection: it can only see the row if TX1 committed.
+		stored, err := f.repo.GetOrderByNumber(ctx, req.OrderNumber)
+		committedDuringCall = err == nil && stored.Status == "PENDING"
+	}
+
+	_, err := f.svc.Checkout(ctx, checkoutFor(tt, 1))
+
+	require.NoError(t, err)
+	assert.True(t, committedDuringCall,
+		"the reserving transaction must be committed before the provider is called")
 }
 
 // --- Gateway failure and compensation (FR-021) ----------------------------

@@ -28,6 +28,14 @@ SELECT id FROM ticket_types WHERE event_id = $1;
 -- name: ListTicketTypeNamesByIDs :many
 SELECT id, name FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 
+-- Both tables belong to this domain, so the JOIN stays inside the boundary the
+-- order domain is not allowed to cross itself.
+-- name: ListTicketTypeDisplaysByIDs :many
+SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug
+FROM ticket_types tt
+JOIN events e ON e.id = tt.event_id
+WHERE tt.id = ANY(sqlc.arg(ids)::uuid[]);
+
 -- Quota mutation (EventProvider) -------------------------------------------
 -- `quota` is the REMAINING quota (constitution, Critical Data Flow Rules): the live
 -- counter checkout decrements and cancel/expire/deny/failure restore. The guarded

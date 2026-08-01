@@ -36,6 +36,12 @@ const (
 	shutdownTimeout = 30 * time.Second
 	// rateLimitWindow is how long an idle per-IP bucket is retained.
 	rateLimitWindow = 3 * time.Minute
+
+	// The guest's "check payment status" button costs an outbound provider call
+	// per press, so it is limited far more tightly than a read: roughly one press
+	// every five seconds, with a small burst for an impatient double-tap.
+	paymentRefreshRate  = 0.2
+	paymentRefreshBurst = 3
 )
 
 func main() {
@@ -104,15 +110,15 @@ func run(log *logger.Logger) error {
 
 	// --- Gateway ----------------------------------------------------------
 
-	snapBaseURL := payment.SnapSandboxBaseURL
+	gatewayBaseURL := payment.CoreAPISandboxBaseURL
 	if cfg.MidtransIsProduction {
-		snapBaseURL = payment.SnapProductionBaseURL
+		gatewayBaseURL = payment.CoreAPIProductionBaseURL
 	}
 	if cfg.MidtransBaseURL != "" {
-		snapBaseURL = cfg.MidtransBaseURL
-		log.Warn("using an overridden payment gateway endpoint", "base_url", snapBaseURL)
+		gatewayBaseURL = cfg.MidtransBaseURL
+		log.Warn("using an overridden payment gateway endpoint", "base_url", gatewayBaseURL)
 	}
-	gateway := payment.NewMidtransGateway(cfg.MidtransServerKey, snapBaseURL, &http.Client{
+	gateway := payment.NewMidtransGateway(cfg.MidtransServerKey, gatewayBaseURL, cfg.PaymentExpiry, &http.Client{
 		Timeout: 15 * time.Second,
 	})
 
@@ -129,6 +135,10 @@ func run(log *logger.Logger) error {
 		log)
 
 	adminOrderSvc := order.NewAdminService(orderRepo, orderEventLookupAdapter{events: eventSvc})
+
+	// The guest's own order page: read-only, unauthenticated, keyed by order
+	// number.
+	publicOrderSvc := order.NewPublicService(orderRepo, orderEventLookupAdapter{events: eventSvc})
 
 	ticketSvc := ticket.NewService(pool, ticketRepo, orderRepo, log)
 
@@ -193,7 +203,7 @@ func run(log *logger.Logger) error {
 
 	// Public, unauthenticated guest surface (Constitution Principle VI).
 	event.NewHandler(eventSvc).RegisterPublicRoutes(api)
-	order.NewHandler(orderSvc, log).RegisterPublicRoutes(api)
+	order.NewHandler(orderSvc, publicOrderSvc, log).RegisterPublicRoutes(api)
 	payment.NewHandler(paymentSvc, log).RegisterPublicRoutes(api)
 
 	// The public ticket lookup is rate limited per IP so ticket-code enumeration
@@ -201,6 +211,20 @@ func run(log *logger.Logger) error {
 	ticketLookup := e.Group("/api/v1",
 		httpx.RateLimitPerIP(cfg.TicketLookupRateLimit, cfg.TicketLookupBurst, rateLimitWindow))
 	ticket.NewHandler(ticketSvc).RegisterPublicRoutes(ticketLookup)
+
+	// Reconciling with the payment provider costs an outbound round-trip per
+	// call, so unlike the polled order read it sits behind a per-IP limit
+	// (spec FR-018).
+	paymentRefresh := e.Group("/api/v1",
+		httpx.RateLimitPerIP(paymentRefreshRate, paymentRefreshBurst, rateLimitWindow))
+	payment.NewHandler(paymentSvc, log).RegisterRefreshRoute(paymentRefresh)
+
+	// Abandoned orders release their seats without anyone opening the page.
+	sweeper := payment.NewSweeper(paymentSvc, cfg.PaymentSweepInterval)
+	sweepCtx, stopSweeper := context.WithCancel(context.Background())
+	defer stopSweeper()
+	go sweeper.Run(sweepCtx)
+	log.Info("payment expiry sweeper started", "interval", cfg.PaymentSweepInterval.String())
 
 	// Login is the one /admin/* route reachable without a token.
 	admin.NewHandler(adminSvc).RegisterRoutes(api)
@@ -238,6 +262,10 @@ func run(log *logger.Logger) error {
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
+
+	// Stop sweeping before draining: a sweep starting now would only be cut off
+	// mid-transaction.
+	stopSweeper()
 
 	// Post-payment work runs off the request path, so draining the HTTP server is
 	// not enough: wait for any in-flight ticket generation and email delivery
