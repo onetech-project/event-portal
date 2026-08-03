@@ -1,5 +1,8 @@
 -- Schema source of truth: SCHEMA.md (LOCKED — no columns, tables, or indexes may be
 -- added here without amending SCHEMA.md in the same change).
+--
+-- Applied by golang-migrate, which records this version in schema_migrations.
+-- Every change here needs the matching reversal in 000001_init.down.sql.
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

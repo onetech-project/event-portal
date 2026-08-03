@@ -5,11 +5,12 @@ version: "2"
 sql:
   - &admin
     engine: "postgresql"
-    # Every migration, in order: sqlc replays them to build the schema it
-    # generates against, so omitting one silently hides its columns.
-    schema:
-      - "migrations/0001_init.sql"
-      - "migrations/0002_payment_qris.sql"
+    # The whole directory, not a list: sqlc replays the migrations in filename
+    # order to build the schema it generates against, and recognises the
+    # golang-migrate naming well enough to skip the *.down.sql files. Pointing at
+    # the directory means a new migration is picked up without editing this file —
+    # the old explicit list silently hid the columns of any migration left out.
+    schema: "migrations"
     queries: "internal/admin/queries"
     gen:
       go: &gen

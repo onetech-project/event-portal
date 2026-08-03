@@ -4,11 +4,9 @@
 -- order itself has to carry what the payment page renders: the QRIS payload and
 -- the deadline it is valid until.
 --
--- NOTE: docker-compose mounts this directory at /docker-entrypoint-initdb.d,
--- which Postgres runs ONLY when the data volume is empty. Apply this by hand to
--- any database that already exists:
---
---   psql "$DATABASE_URL" -f backend/migrations/0002_payment_qris.sql
+-- The IF NOT EXISTS guards predate version tracking and are kept deliberately:
+-- they are what lets a database that already had these columns applied by hand be
+-- adopted with `migrate force 1 && migrate up` instead of a manual stamp.
 
 -- The raw QRIS payload returned by the provider. The QR image is rendered from
 -- this on demand at request time — this MVP has no object storage, so nothing is

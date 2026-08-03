@@ -19,13 +19,38 @@ services:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # Applied in filename order on first boot of an empty data volume.
-      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ticketing -d ticketing"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Schema owner. Runs to completion before the API is allowed to start, so the
+  # binary never serves against a schema it was not built for.
+  #
+  # This replaces the old /docker-entrypoint-initdb.d mount, which Postgres runs
+  # only on an empty data volume: a second migration was silently never applied to
+  # a database that already existed. golang-migrate records every applied version
+  # in schema_migrations instead, so it can tell.
+  migrate:
+    image: migrate/migrate:v4.19.0
+    container_name: ticketing-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    # One-shot: it exits, and must not be restarted into a no-op loop.
+    restart: "no"
+    # -path and -database belong to the entrypoint, not the command, so that
+    # `docker compose run --rm migrate <subcommand>` overrides only the
+    # subcommand — `run … migrate version` and `run … migrate force 2` both work
+    # without repeating the connection string.
+    entrypoint:
+      - "migrate"
+      - "-path=/migrations"
+      - "-database=postgres://ticketing:ticketing@postgres:5432/ticketing?sslmode=disable"
+    command: ["up"]
 
   api:
     build:
@@ -37,6 +62,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       APP_PORT: "8080"
       DATABASE_URL: postgres://ticketing:ticketing@postgres:5432/ticketing?sslmode=disable

@@ -18,7 +18,7 @@ backend/     Go modular monolith (Echo v4, sqlc, pgx)
   internal/         one package per domain: admin, event, order, payment,
                     ticket, notification
   pkg/              shared non-domain utilities (db, config, logger, money, …)
-  migrations/       SQL schema, verbatim from SCHEMA.md
+  migrations/       golang-migrate up/down pairs, schema per SCHEMA.md
 frontend/    Next.js App Router, TypeScript, TailwindCSS, TanStack Query
 ```
 
@@ -39,8 +39,8 @@ docker compose exec api /app/seedadmin -email admin@example.com -password 'a-str
 Or the app locally against a containerised database:
 
 ```bash
-docker compose up -d postgres
-cp backend/.env.example backend/.env     # loaded automatically by godotenv
+docker compose up -d postgres migrate     # migrate exits once the schema is current
+cp backend/.env.example backend/.env      # loaded automatically by godotenv
 cd backend
 go run ./cmd/seedadmin -email admin@example.com -password 'a-strong-password'
 go run ./cmd/api                          # :8080
@@ -121,17 +121,58 @@ cd backend && ./scripts/setup-test-db.sh   # recreates it and applies every migr
 
 ## Migrations
 
-`backend/migrations/` is mounted at `/docker-entrypoint-initdb.d`, which Postgres
-runs **only when the data volume is empty**. A new migration is therefore picked
-up automatically on a fresh volume and must be applied by hand to a database that
-already exists:
+[golang-migrate](https://github.com/golang-migrate/migrate), versioned in
+`backend/migrations/` as `{version}_{name}.up.sql` + `.down.sql`. Applied versions
+are recorded in a `schema_migrations` table, so a migration is applied exactly once
+and the database can say which version it is on.
+
+`docker compose up` runs them: a one-shot `migrate` service that the API
+`depends_on` with `service_completed_successfully`, so the API never starts against
+a stale schema. Nothing else applies migrations — the API binary does not, and the
+runtime image no longer even ships them.
+
+To run them by hand, install the CLI once:
 
 ```bash
-psql "$DATABASE_URL" -f backend/migrations/0002_payment_qris.sql
+go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+export TICKETING_DB="postgres://ticketing:ticketing@localhost:5433/ticketing?sslmode=disable"
+
+migrate -path backend/migrations -database "$TICKETING_DB" up        # apply everything
+migrate -path backend/migrations -database "$TICKETING_DB" version   # current version
+migrate -path backend/migrations -database "$TICKETING_DB" down 1    # roll back one
 ```
 
-`sqlc.yaml` lists every migration under `schema:` — omitting one silently hides
-its columns from the generated code.
+Or without installing anything, via the same image Compose uses:
+
+```bash
+docker compose run --rm migrate version
+```
+
+### Adding a migration
+
+```bash
+migrate create -ext sql -dir backend/migrations -seq -digits 6 add_something
+```
+
+Both files are required, and the `down` must actually reverse the `up` — that is
+the whole point of committing it. `sqlc.yaml` points at the directory rather than a
+file list, so a new migration is picked up by `sqlc generate` with no config change
+(sqlc replays the `.up.sql` files in order and ignores the `.down.sql` ones).
+
+### Adopting a database that predates version tracking
+
+Databases created before this change carry the schema but no `schema_migrations`
+row, so a plain `up` tries to re-create existing tables, fails, and leaves the
+version marked *dirty*. Stamp it at the version it is already on instead:
+
+```bash
+migrate -path backend/migrations -database "$TICKETING_DB" force 2   # both migrations already applied
+migrate -path backend/migrations -database "$TICKETING_DB" up        # "no change"
+```
+
+`force` sets the version without running any SQL — it is also how you clear a dirty
+flag after a failed migration, once you have checked by hand what did and did not
+apply.
 
 ## Things worth knowing before changing anything
 

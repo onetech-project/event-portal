@@ -39,8 +39,10 @@ WORKDIR /app
 
 COPY --from=builder /out/api /app/api
 COPY --from=builder /out/seedadmin /app/seedadmin
-# Shipped so the image can also seed or re-apply the schema in a one-off container.
-COPY --from=builder /src/migrations /app/migrations
+
+# The migrations are deliberately NOT shipped here. Nothing in this image could
+# apply them — no shell, no psql, no migrate binary — and the schema is owned by
+# the migrate/migrate container in docker-compose.yml, which mounts them directly.
 
 # The nonroot tag runs as uid 65532; declared explicitly so it survives a base
 # image change.
