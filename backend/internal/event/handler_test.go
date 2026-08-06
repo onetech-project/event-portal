@@ -40,12 +40,12 @@ func TestListEventsEndpointReturnsTheContractShape(t *testing.T) {
 	testsupport.SeedEvent(t, pool, "rock-fest", "PUBLISHED")
 	testsupport.SeedEvent(t, pool, "draft-fest", "DRAFT")
 
-	rec := get(t, e, "/api/v1/events")
+	rec := get(t, e, "/api/v1/event")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 	require.Len(t, body, 1)
 
 	assert.ElementsMatch(t,
@@ -59,56 +59,139 @@ func TestListEventsEndpointReturnsTheContractShape(t *testing.T) {
 func TestListEventsReturnsAnEmptyJSONArrayWhenNoneArePublished(t *testing.T) {
 	e, _ := newGuestAPI(t)
 
-	rec := get(t, e, "/api/v1/events")
+	rec := get(t, e, "/api/v1/event")
 
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `[]`, rec.Body.String())
+	// data must be [] rather than null even when nothing is published — the
+	// envelope wraps it, the guarantee itself is unchanged.
+	assert.JSONEq(t, `{"code":200000,"message":"Success","data":[]}`, rec.Body.String())
 }
 
-func TestEventDetailEndpointReturnsTicketTypesWithRemainingQuota(t *testing.T) {
+func TestEventDetailIsContentOnly(t *testing.T) {
 	e, pool := newGuestAPI(t)
 	ev := testsupport.SeedEvent(t, pool, "jazz-night", "PUBLISHED")
 	testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 42)
+	testsupport.SeedEventTerms(t, pool, ev.ID, "<ol><li>No refunds.</li></ol>")
 
-	rec := get(t, e, "/api/v1/events/jazz-night")
+	rec := get(t, e, "/api/v1/event/jazz-night")
 
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 
+	// Clarification 2026-08-05: no ticket or package data on the detail —
+	// those live behind GET /ticket/:event_id and GET /packages/:event_id.
 	assert.ElementsMatch(t,
 		[]string{"id", "name", "slug", "description", "venue", "address",
-			"start_date", "end_date", "banner_url", "ticket_types"},
+			"start_date", "end_date", "banner_url", "scale",
+			"activities", "guest_stars", "guidelines", "has_terms"},
 		keysOf(body))
+	assert.Equal(t, true, body["has_terms"], "authored terms enable Buy Ticket")
+}
 
-	types := body["ticket_types"].([]any)
+func TestTicketEndpointReturnsTypesWithRemainingQuota(t *testing.T) {
+	e, pool := newGuestAPI(t)
+	ev := testsupport.SeedEvent(t, pool, "jazz-night", "PUBLISHED")
+	testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 42)
+
+	rec := get(t, e, "/api/v1/ticket/jazz-night")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var types []map[string]any
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &types))
 	require.Len(t, types, 1)
-	first := types[0].(map[string]any)
+	first := types[0]
 	assert.ElementsMatch(t,
-		[]string{"id", "name", "price", "quota_remaining", "sales_start", "sales_end"},
+		[]string{"id", "name", "description", "price", "quota_remaining", "sales_start", "sales_end"},
 		keysOf(first))
+	assert.Nil(t, first["description"],
+		"an unset remark is null, so the card falls back to the standard notice")
 	assert.Equal(t, "150000.00", first["price"], "price is a decimal string per the contract")
 	assert.InDelta(t, 42.0, first["quota_remaining"], 0.001)
+}
+
+func TestPackagesEndpointReturnsEmptyArrayWhenNoneExist(t *testing.T) {
+	e, pool := newGuestAPI(t)
+	testsupport.SeedEvent(t, pool, "jazz-night", "PUBLISHED")
+
+	rec := get(t, e, "/api/v1/packages/jazz-night")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"code":200000,"message":"Success","data":[]}`, rec.Body.String())
+}
+
+// --- T013: GET /ticket/terms-condition/:event_id ----------------------------
+
+func TestTermsEndpointReturnsTheAuthoredDocument(t *testing.T) {
+	e, pool := newGuestAPI(t)
+	ev := testsupport.SeedEvent(t, pool, "with-terms", "PUBLISHED")
+	termsID := testsupport.SeedEventTerms(t, pool, ev.ID, "<ol><li>No refunds.</li></ol>")
+
+	rec := get(t, e, "/api/v1/ticket/terms-condition/with-terms")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
+	assert.ElementsMatch(t, []string{"id", "content", "updated_at"}, keysOf(body))
+	assert.Equal(t, termsID.String(), body["id"],
+		"the dialog echoes this id back when recording agreement (409002 guard)")
+	assert.Equal(t, "<ol><li>No refunds.</li></ol>", body["content"])
+}
+
+func TestTermsEndpointDistinguishesUnauthoredFromUnknownEvent(t *testing.T) {
+	e, pool := newGuestAPI(t)
+	testsupport.SeedEvent(t, pool, "no-terms-yet", "PUBLISHED")
+
+	// A known event with no authored terms → 404002.
+	rec := get(t, e, "/api/v1/ticket/terms-condition/no-terms-yet")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var body apperr.Body
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, 404002, body.Code, "terms-not-authored is its own code")
+
+	// An unknown event → plain 404001, so the dialog can word it differently.
+	rec = get(t, e, "/api/v1/ticket/terms-condition/who-knows")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, 404001, body.Code)
+}
+
+// The static "terms-condition" segment must never be swallowed by
+// GET /ticket/:event_id's parameter (routing precedence, T011/T013).
+func TestTermsPathIsNotShadowedByTheTicketListingParam(t *testing.T) {
+	e, pool := newGuestAPI(t)
+	ev := testsupport.SeedEvent(t, pool, "shadow-check", "PUBLISHED")
+	testsupport.SeedEventTerms(t, pool, ev.ID, "<p>ok</p>")
+
+	rec := get(t, e, "/api/v1/ticket/terms-condition/shadow-check")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
+	assert.Contains(t, body, "content",
+		"must resolve to the terms handler, not the ticket-type listing")
 }
 
 func TestEventDetailEndpointReturns404ForAnUnpublishedEvent(t *testing.T) {
 	e, pool := newGuestAPI(t)
 	testsupport.SeedEvent(t, pool, "unreleased", "DRAFT")
 
-	rec := get(t, e, "/api/v1/events/unreleased")
+	rec := get(t, e, "/api/v1/event/unreleased")
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, apperr.CodeEventNotFound, body.ErrorCode)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeEventNotFound), body.Code)
 }
 
 func TestEventDetailEndpointReturns404ForAnUnknownSlug(t *testing.T) {
 	e, _ := newGuestAPI(t)
 
-	rec := get(t, e, "/api/v1/events/who-knows")
+	rec := get(t, e, "/api/v1/event/who-knows")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
@@ -118,7 +201,7 @@ func TestGuestEndpointsRequireNoAuthorizationHeader(t *testing.T) {
 	e, pool := newGuestAPI(t)
 	testsupport.SeedEvent(t, pool, "open-to-all", "PUBLISHED")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/event", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 

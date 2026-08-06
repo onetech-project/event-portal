@@ -6,6 +6,8 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // Handler exposes admin authentication over HTTP.
@@ -36,5 +38,5 @@ func (h *Handler) login(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, resp)
+	return httpx.Respond(c, http.StatusOK, resp)
 }

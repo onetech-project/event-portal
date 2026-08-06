@@ -401,10 +401,12 @@ func TestAdminQuotaEditIsVisibleToTheGuestCatalog(t *testing.T) {
 	_, err := svc.UpdateTicketType(ctx, tt.ID, req)
 	require.NoError(t, err)
 
-	detail, err := svc.GetPublishedEventBySlug(ctx, "shared-counter")
+	// Ticket data moved off the detail response (clarification 2026-08-05);
+	// the split read is now the surface that must reflect the admin edit.
+	types, err := svc.TicketTypesForEventSlug(ctx, "shared-counter")
 
 	require.NoError(t, err)
-	require.Len(t, detail.TicketTypes, 1)
-	assert.Equal(t, int32(3), detail.TicketTypes[0].QuotaRemaining)
-	assert.Equal(t, "175000.00", detail.TicketTypes[0].Price.String())
+	require.Len(t, types, 1)
+	assert.Equal(t, int32(3), types[0].QuotaRemaining)
+	assert.Equal(t, "175000.00", types[0].Price.String())
 }

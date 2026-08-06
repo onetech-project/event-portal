@@ -7,6 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // Handler exposes the admin resend action over HTTP.
@@ -23,6 +25,58 @@ func NewHandler(svc *Service) *Handler {
 // middleware to the group.
 func (h *Handler) RegisterAdminRoutes(g *echo.Group) {
 	g.POST("/admin/orders/:id/resend-email", h.resend)
+}
+
+// RegisterPublicRoutes mounts the guest-facing resend. The caller supplies the
+// rate-limiting middleware, which is not optional: this endpoint sends mail
+// without authentication, so an unbounded one is a way to flood a buyer's inbox.
+func (h *Handler) RegisterPublicRoutes(g *echo.Group, mw ...echo.MiddlewareFunc) {
+	g.POST("/ticket/resend-email", h.resendPublic, mw...)
+}
+
+// resendPublic re-sends a guest their own tickets, identified only by the order
+// number in the body's order_id field.
+//
+// Two rules shape it. The body carries nothing but the order number — no address
+// field is read, so no caller can redirect the mail to an address of their
+// choosing; the destination is always the buyer's stored address (spec FR-024).
+// And every outcome short of a rate-limit answers 202 with the same body, so the
+// endpoint cannot be used to discover which order numbers exist (spec FR-026); a
+// 404 here would be an enumeration oracle.
+//
+// The cost of that silence is that a mistyped number gets no correction. That is
+// acceptable because the button is only ever reached from the guest's own
+// confirmation screen, which fills the number in for them.
+func (h *Handler) resendPublic(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Every return below funnels through this, so no branch can accidentally
+	// answer differently and give the outcome away. A malformed body lands here
+	// too: a parse error is as silent as an unknown order.
+	accepted := func() error {
+		return httpx.Respond(c, http.StatusAccepted, PublicResendResponse{Message: PublicResendMessage})
+	}
+
+	var req PublicResendRequest
+	if err := c.Bind(&req); err != nil || req.OrderID == "" {
+		return accepted()
+	}
+
+	orderID, err := h.svc.orders.OrderIDByNumber(ctx, req.OrderID)
+	if err != nil {
+		// Includes "no such order". Swallowed on purpose — see above.
+		return accepted()
+	}
+
+	// SendTicketEmail already refuses anything that is not PAID, so an unpaid or
+	// cancelled order sends nothing and still answers identically.
+	if err := h.svc.SendTicketEmail(ctx, orderID); err != nil {
+		h.svc.log.WarnContext(ctx, "public ticket email resend failed",
+			"order_number", req.OrderID, "error", err.Error())
+		return accepted()
+	}
+
+	return accepted()
 }
 
 func (h *Handler) resend(c echo.Context) error {
@@ -44,7 +98,7 @@ func (h *Handler) resend(c echo.Context) error {
 		return err
 	}
 
-	return c.JSON(http.StatusOK, ResendResponse{
+	return httpx.Respond(c, http.StatusOK, ResendResponse{
 		Message: "Email resent",
 		SentTo:  order.BuyerEmail,
 	})

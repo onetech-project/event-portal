@@ -16,6 +16,7 @@ const existing: TicketTypeAdminView = {
   id: "tt-1",
   event_id: "ev-1",
   name: "Regular",
+  description: null,
   price: "150000.00",
   quota: 7,
   sold: 3,

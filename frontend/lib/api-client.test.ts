@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch, adminFetch } from "./api-client";
+import { API_CODES, ApiError, apiFetch, adminFetch } from "./api-client";
 import { clearToken, storeToken } from "./auth";
 
 function jsonResponse(body: unknown, status = 200) {
@@ -7,6 +7,11 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** A success body as the API sends it: {code, message, data} (spec 008). */
+function envelope(data: unknown, status = 200) {
+  return jsonResponse({ code: 200000, message: "Success", data }, status);
 }
 
 function mockFetch(response: Response) {
@@ -17,7 +22,7 @@ function mockFetch(response: Response) {
 
 describe("apiFetch", () => {
   it("resolves the path against the configured API base URL", async () => {
-    const spy = mockFetch(jsonResponse([{ slug: "jazz" }]));
+    const spy = mockFetch(envelope([{ slug: "jazz" }]));
 
     await apiFetch("/events");
 
@@ -27,8 +32,8 @@ describe("apiFetch", () => {
     );
   });
 
-  it("returns the parsed JSON body", async () => {
-    mockFetch(jsonResponse([{ slug: "jazz-night" }]));
+  it("unwraps the envelope and returns its data", async () => {
+    mockFetch(envelope([{ slug: "jazz-night" }]));
 
     const events = await apiFetch<{ slug: string }[]>("/events");
 
@@ -38,7 +43,7 @@ describe("apiFetch", () => {
   // Event lists and quotas are live inventory: a cached response would show a
   // guest tickets that are already gone (constitution, Technology Stack).
   it("disables caching on GET requests", async () => {
-    const spy = mockFetch(jsonResponse([]));
+    const spy = mockFetch(envelope([]));
 
     await apiFetch("/events");
 
@@ -46,7 +51,7 @@ describe("apiFetch", () => {
   });
 
   it("sends a JSON body and content type on POST", async () => {
-    const spy = mockFetch(jsonResponse({ order_number: "ORD-1" }, 201));
+    const spy = mockFetch(envelope({ order_number: "ORD-1" }, 201));
 
     await apiFetch("/checkout", { method: "POST", body: { buyer_name: "Budi" } });
 
@@ -56,17 +61,17 @@ describe("apiFetch", () => {
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
   });
 
-  it("throws an ApiError carrying the server error code", async () => {
+  it("throws an ApiError carrying the numeric envelope code", async () => {
     mockFetch(
       jsonResponse(
-        { error_code: "INSUFFICIENT_QUOTA", message: "Only 1 left." },
+        { code: 400002, message: "Only 1 left.", data: null },
         400,
       ),
     );
 
     await expect(apiFetch("/checkout", { method: "POST" })).rejects.toMatchObject({
       status: 400,
-      code: "INSUFFICIENT_QUOTA",
+      code: API_CODES.insufficientQuota,
       message: "Only 1 left.",
     });
   });
@@ -74,10 +79,12 @@ describe("apiFetch", () => {
   it("still throws a usable ApiError when the body is not JSON", async () => {
     mockFetch(new Response("upstream exploded", { status: 502 }));
 
-    const error = await apiFetch("/checkout").catch((e) => e);
+    const error = (await apiFetch("/checkout").catch((e: unknown) => e)) as ApiError;
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(502);
+    // Non-JSON bodies fall back to status*1000, keeping the numeric invariant.
+    expect(error.code).toBe(502000);
     expect(error.message).not.toBe("");
   });
 
@@ -90,17 +97,18 @@ describe("apiFetch", () => {
   it("reports a network failure as an ApiError rather than a raw TypeError", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
 
-    const error = await apiFetch("/events").catch((e) => e);
+    const error = (await apiFetch("/events").catch((e: unknown) => e)) as ApiError;
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(0);
+    expect(error.code).toBe(API_CODES.network);
   });
 });
 
 describe("adminFetch", () => {
   it("attaches the stored bearer token", async () => {
     storeToken("jwt-abc", new Date(Date.now() + 3_600_000).toISOString());
-    const spy = mockFetch(jsonResponse([]));
+    const spy = mockFetch(envelope([]));
 
     await adminFetch("/admin/events");
 
@@ -111,7 +119,7 @@ describe("adminFetch", () => {
 
   it("rejects before making a request when no token is stored", async () => {
     clearToken();
-    const spy = mockFetch(jsonResponse([]));
+    const spy = mockFetch(envelope([]));
 
     await expect(adminFetch("/admin/events")).rejects.toBeInstanceOf(ApiError);
     expect(spy).not.toHaveBeenCalled();
@@ -121,7 +129,7 @@ describe("adminFetch", () => {
   // the server will keep refusing.
   it("clears the stored token on a 401", async () => {
     storeToken("stale-jwt", new Date(Date.now() + 3_600_000).toISOString());
-    mockFetch(jsonResponse({ error_code: "UNAUTHORIZED", message: "expired" }, 401));
+    mockFetch(jsonResponse({ code: 401001, message: "expired", data: null }, 401));
 
     await expect(adminFetch("/admin/events")).rejects.toMatchObject({ status: 401 });
 

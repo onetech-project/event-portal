@@ -73,7 +73,7 @@ WHERE t.ticket_code = $1
 type GetTicketDetailByCodeRow struct {
 	TicketCode     string
 	Status         string
-	AttendeeName   string
+	AttendeeName   *string
 	TicketTypeName string
 	EventName      string
 }
@@ -119,7 +119,7 @@ ORDER BY t.created_at ASC, t.ticket_code ASC
 type ListTicketDetailsByOrderIDRow struct {
 	TicketCode     string
 	Status         string
-	AttendeeName   string
+	AttendeeName   *string
 	TicketTypeName string
 	EventName      string
 	Venue          string

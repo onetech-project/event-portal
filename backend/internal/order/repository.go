@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 
@@ -26,12 +27,16 @@ var (
 const uniqueViolation = "23505"
 
 // OrderRecord is the internal view of an orders row.
+//
+// Buyer fields are pointers since 008: booking creates the order before any
+// buyer identity exists, and nil is how a reader tells "not collected yet"
+// from an empty submission.
 type OrderRecord struct {
 	ID              uuid.UUID
 	OrderNumber     string
-	BuyerName       string
-	BuyerEmail      string
-	BuyerPhone      string
+	BuyerName       *string
+	BuyerEmail      *string
+	BuyerPhone      *string
 	TotalAmount     decimal.Decimal
 	Status          string
 	PaymentProvider *string
@@ -44,24 +49,49 @@ type OrderRecord struct {
 	// code.
 	PaymentQRString  *string
 	PaymentExpiresAt *time.Time
+	// TermsAgreedAt is the durable T&C agreement record (FR-008); nil until the
+	// record-agreement call lands. EventTermsID names the agreed document.
+	TermsAgreedAt *time.Time
+	EventTermsID  uuid.NullUUID
+	// Subtotal is the pre-fee sum of the lines; invalid on orders that predate
+	// fees (migration 0010). TotalAmount stays the single charged amount.
+	Subtotal decimal.NullDecimal
 }
 
 // OrderItemRecord is the internal view of an order_items row.
+//
+// Ref carries the line's XOR: a ticket-type line or a package line, never both.
+// Readers must branch on it rather than assuming a ticket type is present — an
+// order made entirely of bundles has no ticket_type_id on any of its lines.
 type OrderItemRecord struct {
-	ID           uuid.UUID
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	Quantity     int32
-	Price        decimal.Decimal
+	ID       uuid.UUID
+	OrderID  uuid.UUID
+	Ref      LineRef
+	Quantity int32
+	Price    decimal.Decimal
 }
 
 // AttendeeRecord is the internal view of an attendees row.
+//
+// TicketTypeID is always present, including for bundle-derived registrants;
+// PackageID records only which bundle the slot originated in.
+// Identity fields are pointers since 008: a slot is created empty at booking
+// and filled at checkout, so nil means "not yet registered".
 type AttendeeRecord struct {
 	ID           uuid.UUID
 	OrderID      uuid.UUID
 	TicketTypeID uuid.UUID
-	Name         string
-	Email        string
+	PackageID    uuid.NullUUID
+	Name         *string
+	Email        *string
+}
+
+// QuotaHold is one ticket type's total hold for an order, with package lines
+// already expanded through the junction. Restoring these is the exact inverse of
+// what checkout deducted.
+type QuotaHold struct {
+	TicketTypeID uuid.UUID
+	Quantity     int32
 }
 
 // CreateOrderParams carries the server-computed values for a new order. There is
@@ -91,9 +121,9 @@ func NewRepository(dbtx ordersql.DBTX) *Repository {
 func (r *Repository) CreateOrder(ctx context.Context, tx pgx.Tx, p CreateOrderParams) (OrderRecord, error) {
 	row, err := r.queries.WithTx(tx).CreateOrder(ctx, ordersql.CreateOrderParams{
 		OrderNumber: p.OrderNumber,
-		BuyerName:   p.BuyerName,
-		BuyerEmail:  p.BuyerEmail,
-		BuyerPhone:  p.BuyerPhone,
+		BuyerName:   &p.BuyerName,
+		BuyerEmail:  &p.BuyerEmail,
+		BuyerPhone:  &p.BuyerPhone,
 		TotalAmount: p.TotalAmount,
 	})
 	if isUniqueViolation(err) {
@@ -106,10 +136,18 @@ func (r *Repository) CreateOrder(ctx context.Context, tx pgx.Tx, p CreateOrderPa
 }
 
 // CreateOrderItem inserts one line item, priced from current server-side data.
-func (r *Repository) CreateOrderItem(ctx context.Context, tx pgx.Tx, orderID, ticketTypeID uuid.UUID, quantity int32, price decimal.Decimal) error {
+//
+// ref decides what the line sells. A package line is written once at the package's
+// own price rather than expanded into per-constituent rows, so total_amount stays
+// exactly SUM(quantity * price).
+func (r *Repository) CreateOrderItem(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, ref LineRef, quantity int32, price decimal.Decimal) error {
+	if !ref.Valid() {
+		return fmt.Errorf("create order item: line must reference exactly one of ticket type or package")
+	}
 	_, err := r.queries.WithTx(tx).CreateOrderItem(ctx, ordersql.CreateOrderItemParams{
 		OrderID:      orderID,
-		TicketTypeID: ticketTypeID,
+		TicketTypeID: ref.TicketTypeID,
+		PackageID:    ref.PackageID,
 		Quantity:     quantity,
 		Price:        price,
 	})
@@ -120,13 +158,15 @@ func (r *Repository) CreateOrderItem(ctx context.Context, tx pgx.Tx, orderID, ti
 }
 
 // CreateAttendee inserts one attendee, who will receive exactly one ticket once
-// the order is paid.
-func (r *Repository) CreateAttendee(ctx context.Context, tx pgx.Tx, orderID, ticketTypeID uuid.UUID, name, email string) (uuid.UUID, error) {
+// the order is paid. Bundle-derived registrants are ordinary attendees that also
+// record the package they came from.
+func (r *Repository) CreateAttendee(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, ref AttendeeRef, name, email string) (uuid.UUID, error) {
 	row, err := r.queries.WithTx(tx).CreateAttendee(ctx, ordersql.CreateAttendeeParams{
 		OrderID:      orderID,
-		TicketTypeID: ticketTypeID,
-		Name:         name,
-		Email:        email,
+		TicketTypeID: ref.TicketTypeID,
+		PackageID:    ref.PackageID,
+		Name:         &name,
+		Email:        &email,
 	})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("create attendee: %w", err)
@@ -275,8 +315,9 @@ func (r *Repository) GetOrderByNumber(ctx context.Context, orderNumber string) (
 	return toOrderRecord(row), nil
 }
 
-// ListOrderItemsByOrderID returns an order's line items, used to know how much
-// quota to restore when an order is cancelled or expires.
+// ListOrderItemsByOrderID returns an order's line items for display. Restoring
+// quota uses ListQuotaHoldsByOrderID instead, which expands package lines through
+// the junction rather than leaving that arithmetic to callers.
 func (r *Repository) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID) ([]OrderItemRecord, error) {
 	rows, err := r.queries.ListOrderItemsByOrderID(ctx, orderID)
 	if err != nil {
@@ -286,14 +327,60 @@ func (r *Repository) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.U
 	out := make([]OrderItemRecord, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, OrderItemRecord{
-			ID:           row.ID,
-			OrderID:      row.OrderID,
-			TicketTypeID: row.TicketTypeID,
-			Quantity:     row.Quantity,
-			Price:        row.Price,
+			ID:       row.ID,
+			OrderID:  row.OrderID,
+			Ref:      LineRef{TicketTypeID: row.TicketTypeID, PackageID: row.PackageID},
+			Quantity: row.Quantity,
+			Price:    row.Price,
 		})
 	}
 	return out, nil
+}
+
+// ListQuotaHoldsByOrderID returns what an order actually holds per ticket type,
+// with package lines already expanded through package_tickets. Rows arrive sorted
+// by ticket type, matching deduction order so restore stays on the same
+// deterministic lock sequence.
+func (r *Repository) ListQuotaHoldsByOrderID(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]QuotaHold, error) {
+	rows, err := r.queries.WithTx(tx).ListQuotaHoldsByOrderID(ctx, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("list quota holds: %w", err)
+	}
+
+	out := make([]QuotaHold, 0, len(rows))
+	for _, row := range rows {
+		// The column reads as nullable because it is projected through a UNION, but
+		// both arms filter nulls out. Skipping rather than dereferencing keeps a
+		// surprising row from restoring quota to the nil ticket type.
+		if !row.TicketTypeID.Valid {
+			continue
+		}
+		out = append(out, QuotaHold{TicketTypeID: row.TicketTypeID.UUID, Quantity: row.Qty})
+	}
+	return out, nil
+}
+
+// HasOrdersForPackage reports whether a package is referenced by an order_items or
+// attendees row. Both FKs are ON DELETE RESTRICT, so the guard must run to produce
+// a 400 rather than letting a raw constraint violation surface.
+func (r *Repository) HasOrdersForPackage(ctx context.Context, tx pgx.Tx, packageID uuid.UUID) (bool, error) {
+	has, err := r.queries.WithTx(tx).HasOrdersForPackage(ctx, uuid.NullUUID{UUID: packageID, Valid: true})
+	if err != nil {
+		return false, fmt.Errorf("check orders for package: %w", err)
+	}
+	return has != nil && *has, nil
+}
+
+// HasPendingOrdersForPackage reports whether an open PENDING order holds this
+// package. The event domain uses it to lock a package's composition (R-004): once
+// a hold exists, editing the composition would drift what expiry restores, so
+// those edits are rejected with 409 until the order resolves.
+func (r *Repository) HasPendingOrdersForPackage(ctx context.Context, tx pgx.Tx, packageID uuid.UUID) (bool, error) {
+	has, err := r.queries.WithTx(tx).HasPendingOrdersForPackage(ctx, uuid.NullUUID{UUID: packageID, Valid: true})
+	if err != nil {
+		return false, fmt.Errorf("check pending orders for package: %w", err)
+	}
+	return has, nil
 }
 
 // ListAttendeesByOrderID returns an order's attendees — one ticket is generated
@@ -312,6 +399,206 @@ func (r *Repository) ListAttendeesByOrderID(ctx context.Context, orderID uuid.UU
 			TicketTypeID: row.TicketTypeID,
 			Name:         row.Name,
 			Email:        row.Email,
+		})
+	}
+	return out, nil
+}
+
+// --- Spec 008: two-phase booking -------------------------------------------
+
+// CreateBookedOrder inserts the TX-B order: PENDING, buyer columns NULL,
+// payment fields NULL, payment_expires_at carrying the 1-hour hold.
+func (r *Repository) CreateBookedOrder(ctx context.Context, tx pgx.Tx, orderNumber string, total, subtotal decimal.Decimal, expiresAt time.Time) (OrderRecord, error) {
+	row, err := r.queries.WithTx(tx).CreateBookedOrder(ctx, ordersql.CreateBookedOrderParams{
+		OrderNumber:      orderNumber,
+		TotalAmount:      total,
+		Subtotal:         decimal.NullDecimal{Decimal: subtotal, Valid: true},
+		PaymentExpiresAt: &expiresAt,
+	})
+	if isUniqueViolation(err) {
+		return OrderRecord{}, ErrOrderNumberTaken
+	}
+	if err != nil {
+		return OrderRecord{}, fmt.Errorf("create booked order: %w", err)
+	}
+	return toOrderRecord(row), nil
+}
+
+// CreateAttendeeSlot inserts one EMPTY attendee slot: bound to its ticket type
+// (and package origin) at booking, identity filled at checkout (Option B).
+func (r *Repository) CreateAttendeeSlot(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, ref AttendeeRef) (uuid.UUID, error) {
+	row, err := r.queries.WithTx(tx).CreateAttendeeSlot(ctx, ordersql.CreateAttendeeSlotParams{
+		OrderID:      orderID,
+		TicketTypeID: ref.TicketTypeID,
+		PackageID:    ref.PackageID,
+		PackageUnit:  ref.PackageUnit,
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("create attendee slot: %w", err)
+	}
+	return row.ID, nil
+}
+
+// RecordTermsAgreement stamps terms_agreed_at + event_terms_id on a PENDING
+// order. Returns false when no row matched — the order moved on (expired,
+// cancelled, paid) between the caller's guard and this write.
+func (r *Repository) RecordTermsAgreement(ctx context.Context, orderID, termsID uuid.UUID) (bool, error) {
+	rows, err := r.queries.RecordTermsAgreement(ctx, ordersql.RecordTermsAgreementParams{
+		ID:           orderID,
+		EventTermsID: uuid.NullUUID{UUID: termsID, Valid: true},
+	})
+	if err != nil {
+		return false, fmt.Errorf("record terms agreement: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// EventIDForOrder resolves the event an order belongs to through its attendee
+// slots. ErrNotFound for an order with no slots (never true of a booked order).
+func (r *Repository) EventIDForOrder(ctx context.Context, orderID uuid.UUID) (uuid.UUID, error) {
+	eventID, err := r.queries.GetOrderEventID(ctx, orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve order event: %w", err)
+	}
+	return eventID, nil
+}
+
+// UpdateOrderBuyer stamps the buyer identity onto a PENDING order (TX-D).
+// Returns false when the order is no longer PENDING.
+func (r *Repository) UpdateOrderBuyer(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, buyer BuyerDetails) (bool, error) {
+	rows, err := r.queries.WithTx(tx).UpdateOrderBuyer(ctx, ordersql.UpdateOrderBuyerParams{
+		ID:          orderID,
+		BuyerName:   &buyer.Name,
+		BuyerEmail:  &buyer.Email,
+		BuyerPhone:  &buyer.Phone,
+		BuyerDob:    pgtype.Date{Time: buyer.Dob, Valid: true},
+		BuyerGender: &buyer.Gender,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update order buyer: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// BuyerDetails is the buyer identity checkout stamps onto the order (TX-D) —
+// the same personal fields as one visitor slot (Figma 12-4456).
+type BuyerDetails struct {
+	Name   string
+	Email  string
+	Phone  string
+	Dob    time.Time
+	Gender string
+}
+
+// ListActiveGenders returns the gender master list, the source of both the
+// forms' options and the values checkout accepts (clarified 2026-08-05).
+func (r *Repository) ListActiveGenders(ctx context.Context) ([]GenderRecord, error) {
+	rows, err := r.queries.ListActiveGenders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list genders: %w", err)
+	}
+	out := make([]GenderRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, GenderRecord{ID: row.ID, Name: row.Name})
+	}
+	return out, nil
+}
+
+// GenderRecord is one row of the gender master list.
+type GenderRecord struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// SlotDetails is one visitor form's content, written into an attendee slot.
+type SlotDetails struct {
+	Name   string
+	Email  string
+	Phone  string
+	Dob    time.Time
+	Gender string
+}
+
+// UpdateAttendeeDetails fills one slot (TX-D). The orderID predicate stops a
+// forged slot id from writing into another order's attendee; false reports
+// that no slot matched.
+func (r *Repository) UpdateAttendeeDetails(ctx context.Context, tx pgx.Tx, slotID, orderID uuid.UUID, d SlotDetails) (bool, error) {
+	rows, err := r.queries.WithTx(tx).UpdateAttendeeDetails(ctx, ordersql.UpdateAttendeeDetailsParams{
+		ID:      slotID,
+		OrderID: orderID,
+		Name:    &d.Name,
+		Email:   &d.Email,
+		Phone:   &d.Phone,
+		Dob:     pgtype.Date{Time: d.Dob, Valid: true},
+		Gender:  &d.Gender,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update attendee details: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// UpdatePaymentDetailsIfUnstarted stamps the gateway session and the payment
+// window (TX-P), guarded on `status='PENDING' AND payment_qr_string IS NULL`
+// so a concurrent checkout cannot overwrite a live QR. False = guard matched
+// no row and the caller should re-read.
+func (r *Repository) UpdatePaymentDetailsIfUnstarted(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, details PaymentDetails) (bool, error) {
+	rows, err := r.queries.WithTx(tx).UpdatePaymentDetailsIfUnstarted(ctx, ordersql.UpdatePaymentDetailsIfUnstartedParams{
+		ID:               orderID,
+		PaymentUrl:       &details.PaymentURL,
+		PaymentProvider:  &details.Provider,
+		PaymentQrString:  &details.QRString,
+		PaymentExpiresAt: &details.ExpiresAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("stamp payment details: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// AttendeeSlotRecord is one slot row with its human ticket-type name, as the
+// order page renders it (details or nulls — Option B).
+type AttendeeSlotRecord struct {
+	ID             uuid.UUID
+	TicketTypeID   uuid.UUID
+	PackageID      uuid.NullUUID
+	PackageUnit    *int16
+	TicketTypeName string
+	Name           *string
+	Email          *string
+	Phone          *string
+	Dob            *time.Time
+	Gender         *string
+}
+
+// ListAttendeeSlotsByOrderID returns an order's slots in stable insertion
+// order, with the 008 detail columns.
+func (r *Repository) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.UUID) ([]AttendeeSlotRecord, error) {
+	rows, err := r.queries.ListAttendeeSlotsByOrderID(ctx, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("list attendee slots: %w", err)
+	}
+	out := make([]AttendeeSlotRecord, 0, len(rows))
+	for _, row := range rows {
+		var dob *time.Time
+		if row.Dob.Valid {
+			d := row.Dob.Time
+			dob = &d
+		}
+		out = append(out, AttendeeSlotRecord{
+			ID:             row.ID,
+			TicketTypeID:   row.TicketTypeID,
+			PackageID:      row.PackageID,
+			PackageUnit:    row.PackageUnit,
+			TicketTypeName: row.TicketTypeName,
+			Name:           row.Name,
+			Email:          row.Email,
+			Phone:          row.Phone,
+			Dob:            dob,
+			Gender:         row.Gender,
 		})
 	}
 	return out, nil
@@ -345,8 +632,13 @@ func (r *Repository) AttendeeIDsForOrder(ctx context.Context, orderID uuid.UUID)
 //
 // It runs inside the caller's delete transaction, closing the TOCTOU window in
 // which an order could land between the guard and the DELETE.
+//
+// Since order_items.ticket_type_id became nullable, the attendees half of this
+// check stopped being a redundant safety net: an order made only of bundles has no
+// ticket_type_id on any order_items row, and attendees.ticket_type_id is the only
+// place that reference survives.
 func (r *Repository) HasOrdersForTicketType(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID) (bool, error) {
-	has, err := r.queries.WithTx(tx).HasOrdersForTicketType(ctx, ticketTypeID)
+	has, err := r.queries.WithTx(tx).HasOrdersForTicketType(ctx, uuid.NullUUID{UUID: ticketTypeID, Valid: true})
 	if err != nil {
 		return false, fmt.Errorf("check orders for ticket type: %w", err)
 	}
@@ -366,10 +658,14 @@ func (r *Repository) HasOrdersForTicketTypes(ctx context.Context, tx pgx.Tx, tic
 	return has != nil && *has, nil
 }
 
-// SoldCountByTicketType returns SUM(order_items.quantity) per ticket type in one
-// query for a whole page. The count is always derived, never stored: a stored
-// counter could drift from the truth, and SCHEMA.md defines no column for it
-// (constitution, Critical Data Flow Rules).
+// SoldCountByTicketType returns units sold per ticket type in one query for a
+// whole page. The count is always derived, never stored: a stored counter could
+// drift from the truth, and SCHEMA.md defines no column for it (constitution,
+// Critical Data Flow Rules).
+//
+// The underlying query counts standalone lines AND package lines expanded through
+// package_tickets, so a bundled sale is attributed to every ticket type it
+// consumed rather than disappearing from the figure.
 func (r *Repository) SoldCountByTicketType(ctx context.Context, ticketTypeIDs []uuid.UUID) (map[uuid.UUID]int, error) {
 	counts := make(map[uuid.UUID]int, len(ticketTypeIDs))
 	if len(ticketTypeIDs) == 0 {
@@ -381,7 +677,34 @@ func (r *Repository) SoldCountByTicketType(ctx context.Context, ticketTypeIDs []
 		return nil, fmt.Errorf("count sold tickets: %w", err)
 	}
 	for _, row := range rows {
-		counts[row.TicketTypeID] = int(row.Sold)
+		// Nullable only because the column is projected through a UNION; both arms
+		// filter nulls out.
+		if !row.TicketTypeID.Valid {
+			continue
+		}
+		counts[row.TicketTypeID.UUID] = int(row.Sold)
+	}
+	return counts, nil
+}
+
+// SoldCountByPackage returns units sold per package in one query, used by the
+// admin package dashboard. A package line is stored once at the package's own
+// price, so this is a straight SUM(quantity) over order_items.
+func (r *Repository) SoldCountByPackage(ctx context.Context, packageIDs []uuid.UUID) (map[uuid.UUID]int, error) {
+	counts := make(map[uuid.UUID]int, len(packageIDs))
+	if len(packageIDs) == 0 {
+		return counts, nil
+	}
+
+	rows, err := r.queries.SoldCountByPackage(ctx, packageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("count sold packages: %w", err)
+	}
+	for _, row := range rows {
+		if !row.PackageID.Valid {
+			continue
+		}
+		counts[row.PackageID.UUID] = int(row.Sold)
 	}
 	return counts, nil
 }
@@ -400,8 +723,11 @@ func toOrderRecord(row ordersql.Order) OrderRecord {
 		EmailSent:       row.EmailSent,
 		CreatedAt:       row.CreatedAt,
 
+		Subtotal:         row.Subtotal,
 		PaymentQRString:  row.PaymentQrString,
 		PaymentExpiresAt: row.PaymentExpiresAt,
+		TermsAgreedAt:    row.TermsAgreedAt,
+		EventTermsID:     row.EventTermsID,
 	}
 }
 
@@ -409,3 +735,155 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
 }
+
+// strv unwraps a nullable text column for display. Buyer and attendee identity
+// became nullable in 008 (booking precedes the forms); nil renders as empty.
+func strv(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// --- Fees (master + per-order snapshot; clarified 2026-08-05) ---------------
+
+// FeeRecord is one active fee master row as booking applies it.
+type FeeRecord struct {
+	ID      uuid.UUID
+	Name    string
+	FeeType string
+	Value   decimal.Decimal
+}
+
+// FeeRow is one fee master row as the admin panel sees it.
+type FeeRow struct {
+	ID        uuid.UUID
+	Name      string
+	FeeType   string
+	Value     decimal.Decimal
+	Position  int32
+	IsActive  bool
+	CreatedAt *time.Time
+	UpdatedAt *time.Time
+}
+
+// OrderFeeRecord is one frozen fee line on an order.
+type OrderFeeRecord struct {
+	Name   string
+	Amount decimal.Decimal
+}
+
+// ListActiveFees returns the fee master rows booking applies, in display order.
+func (r *Repository) ListActiveFees(ctx context.Context) ([]FeeRecord, error) {
+	rows, err := r.queries.ListActiveFees(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active fees: %w", err)
+	}
+	out := make([]FeeRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, FeeRecord{ID: row.ID, Name: row.Name, FeeType: row.FeeType, Value: row.Value})
+	}
+	return out, nil
+}
+
+// CreateOrderFee freezes one computed fee line onto the order inside TX-B.
+func (r *Repository) CreateOrderFee(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, name string, amount decimal.Decimal, position int32) error {
+	if err := r.queries.WithTx(tx).CreateOrderFee(ctx, ordersql.CreateOrderFeeParams{
+		OrderID:  orderID,
+		Name:     name,
+		Amount:   amount,
+		Position: position,
+	}); err != nil {
+		return fmt.Errorf("create order fee: %w", err)
+	}
+	return nil
+}
+
+// ListOrderFeesByOrderID returns an order's frozen fee lines, in display order.
+func (r *Repository) ListOrderFeesByOrderID(ctx context.Context, orderID uuid.UUID) ([]OrderFeeRecord, error) {
+	rows, err := r.queries.ListOrderFeesByOrderID(ctx, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("list order fees: %w", err)
+	}
+	out := make([]OrderFeeRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, OrderFeeRecord{Name: row.Name, Amount: row.Amount})
+	}
+	return out, nil
+}
+
+// ListFees returns every fee master row for the admin panel.
+func (r *Repository) ListFees(ctx context.Context) ([]FeeRow, error) {
+	rows, err := r.queries.ListFees(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list fees: %w", err)
+	}
+	out := make([]FeeRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toFeeRow(row.ID, row.Name, row.FeeType, row.Value, row.Position, row.IsActive, row.CreatedAt, row.UpdatedAt))
+	}
+	return out, nil
+}
+
+// CreateFee inserts a fee master row. ErrFeeNameTaken on a duplicate name.
+func (r *Repository) CreateFee(ctx context.Context, name, feeType string, value decimal.Decimal, position int32, isActive bool) (FeeRow, error) {
+	row, err := r.queries.CreateFee(ctx, ordersql.CreateFeeParams{
+		Name: name, FeeType: feeType, Value: value, Position: position, IsActive: isActive,
+	})
+	if isUniqueViolation(err) {
+		return FeeRow{}, ErrFeeNameTaken
+	}
+	if err != nil {
+		return FeeRow{}, fmt.Errorf("create fee: %w", err)
+	}
+	return toFeeRow(row.ID, row.Name, row.FeeType, row.Value, row.Position, row.IsActive, row.CreatedAt, row.UpdatedAt), nil
+}
+
+// UpdateFee rewrites a fee master row. ErrNotFound when the id has no row.
+func (r *Repository) UpdateFee(ctx context.Context, id uuid.UUID, name, feeType string, value decimal.Decimal, position int32, isActive bool) (FeeRow, error) {
+	row, err := r.queries.UpdateFee(ctx, ordersql.UpdateFeeParams{
+		ID: id, Name: name, FeeType: feeType, Value: value, Position: position, IsActive: isActive,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FeeRow{}, ErrNotFound
+	}
+	if isUniqueViolation(err) {
+		return FeeRow{}, ErrFeeNameTaken
+	}
+	if err != nil {
+		return FeeRow{}, fmt.Errorf("update fee: %w", err)
+	}
+	return toFeeRow(row.ID, row.Name, row.FeeType, row.Value, row.Position, row.IsActive, row.CreatedAt, row.UpdatedAt), nil
+}
+
+// DeleteFee removes a fee master row; existing orders keep their snapshots.
+func (r *Repository) DeleteFee(ctx context.Context, id uuid.UUID) error {
+	rows, err := r.queries.DeleteFee(ctx, id)
+	if err != nil {
+		return fmt.Errorf("delete fee: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func toFeeRow(id uuid.UUID, name, feeType string, value decimal.Decimal, position int32, isActive bool, createdAt, updatedAt pgtype.Timestamptz) FeeRow {
+	return FeeRow{
+		ID: id, Name: name, FeeType: feeType, Value: value,
+		Position: position, IsActive: isActive,
+		CreatedAt: tsPtr(createdAt), UpdatedAt: tsPtr(updatedAt),
+	}
+}
+
+// tsPtr converts a pgtype timestamp into the *time.Time the DTO layer speaks.
+func tsPtr(t pgtype.Timestamptz) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	v := t.Time
+	return &v
+}
+
+// ErrFeeNameTaken reports a duplicate fee name.
+var ErrFeeNameTaken = errors.New("order: fee name taken")

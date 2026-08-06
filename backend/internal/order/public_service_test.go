@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/manjo/ticketing/backend/internal/order"
 	"github.com/manjo/ticketing/backend/internal/testsupport"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
 )
@@ -54,7 +55,10 @@ func TestOrderByNumberDescribesTheOrderAndItsPaymentInstruction(t *testing.T) {
 	assert.NotEmpty(t, detail.Event.Name)
 
 	require.Len(t, detail.Items, 1)
-	assert.Equal(t, "Regular", detail.Items[0].TicketTypeName)
+	assert.Equal(t, order.LineKindTicket, detail.Items[0].Kind)
+	require.NotNil(t, detail.Items[0].TicketTypeName)
+	assert.Equal(t, "Regular", *detail.Items[0].TicketTypeName)
+	assert.Nil(t, detail.Items[0].PackageName)
 	assert.Equal(t, int32(2), detail.Items[0].Quantity)
 	assert.Equal(t, "150000.00", detail.Items[0].UnitPrice.String())
 	assert.Equal(t, "300000.00", detail.Items[0].Subtotal.String())
@@ -64,7 +68,7 @@ func TestOrderByNumberDescribesTheOrderAndItsPaymentInstruction(t *testing.T) {
 	assert.Equal(t, "fakegw", detail.Payment.Provider)
 	assert.Equal(t, "300000.00", detail.Payment.Amount.String())
 	assert.True(t, detail.Payment.ExpiresAt.After(time.Now()))
-	assert.Equal(t, "/api/v1/orders/"+orderNumber+"/qris.png", detail.Payment.QRImagePath)
+	assert.Equal(t, "/api/v1/ticket/order/"+orderNumber+"/qris.png", detail.Payment.QRImagePath)
 
 	// The countdown is rendered against this, not the device clock (SC-005).
 	assert.WithinDuration(t, time.Now(), detail.ServerTime, 5*time.Second)

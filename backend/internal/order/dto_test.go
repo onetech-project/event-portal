@@ -18,13 +18,15 @@ var (
 	ttVIP     = uuid.MustParse("22222222-2222-2222-2222-222222222222")
 )
 
+func ptr(u uuid.UUID) *uuid.UUID { return &u }
+
 func validRequest() order.CheckoutRequest {
 	return order.CheckoutRequest{
 		BuyerName:  "Budi Santoso",
 		BuyerEmail: "budi@example.com",
 		BuyerPhone: "+628123456789",
 		Items: []order.CheckoutItem{
-			{TicketTypeID: ttRegular, Quantity: 2},
+			{TicketTypeID: ptr(ttRegular), Quantity: 2},
 		},
 		Attendees: []order.CheckoutAttendee{
 			{TicketTypeID: ttRegular, Name: "Budi", Email: "budi@example.com"},
@@ -47,7 +49,7 @@ func TestValidRequestPasses(t *testing.T) {
 
 func TestValidatePassesForMultipleTicketTypes(t *testing.T) {
 	req := validRequest()
-	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ttVIP, Quantity: 1})
+	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ptr(ttVIP), Quantity: 1})
 	req.Attendees = append(req.Attendees,
 		order.CheckoutAttendee{TicketTypeID: ttVIP, Name: "Andi", Email: "andi@example.com"})
 
@@ -89,7 +91,7 @@ func TestValidateRejectsEmptyItems(t *testing.T) {
 
 func TestValidateRejectsNonPositiveQuantity(t *testing.T) {
 	req := validRequest()
-	req.Items = []order.CheckoutItem{{TicketTypeID: ttRegular, Quantity: 0}}
+	req.Items = []order.CheckoutItem{{TicketTypeID: ptr(ttRegular), Quantity: 0}}
 	req.Attendees = nil
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
@@ -98,8 +100,8 @@ func TestValidateRejectsNonPositiveQuantity(t *testing.T) {
 func TestValidateRejectsDuplicateTicketTypeLines(t *testing.T) {
 	req := validRequest()
 	req.Items = []order.CheckoutItem{
-		{TicketTypeID: ttRegular, Quantity: 1},
-		{TicketTypeID: ttRegular, Quantity: 1},
+		{TicketTypeID: ptr(ttRegular), Quantity: 1},
+		{TicketTypeID: ptr(ttRegular), Quantity: 1},
 	}
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()),
@@ -129,8 +131,8 @@ func TestValidateRejectsCorrectTotalButWrongPerTicketTypeSplit(t *testing.T) {
 		BuyerEmail: "budi@example.com",
 		BuyerPhone: "+628123456789",
 		Items: []order.CheckoutItem{
-			{TicketTypeID: ttRegular, Quantity: 1},
-			{TicketTypeID: ttVIP, Quantity: 1},
+			{TicketTypeID: ptr(ttRegular), Quantity: 1},
+			{TicketTypeID: ptr(ttVIP), Quantity: 1},
 		},
 		Attendees: []order.CheckoutAttendee{
 			{TicketTypeID: ttRegular, Name: "A", Email: "a@example.com"},
@@ -163,14 +165,38 @@ func TestValidateRejectsAttendeeWithMissingNameOrEmail(t *testing.T) {
 
 func TestValidateRejectsNilTicketTypeID(t *testing.T) {
 	req := validRequest()
-	req.Items[0].TicketTypeID = uuid.Nil
+	req.Items[0].TicketTypeID = &uuid.Nil
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
 }
 
 func TestTotalQuantitySumsLineItems(t *testing.T) {
 	req := validRequest()
-	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ttVIP, Quantity: 3})
+	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ptr(ttVIP), Quantity: 3})
 
 	assert.Equal(t, int32(5), req.TotalQuantity())
+}
+
+func TestValidateRejectsItemWithBothTicketTypeAndPackage(t *testing.T) {
+	pkgID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	req := validRequest()
+	req.Items = []order.CheckoutItem{
+		{TicketTypeID: ptr(ttRegular), PackageID: ptr(pkgID), Quantity: 1},
+	}
+	req.Attendees = []order.CheckoutAttendee{
+		{TicketTypeID: ttRegular, Name: "A", Email: "a@example.com"},
+	}
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()),
+		"an item must reference exactly one of ticket_type_id or package_id")
+}
+
+func TestValidateRejectsItemWithNeitherTicketTypeNorPackage(t *testing.T) {
+	req := validRequest()
+	req.Items = []order.CheckoutItem{
+		{Quantity: 1},
+	}
+	req.Attendees = nil
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
 }

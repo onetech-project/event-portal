@@ -42,6 +42,19 @@ const (
 	// every five seconds, with a small burst for an impatient double-tap.
 	paymentRefreshRate  = 0.2
 	paymentRefreshBurst = 3
+
+	// The guest resend sends real mail without any authentication, so it is
+	// limited per order — one a minute, no burst. Keying on the order rather than
+	// the caller is the point: the inbox being protected is the buyer's, and a
+	// per-IP limit would let a few hosts flood one buyer between them.
+	guestResendRate  = 1.0 / 60.0
+	guestResendBurst = 1
+
+	// Booking creates rows and holds quota for an hour without payment, so it is
+	// limited per IP: roughly one booking every three seconds with a small burst
+	// for a genuine group organizing itself, while a scripted hoarder starves.
+	bookRate  = 0.33
+	bookBurst = 5
 )
 
 func main() {
@@ -132,7 +145,11 @@ func run(log *logger.Logger) error {
 	orderSvc := order.NewService(pool, orderRepo,
 		eventProviderAdapter{events: eventSvc},
 		gatewayAdapter{gateway: gateway},
-		log)
+		log).WithTimers(order.Timers{
+		BookingHold:    cfg.BookingHold,
+		PaymentWindow:  cfg.PaymentWindow,
+		QRRefreshAfter: cfg.QRRefreshAfter,
+	})
 
 	adminOrderSvc := order.NewAdminService(orderRepo, orderEventLookupAdapter{events: eventSvc})
 
@@ -203,8 +220,19 @@ func run(log *logger.Logger) error {
 
 	// Public, unauthenticated guest surface (Constitution Principle VI).
 	event.NewHandler(eventSvc).RegisterPublicRoutes(api)
-	order.NewHandler(orderSvc, publicOrderSvc, log).RegisterPublicRoutes(api)
-	payment.NewHandler(paymentSvc, log).RegisterPublicRoutes(api)
+	orderHandler := order.NewHandler(orderSvc, publicOrderSvc, log)
+	orderHandler.RegisterPublicRoutes(api)
+	paymentHandler := payment.NewHandler(paymentSvc, log).WithQRRefreshAfter(cfg.QRRefreshAfter)
+	paymentHandler.RegisterPublicRoutes(api)
+	// Live checkout status (SSE). It caps concurrent connections per IP itself,
+	// so it mounts on the unthrottled group.
+	paymentHandler.RegisterStatusStream(api)
+
+	// Booking creates rows and holds quota for an hour, so it sits behind its
+	// own per-IP limiter rather than sharing the unthrottled guest group.
+	bookGroup := e.Group("/api/v1",
+		httpx.RateLimitPerIP(bookRate, bookBurst, rateLimitWindow))
+	orderHandler.RegisterBookRoute(bookGroup)
 
 	// The public ticket lookup is rate limited per IP so ticket-code enumeration
 	// is impractical (spec FR-020).
@@ -217,7 +245,17 @@ func run(log *logger.Logger) error {
 	// (spec FR-018).
 	paymentRefresh := e.Group("/api/v1",
 		httpx.RateLimitPerIP(paymentRefreshRate, paymentRefreshBurst, rateLimitWindow))
-	payment.NewHandler(paymentSvc, log).RegisterRefreshRoute(paymentRefresh)
+	paymentHandler.RegisterRefreshRoute(paymentRefresh)
+	// Checkout starts a provider session per call, so it shares this limiter.
+	orderHandler.RegisterCheckoutRoutes(paymentRefresh)
+
+	// The guest resend on the confirmation screen. Limited per order number —
+	// carried in the body's order_id field — and mounted on its own group: on
+	// `api` the limiter would also throttle the order polling that runs every
+	// few seconds by design (spec FR-025).
+	guestResend := e.Group("/api/v1",
+		httpx.RateLimitPerBodyField("order_id", guestResendRate, guestResendBurst, rateLimitWindow))
+	notification.NewHandler(notificationSvc).RegisterPublicRoutes(guestResend)
 
 	// Abandoned orders release their seats without anyone opening the page.
 	sweeper := payment.NewSweeper(paymentSvc, cfg.PaymentSweepInterval)
@@ -231,7 +269,11 @@ func run(log *logger.Logger) error {
 
 	// Everything else under /admin/* is JWT protected.
 	adminAPI := e.Group("/api/v1", admin.RequireAuth(admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)))
-	event.NewHandler(eventSvc).RegisterAdminRoutes(adminAPI)
+	eventAdminHandler := event.NewHandler(eventSvc)
+	eventAdminHandler.RegisterAdminRoutes(adminAPI)
+	// CMS content surface (spec 008 US4): terms + content blocks, same JWT group.
+	eventAdminHandler.RegisterAdminContentRoutes(adminAPI)
+	event.NewHandler(eventSvc).RegisterPackageRoutes(adminAPI)
 	order.NewAdminHandler(adminOrderSvc).RegisterAdminRoutes(adminAPI)
 	ticket.NewHandler(ticketSvc).RegisterAdminRoutes(adminAPI)
 	notification.NewHandler(notificationSvc).RegisterAdminRoutes(adminAPI)

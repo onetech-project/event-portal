@@ -13,6 +13,14 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     include: ["**/*.test.{ts,tsx}"],
     exclude: ["node_modules/**", ".next/**"],
+    server: {
+      deps: {
+        // zod 4's CJS entry defeats the external-import interop under the bun
+        // runtime (`import { z }` arrives undefined); inlining makes Vite
+        // transform its ESM build instead.
+        inline: ["zod"],
+      },
+    },
   },
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, ".") },

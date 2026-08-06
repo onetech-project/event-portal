@@ -50,8 +50,44 @@ func (a eventProviderAdapter) CheckAndDeductQuota(ctx context.Context, tx pgx.Tx
 	return err
 }
 
+func (a eventProviderAdapter) PackageForCheckout(ctx context.Context, tx pgx.Tx, id uuid.UUID) (order.PackageInfo, error) {
+	pkg, err := a.events.GetPackageForCheckout(ctx, tx, id)
+	if err != nil {
+		return order.PackageInfo{}, err
+	}
+	info := order.PackageInfo{
+		ID:         pkg.ID,
+		EventID:    pkg.EventID,
+		Name:       pkg.Name,
+		Price:      pkg.Price,
+		SalesStart: pkg.SalesStart,
+		SalesEnd:   pkg.SalesEnd,
+		Components: make([]order.PackageComponentInfo, 0, len(pkg.Components)),
+	}
+	for _, c := range pkg.Components {
+		info.Components = append(info.Components, order.PackageComponentInfo{
+			TicketTypeID: c.TicketTypeID,
+			Quantity:     c.PerUnit,
+			SalesStart:   c.SalesStart,
+			SalesEnd:     c.SalesEnd,
+		})
+	}
+	return info, nil
+}
+
 func (a eventProviderAdapter) RestoreQuota(ctx context.Context, tx pgx.Tx, id uuid.UUID, qty int32) error {
 	return a.events.RestoreQuota(ctx, tx, id, qty)
+}
+
+func (a eventProviderAdapter) CurrentTerms(ctx context.Context, eventID uuid.UUID) (order.EventTermsInfo, error) {
+	row, err := a.events.CurrentTermsForEvent(ctx, eventID)
+	if errors.Is(err, event.ErrNotFound) {
+		return order.EventTermsInfo{}, order.ErrNoTerms
+	}
+	if err != nil {
+		return order.EventTermsInfo{}, err
+	}
+	return order.EventTermsInfo{ID: row.ID, EventID: eventID}, nil
 }
 
 // --- order.PaymentGateway: checkout's view of the payment provider ---------
@@ -106,6 +142,11 @@ func (a paymentOrderAdapter) OrderByNumber(ctx context.Context, orderNumber stri
 		OrderNumber:      rec.OrderNumber,
 		Status:           rec.Status,
 		PaymentExpiresAt: rec.PaymentExpiresAt,
+		TotalAmount:      rec.TotalAmount,
+		BuyerName:        rec.BuyerName,
+		BuyerEmail:       rec.BuyerEmail,
+		BuyerPhone:       rec.BuyerPhone,
+		PaymentStarted:   rec.PaymentQRString != nil && *rec.PaymentQRString != "",
 	}, nil
 }
 
@@ -127,21 +168,28 @@ func (a paymentOrderAdapter) DueForExpiry(ctx context.Context, now time.Time, li
 	return out, nil
 }
 
-func (a paymentOrderAdapter) LineItems(ctx context.Context, orderID uuid.UUID) ([]payment.LineItem, error) {
-	items, err := a.orders.ListOrderItemsByOrderID(ctx, orderID)
+func (a paymentOrderAdapter) QuotaHolds(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]payment.QuotaHold, error) {
+	// Not ListOrderItemsByOrderID: a package line carries no ticket type, so
+	// restoring from raw lines would release nothing for a bundle. This query
+	// expands package lines through their composition.
+	holds, err := a.orders.ListQuotaHoldsByOrderID(ctx, tx, orderID)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]payment.LineItem, 0, len(items))
-	for _, item := range items {
-		out = append(out, payment.LineItem{TicketTypeID: item.TicketTypeID, Quantity: item.Quantity})
+	out := make([]payment.QuotaHold, 0, len(holds))
+	for _, hold := range holds {
+		out = append(out, payment.QuotaHold{TicketTypeID: hold.TicketTypeID, Quantity: hold.Quantity})
 	}
 	return out, nil
 }
 
 func (a paymentOrderAdapter) UpdateStatusIfPending(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, status string) (bool, error) {
 	return a.orders.UpdateOrderStatusIfPending(ctx, tx, orderID, status)
+}
+
+func (a paymentOrderAdapter) UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error) {
+	return a.orders.UpdatePaymentQRByID(ctx, orderID, url, qrString)
 }
 
 // --- notification.OrderProvider: delivery's view of the order domain -------
@@ -159,17 +207,39 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		return notification.OrderDelivery{}, err
 	}
 
+	// Buyer identity is nullable since 008 (booking precedes the forms), but
+	// delivery only ever runs for PAID orders, where checkout has filled it.
+	buyerName, buyerEmail := "", ""
+	if rec.BuyerName != nil {
+		buyerName = *rec.BuyerName
+	}
+	if rec.BuyerEmail != nil {
+		buyerEmail = *rec.BuyerEmail
+	}
 	return notification.OrderDelivery{
 		ID:          rec.ID,
 		OrderNumber: rec.OrderNumber,
-		BuyerName:   rec.BuyerName,
-		BuyerEmail:  rec.BuyerEmail,
+		BuyerName:   buyerName,
+		BuyerEmail:  buyerEmail,
 		Status:      rec.Status,
+		TotalAmount: rec.TotalAmount,
 	}, nil
 }
 
 func (a notificationOrderAdapter) MarkEmailSent(ctx context.Context, orderID uuid.UUID) error {
 	return a.orders.SetEmailSent(ctx, orderID)
+}
+
+func (a notificationOrderAdapter) OrderIDByNumber(ctx context.Context, orderNumber string) (uuid.UUID, error) {
+	rec, err := a.orders.GetOrderByNumber(ctx, orderNumber)
+	if errors.Is(err, order.ErrNotFound) {
+		return uuid.Nil, apperr.NotFound(apperr.CodeOrderNotFound, "Order not found.")
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	return rec.ID, nil
 }
 
 // --- notification.TicketProvider: delivery's view of the ticket domain -----
@@ -220,6 +290,31 @@ func (a orderEventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []u
 			TicketTypeName: record.TicketTypeName,
 			EventName:      record.EventName,
 			EventSlug:      record.EventSlug,
+			EventVenue:     record.EventVenue,
+			EventAddress:   record.EventAddress,
+			EventStartDate: record.EventStartDate,
+			EventEndDate:   record.EventEndDate,
+		}
+	}
+	return displays, nil
+}
+
+func (a orderEventLookupAdapter) PackageDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]order.PackageDisplay, error) {
+	records, err := a.events.PackageDisplays(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	displays := make(map[uuid.UUID]order.PackageDisplay, len(records))
+	for id, record := range records {
+		displays[id] = order.PackageDisplay{
+			PackageName:    record.PackageName,
+			EventName:      record.EventName,
+			EventSlug:      record.EventSlug,
+			EventVenue:     record.EventVenue,
+			EventAddress:   record.EventAddress,
+			EventStartDate: record.EventStartDate,
+			EventEndDate:   record.EventEndDate,
 		}
 	}
 	return displays, nil

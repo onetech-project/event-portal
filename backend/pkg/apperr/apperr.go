@@ -39,29 +39,100 @@ const (
 	CodeOrderNotPaid  = "ORDER_NOT_PAID"
 	CodeOrderNotFound = "ORDER_NOT_FOUND"
 
+	// Ticket package bundles (specs/005).
+	CodePackageNotFound          = "PACKAGE_NOT_FOUND"
+	CodePackageNotOnSale         = "PACKAGE_NOT_ON_SALE"
+	CodePackageUnavailable       = "PACKAGE_UNAVAILABLE"
+	CodePackageHasOrders         = "PACKAGE_HAS_ORDERS"
+	CodePackageCompositionLocked = "PACKAGE_COMPOSITION_LOCKED"
+
+	// End-to-end purchase flow (specs/008).
+	CodeTermsMissing          = "TERMS_MISSING"
+	CodeTermsChanged          = "TERMS_CHANGED"
+	CodeTermsNotAccepted      = "TERMS_NOT_ACCEPTED"
+	CodeTermsNotRecorded      = "TERMS_NOT_RECORDED"
+	CodePaymentAlreadyStarted = "PAYMENT_ALREADY_STARTED"
+	CodePaymentNotStarted     = "PAYMENT_NOT_STARTED"
+	CodeOrderExpired          = "ORDER_EXPIRED"
+	CodeUnknownIcon           = "UNKNOWN_ICON"
+
 	// Transport-level fallbacks used by the shared HTTP error handler.
 	CodeNotFound = "NOT_FOUND"
 	CodeInternal = "INTERNAL_ERROR"
 )
+
+// Numeric maps a (status, string code) pair onto the numeric registry the 008
+// contract promises: HTTP status × 1000 + sub-code. Codes outside the registry
+// fall back to status × 1000, which stays inside the scheme without inventing
+// unregistered sub-codes. TERMS_MISSING is status-dependent by design: 404002
+// when reading absent terms, 409001 when booking is refused over them.
+func Numeric(status int, code string) int {
+	switch code {
+	case CodeValidation, CodeAttendeeCountMismatch, CodeInvalidDateRange, CodeTicketTypeNotOnSale,
+		CodePackageNotOnSale, CodePackageUnavailable:
+		return 400001
+	case CodeInsufficientQuota:
+		return 400002
+	case CodeTermsNotAccepted:
+		return 400003
+	case CodeUnknownIcon:
+		return 400004
+	case CodeUnauthorized, CodeInvalidCredentials, CodeInvalidSignature:
+		return 401001
+	case CodeNotFound, CodeEventNotFound, CodeTicketTypeNotFound, CodeTicketNotFound,
+		CodeOrderNotFound, CodePackageNotFound:
+		return 404001
+	case CodeTermsMissing:
+		if status == http.StatusNotFound {
+			return 404002
+		}
+		return 409001
+	case CodeTermsChanged:
+		return 409002
+	case CodeTermsNotRecorded:
+		return 409003
+	case CodePaymentAlreadyStarted:
+		return 409004
+	case CodePaymentNotStarted:
+		return 409005
+	case CodeOrderExpired:
+		return 410001
+	case CodeRateLimited:
+		return 429001
+	case CodeInternal:
+		return 500000
+	case CodePaymentInitiationFailed, CodePaymentStatusUnavailable:
+		return 502001
+	default:
+		return status * 1000
+	}
+}
 
 // Error is a domain error carrying everything the HTTP layer needs to render a
 // response without re-deriving it from the error text.
 type Error struct {
 	// HTTPStatus is the status the handler should emit.
 	HTTPStatus int
-	// Code is the stable, machine-readable identifier clients branch on.
+	// Code is the stable, machine-readable identifier clients branch on. It is
+	// mapped to the numeric envelope code via Numeric at render time.
 	Code string
 	// Message is the human-readable explanation shown to the caller.
 	Message string
+	// Data is optional client-facing detail carried in the envelope's data
+	// field: a validation field map, or the current QR payload on
+	// PAYMENT_ALREADY_STARTED. Nil for most errors.
+	Data any
 	// Err is the underlying cause, kept for logging and errors.Is/As. It is never
 	// serialized — internal detail must not leak to clients.
 	Err error
 }
 
-// Body is the exact JSON shape returned for any error response.
+// Body is the exact JSON shape returned for any error response — the same
+// {code, message, data} envelope successes use (clarification 2026-08-05).
 type Body struct {
-	ErrorCode string `json:"error_code"`
-	Message   string `json:"message"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
 }
 
 func (e *Error) Error() string {
@@ -76,7 +147,15 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // Response renders the client-facing body, deliberately omitting the cause.
 func (e *Error) Response() Body {
-	return Body{ErrorCode: e.Code, Message: e.Message}
+	return Body{Code: Numeric(e.HTTPStatus, e.Code), Message: e.Message, Data: e.Data}
+}
+
+// WithData returns a copy of the error carrying client-facing detail in the
+// envelope's data field.
+func (e *Error) WithData(data any) *Error {
+	clone := *e
+	clone.Data = data
+	return &clone
 }
 
 // New builds an Error with no underlying cause.

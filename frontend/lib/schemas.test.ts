@@ -1,96 +1,10 @@
 import { describe, expect, it } from "vitest";
-import {
-  checkoutSchema,
-  eventFormSchema,
-  loginSchema,
-  ticketTypeFormSchema,
-} from "./schemas";
+import { eventFormSchema, loginSchema, ticketTypeFormSchema } from "./schemas";
 
-const TT_A = "11111111-1111-1111-1111-111111111111";
-const TT_B = "22222222-2222-2222-2222-222222222222";
-
-function validCheckout() {
-  return {
-    buyerName: "Budi Santoso",
-    buyerEmail: "budi@example.com",
-    buyerPhone: "+628123456789",
-    items: [{ ticketTypeId: TT_A, quantity: 2 }],
-    attendees: [
-      { ticketTypeId: TT_A, name: "Budi", email: "budi@example.com" },
-      { ticketTypeId: TT_A, name: "Sari", email: "sari@example.com" },
-    ],
-  };
-}
-
-describe("checkoutSchema", () => {
-  it("accepts a well-formed order", () => {
-    expect(checkoutSchema.safeParse(validCheckout()).success).toBe(true);
-  });
-
-  it("rejects a missing buyer name", () => {
-    const result = checkoutSchema.safeParse({ ...validCheckout(), buyerName: "  " });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects a malformed buyer email", () => {
-    const result = checkoutSchema.safeParse({ ...validCheckout(), buyerEmail: "nope" });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects an order with no tickets selected", () => {
-    const result = checkoutSchema.safeParse({
-      ...validCheckout(),
-      items: [],
-      attendees: [],
-    });
-    expect(result.success).toBe(false);
-  });
-
-  // The server enforces this too; catching it in the browser saves a round trip
-  // and points at the specific field.
-  it("rejects a mismatch between ticket count and attendee count", () => {
-    const order = validCheckout();
-    order.attendees = order.attendees.slice(0, 1);
-
-    const result = checkoutSchema.safeParse(order);
-
-    expect(result.success).toBe(false);
-    expect(JSON.stringify(result.error?.issues)).toContain("attendees");
-  });
-
-  it("rejects a correct total with the wrong per-ticket-type split", () => {
-    const result = checkoutSchema.safeParse({
-      ...validCheckout(),
-      items: [
-        { ticketTypeId: TT_A, quantity: 1 },
-        { ticketTypeId: TT_B, quantity: 1 },
-      ],
-      attendees: [
-        { ticketTypeId: TT_A, name: "A", email: "a@example.com" },
-        { ticketTypeId: TT_A, name: "B", email: "b@example.com" },
-      ],
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects an attendee with a malformed email", () => {
-    const order = validCheckout();
-    order.attendees[1].email = "not-an-email";
-
-    expect(checkoutSchema.safeParse(order).success).toBe(false);
-  });
-
-  it("rejects a zero quantity line", () => {
-    const result = checkoutSchema.safeParse({
-      ...validCheckout(),
-      items: [{ ticketTypeId: TT_A, quantity: 0 }],
-      attendees: [],
-    });
-
-    expect(result.success).toBe(false);
-  });
-});
+// The spec-001 checkoutSchema and its bundle attendee-split tests were removed
+// by spec 010: the registration step now collects one visitor per bundle unit
+// (components/order/slot-groups.ts + visitor-form.tsx), and the server owns
+// the per-slot contract.
 
 describe("loginSchema", () => {
   it("accepts valid credentials", () => {

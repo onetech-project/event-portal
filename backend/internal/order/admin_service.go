@@ -2,11 +2,15 @@ package order
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/manjo/ticketing/backend/internal/order/ordersql"
+	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
 
@@ -18,6 +22,10 @@ type TicketTypeDisplay struct {
 	TicketTypeName string
 	EventName      string
 	EventSlug      string
+	EventVenue     string
+	EventAddress   string
+	EventStartDate time.Time
+	EventEndDate   time.Time
 }
 
 // EventLookup is the contract the order read views need from the event domain,
@@ -35,6 +43,22 @@ type EventLookup interface {
 	// TicketTypeDisplays resolves ticket type ids to their display labels and
 	// owning event, batched — one lookup per page, never one per row.
 	TicketTypeDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeDisplay, error)
+	// PackageDisplays does the same for package ids. An order made entirely of
+	// bundles has no ticket type on any of its lines, so without this those lines
+	// would render nameless.
+	PackageDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]PackageDisplay, error)
+}
+
+// PackageDisplay labels a package line: the package's own name plus the event it
+// belongs to, mirroring TicketTypeDisplay.
+type PackageDisplay struct {
+	PackageName    string
+	EventName      string
+	EventSlug      string
+	EventVenue     string
+	EventAddress   string
+	EventStartDate time.Time
+	EventEndDate   time.Time
 }
 
 // OrderFilter narrows the admin order list. A nil field means "no filter".
@@ -84,8 +108,8 @@ func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) ([]Or
 		out = append(out, OrderSummary{
 			ID:          row.ID,
 			OrderNumber: row.OrderNumber,
-			BuyerName:   row.BuyerName,
-			BuyerEmail:  row.BuyerEmail,
+			BuyerName:   strv(row.BuyerName),
+			BuyerEmail:  strv(row.BuyerEmail),
 			Status:      row.Status,
 			TotalAmount: money.From(row.TotalAmount),
 			CreatedAt:   row.CreatedAt,
@@ -121,8 +145,8 @@ func (s *AdminService) ListAttendees(ctx context.Context, filter AttendeeFilter)
 	out := make([]AttendeeSummary, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, AttendeeSummary{
-			Name:           row.Name,
-			Email:          row.Email,
+			Name:           strv(row.Name),
+			Email:          strv(row.Email),
 			TicketTypeName: names[row.TicketTypeID],
 			OrderNumber:    row.OrderNumber,
 		})
@@ -170,4 +194,70 @@ func toNullUUID(id *uuid.UUID) uuid.NullUUID {
 		return uuid.NullUUID{}
 	}
 	return uuid.NullUUID{UUID: *id, Valid: true}
+}
+
+// --- Fee master administration (clarified 2026-08-05) -----------------------
+
+// Fees returns every fee master row for the admin panel.
+func (s *AdminService) Fees(ctx context.Context) ([]FeeAdminView, error) {
+	rows, err := s.repo.ListFees(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FeeAdminView, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toFeeAdminView(row))
+	}
+	return out, nil
+}
+
+// CreateFee adds a fee master row. It affects only future bookings — existing
+// orders keep the lines frozen at their booking time.
+func (s *AdminService) CreateFee(ctx context.Context, req FeeRequest) (FeeAdminView, error) {
+	if err := req.Validate(); err != nil {
+		return FeeAdminView{}, err
+	}
+	row, err := s.repo.CreateFee(ctx, strings.TrimSpace(req.Name), req.FeeType, req.Value.Decimal(), req.Position, req.IsActive)
+	if errors.Is(err, ErrFeeNameTaken) {
+		return FeeAdminView{}, apperr.Conflict(apperr.CodeValidation, "A fee with this name already exists.")
+	}
+	if err != nil {
+		return FeeAdminView{}, err
+	}
+	return toFeeAdminView(row), nil
+}
+
+// UpdateFee rewrites a fee master row; future bookings pick the change up.
+func (s *AdminService) UpdateFee(ctx context.Context, id uuid.UUID, req FeeRequest) (FeeAdminView, error) {
+	if err := req.Validate(); err != nil {
+		return FeeAdminView{}, err
+	}
+	row, err := s.repo.UpdateFee(ctx, id, strings.TrimSpace(req.Name), req.FeeType, req.Value.Decimal(), req.Position, req.IsActive)
+	if errors.Is(err, ErrNotFound) {
+		return FeeAdminView{}, apperr.NotFound(apperr.CodeValidation, "Fee not found.")
+	}
+	if errors.Is(err, ErrFeeNameTaken) {
+		return FeeAdminView{}, apperr.Conflict(apperr.CodeValidation, "A fee with this name already exists.")
+	}
+	if err != nil {
+		return FeeAdminView{}, err
+	}
+	return toFeeAdminView(row), nil
+}
+
+// DeleteFee removes a fee master row; orders keep their frozen snapshots.
+func (s *AdminService) DeleteFee(ctx context.Context, id uuid.UUID) error {
+	err := s.repo.DeleteFee(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return apperr.NotFound(apperr.CodeValidation, "Fee not found.")
+	}
+	return err
+}
+
+func toFeeAdminView(row FeeRow) FeeAdminView {
+	return FeeAdminView{
+		ID: row.ID, Name: row.Name, FeeType: row.FeeType,
+		Value: money.From(row.Value), Position: row.Position, IsActive: row.IsActive,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+	}
 }

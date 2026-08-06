@@ -43,6 +43,22 @@ func (a eventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []uuid.U
 	return displays, nil
 }
 
+func (a eventLookupAdapter) PackageDisplays(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]order.PackageDisplay, error) {
+	records, err := a.svc.PackageDisplays(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	displays := make(map[uuid.UUID]order.PackageDisplay, len(records))
+	for id, record := range records {
+		displays[id] = order.PackageDisplay{
+			PackageName: record.PackageName,
+			EventName:   record.EventName,
+			EventSlug:   record.EventSlug,
+		}
+	}
+	return displays, nil
+}
+
 type adminOrderFixture struct {
 	svc   *order.AdminService
 	pool  *testsupport.Pool

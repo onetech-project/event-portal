@@ -12,6 +12,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const countReissuedQRs = `-- name: CountReissuedQRs :one
+SELECT COUNT(*) FROM payments WHERE order_id = $1 AND status = 'QR_REISSUED'
+`
+
+// How many times the order's QR has been re-issued (spec 008 FR-015). Drives
+// the -R{n} suffix on the provider reference.
+func (q *Queries) CountReissuedQRs(ctx context.Context, orderID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countReissuedQRs, orderID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createPayment = `-- name: CreatePayment :one
 INSERT INTO payments (order_id, provider, transaction_id, payment_type, status, raw_response)
 VALUES ($1, $2, $3, $4, $5, $6)

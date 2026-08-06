@@ -49,7 +49,7 @@ func TestLoginEndpointReturnsTheContractShape(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 
 	assert.ElementsMatch(t, []string{"token", "expires_at"}, keysOf(body))
 	assert.NotEmpty(t, body["token"])
@@ -69,7 +69,7 @@ func TestLoginEndpointReturns401ForBadCredentials(t *testing.T) {
 
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, apperr.CodeInvalidCredentials, body.ErrorCode)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeInvalidCredentials), body.Code)
 }
 
 // The response must never hint at whether the account exists or echo the

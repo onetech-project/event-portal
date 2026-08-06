@@ -171,7 +171,7 @@ func TestRefreshStatusExpiresAnOrderPastItsDeadline(t *testing.T) {
 	assert.Equal(t, "EXPIRED", result.Status)
 	assert.True(t, result.Changed)
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"the 3 reserved seats go back on sale")
 }
 
@@ -186,7 +186,7 @@ func TestExpireDueOrdersReleasesQuotaForLapsedOrders(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, expired)
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 func TestExpireDueOrdersLeavesOrdersInsideTheirWindowAlone(t *testing.T) {
@@ -198,7 +198,7 @@ func TestExpireDueOrdersLeavesOrdersInsideTheirWindowAlone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, expired)
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 func TestExpireDueOrdersIgnoresOrdersThatAreAlreadyFinal(t *testing.T) {
@@ -248,7 +248,7 @@ func TestConcurrentSweepsRestoreQuotaExactlyOnce(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, total, "exactly one sweep may apply the transition")
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota must not be restored twice")
 }
 
@@ -271,7 +271,7 @@ func TestASweepRacingAnExpireWebhookRestoresQuotaOnce(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 // --- Late success for a settled order (spec US4 scenario 5) ---------------
@@ -288,7 +288,7 @@ func TestASuccessForAnAlreadyExpiredOrderDoesNotResurrectIt(t *testing.T) {
 	require.NoError(t, f.notify(t, "settlement", ""))
 
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota released on expiry must not be re-deducted")
 
 	issued, emailed := f.fulfiller.counts()

@@ -87,7 +87,7 @@ func TestPublicLookupReturns404ForAnUnknownCode(t *testing.T) {
 
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, apperr.CodeTicketNotFound, body.ErrorCode)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeTicketNotFound), body.Code)
 }
 
 // A malformed code and an unknown one must be indistinguishable, so the endpoint

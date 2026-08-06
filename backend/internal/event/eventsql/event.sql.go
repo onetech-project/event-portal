@@ -38,10 +38,21 @@ func (q *Queries) CheckAndDeductQuota(ctx context.Context, arg CheckAndDeductQuo
 	return quota, err
 }
 
+const countPackagesByEventID = `-- name: CountPackagesByEventID :one
+SELECT COUNT(*)::bigint AS total FROM packages WHERE event_id = $1
+`
+
+func (q *Queries) CountPackagesByEventID(ctx context.Context, eventID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countPackagesByEventID, eventID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const createEvent = `-- name: CreateEvent :one
-INSERT INTO events (name, slug, description, venue, address, start_date, end_date, banner_url, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at
+INSERT INTO events (name, slug, description, venue, address, start_date, end_date, banner_url, status, scale)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
 `
 
 type CreateEventParams struct {
@@ -54,6 +65,7 @@ type CreateEventParams struct {
 	EndDate     time.Time
 	BannerUrl   *string
 	Status      string
+	Scale       *int64
 }
 
 func (q *Queries) CreateEvent(ctx context.Context, arg CreateEventParams) (Event, error) {
@@ -67,6 +79,7 @@ func (q *Queries) CreateEvent(ctx context.Context, arg CreateEventParams) (Event
 		arg.EndDate,
 		arg.BannerUrl,
 		arg.Status,
+		arg.Scale,
 	)
 	var i Event
 	err := row.Scan(
@@ -82,39 +95,229 @@ func (q *Queries) CreateEvent(ctx context.Context, arg CreateEventParams) (Event
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Scale,
+	)
+	return i, err
+}
+
+const createEventActivity = `-- name: CreateEventActivity :one
+INSERT INTO event_activities (event_id, title, description, icon, position)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, event_id, title, description, icon, position, created_at, updated_at
+`
+
+type CreateEventActivityParams struct {
+	EventID     uuid.UUID
+	Title       string
+	Description string
+	Icon        *string
+	Position    int32
+}
+
+func (q *Queries) CreateEventActivity(ctx context.Context, arg CreateEventActivityParams) (EventActivity, error) {
+	row := q.db.QueryRow(ctx, createEventActivity,
+		arg.EventID,
+		arg.Title,
+		arg.Description,
+		arg.Icon,
+		arg.Position,
+	)
+	var i EventActivity
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Title,
+		&i.Description,
+		&i.Icon,
+		&i.Position,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createEventGuestStar = `-- name: CreateEventGuestStar :one
+INSERT INTO event_guest_stars (event_id, name, position)
+VALUES ($1, $2, $3)
+RETURNING id, event_id, name, position, created_at, updated_at
+`
+
+type CreateEventGuestStarParams struct {
+	EventID  uuid.UUID
+	Name     string
+	Position int32
+}
+
+func (q *Queries) CreateEventGuestStar(ctx context.Context, arg CreateEventGuestStarParams) (EventGuestStar, error) {
+	row := q.db.QueryRow(ctx, createEventGuestStar, arg.EventID, arg.Name, arg.Position)
+	var i EventGuestStar
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Name,
+		&i.Position,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createEventGuideline = `-- name: CreateEventGuideline :one
+INSERT INTO event_guidelines (event_id, description, icon, position)
+VALUES ($1, $2, $3, $4)
+RETURNING id, event_id, description, icon, position, created_at, updated_at
+`
+
+type CreateEventGuidelineParams struct {
+	EventID     uuid.UUID
+	Description string
+	Icon        *string
+	Position    int32
+}
+
+func (q *Queries) CreateEventGuideline(ctx context.Context, arg CreateEventGuidelineParams) (EventGuideline, error) {
+	row := q.db.QueryRow(ctx, createEventGuideline,
+		arg.EventID,
+		arg.Description,
+		arg.Icon,
+		arg.Position,
+	)
+	var i EventGuideline
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Description,
+		&i.Icon,
+		&i.Position,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createPackage = `-- name: CreatePackage :one
+INSERT INTO packages (event_id, name, description, price, sales_start, sales_end, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+          created_at, updated_at
+`
+
+type CreatePackageParams struct {
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	Status      string
+}
+
+// No quota column is written because none exists.
+func (q *Queries) CreatePackage(ctx context.Context, arg CreatePackageParams) (Package, error) {
+	row := q.db.QueryRow(ctx, createPackage,
+		arg.EventID,
+		arg.Name,
+		arg.Description,
+		arg.Price,
+		arg.SalesStart,
+		arg.SalesEnd,
+		arg.Status,
+	)
+	var i Package
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Name,
+		&i.Description,
+		&i.Price,
+		&i.SalesStart,
+		&i.SalesEnd,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createPackageComponent = `-- name: CreatePackageComponent :one
+INSERT INTO package_tickets (package_id, ticket_type_id, event_id, quantity)
+VALUES ($1, $2, $3, $4)
+RETURNING id, package_id, ticket_type_id, event_id, quantity, created_at
+`
+
+type CreatePackageComponentParams struct {
+	PackageID    uuid.UUID
+	TicketTypeID uuid.UUID
+	EventID      uuid.UUID
+	Quantity     int32
+}
+
+// event_id is supplied by the caller and is what the two composite foreign keys
+// both resolve against, making cross-event composition impossible to insert.
+func (q *Queries) CreatePackageComponent(ctx context.Context, arg CreatePackageComponentParams) (PackageTicket, error) {
+	row := q.db.QueryRow(ctx, createPackageComponent,
+		arg.PackageID,
+		arg.TicketTypeID,
+		arg.EventID,
+		arg.Quantity,
+	)
+	var i PackageTicket
+	err := row.Scan(
+		&i.ID,
+		&i.PackageID,
+		&i.TicketTypeID,
+		&i.EventID,
+		&i.Quantity,
+		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const createTicketType = `-- name: CreateTicketType :one
-INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, event_id, name, price, quota, sales_start, sales_end, created_at, updated_at
+INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
 `
 
 type CreateTicketTypeParams struct {
-	EventID    uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
 }
 
-func (q *Queries) CreateTicketType(ctx context.Context, arg CreateTicketTypeParams) (TicketType, error) {
+type CreateTicketTypeRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+func (q *Queries) CreateTicketType(ctx context.Context, arg CreateTicketTypeParams) (CreateTicketTypeRow, error) {
 	row := q.db.QueryRow(ctx, createTicketType,
 		arg.EventID,
 		arg.Name,
+		arg.Description,
 		arg.Price,
 		arg.Quota,
 		arg.SalesStart,
 		arg.SalesEnd,
 	)
-	var i TicketType
+	var i CreateTicketTypeRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
 		&i.Name,
+		&i.Description,
 		&i.Price,
 		&i.Quota,
 		&i.SalesStart,
@@ -131,6 +334,81 @@ DELETE FROM events WHERE id = $1
 
 func (q *Queries) DeleteEvent(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteEvent, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEventActivity = `-- name: DeleteEventActivity :execrows
+DELETE FROM event_activities WHERE id = $1 AND event_id = $2
+`
+
+type DeleteEventActivityParams struct {
+	ID      uuid.UUID
+	EventID uuid.UUID
+}
+
+func (q *Queries) DeleteEventActivity(ctx context.Context, arg DeleteEventActivityParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteEventActivity, arg.ID, arg.EventID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEventGuestStar = `-- name: DeleteEventGuestStar :execrows
+DELETE FROM event_guest_stars WHERE id = $1 AND event_id = $2
+`
+
+type DeleteEventGuestStarParams struct {
+	ID      uuid.UUID
+	EventID uuid.UUID
+}
+
+func (q *Queries) DeleteEventGuestStar(ctx context.Context, arg DeleteEventGuestStarParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteEventGuestStar, arg.ID, arg.EventID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEventGuideline = `-- name: DeleteEventGuideline :execrows
+DELETE FROM event_guidelines WHERE id = $1 AND event_id = $2
+`
+
+type DeleteEventGuidelineParams struct {
+	ID      uuid.UUID
+	EventID uuid.UUID
+}
+
+func (q *Queries) DeleteEventGuideline(ctx context.Context, arg DeleteEventGuidelineParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteEventGuideline, arg.ID, arg.EventID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePackage = `-- name: DeletePackage :execrows
+DELETE FROM packages WHERE id = $1
+`
+
+func (q *Queries) DeletePackage(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePackage, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deletePackageComponents = `-- name: DeletePackageComponents :execrows
+DELETE FROM package_tickets WHERE package_id = $1
+`
+
+func (q *Queries) DeletePackageComponents(ctx context.Context, packageID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePackageComponents, packageID)
 	if err != nil {
 		return 0, err
 	}
@@ -161,8 +439,19 @@ func (q *Queries) DeleteTicketTypesByEventID(ctx context.Context, eventID uuid.U
 	return result.RowsAffected(), nil
 }
 
+const eventHasTerms = `-- name: EventHasTerms :one
+SELECT EXISTS (SELECT 1 FROM event_terms WHERE event_id = $1) AS has_terms
+`
+
+func (q *Queries) EventHasTerms(ctx context.Context, eventID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, eventHasTerms, eventID)
+	var has_terms bool
+	err := row.Scan(&has_terms)
+	return has_terms, err
+}
+
 const getEventByID = `-- name: GetEventByID :one
-SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at
+SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
 FROM events
 WHERE id = $1
 `
@@ -183,12 +472,120 @@ func (q *Queries) GetEventByID(ctx context.Context, id uuid.UUID) (Event, error)
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Scale,
+	)
+	return i, err
+}
+
+const getEventTermsByEventID = `-- name: GetEventTermsByEventID :one
+
+SELECT id, event_id, content, created_at, updated_at
+FROM event_terms
+WHERE event_id = $1
+`
+
+// Spec 008: Terms & Conditions ----------------------------------------------
+func (q *Queries) GetEventTermsByEventID(ctx context.Context, eventID uuid.UUID) (EventTerm, error) {
+	row := q.db.QueryRow(ctx, getEventTermsByEventID, eventID)
+	var i EventTerm
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Content,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getEventTermsByEventSlug = `-- name: GetEventTermsByEventSlug :one
+SELECT t.id, t.event_id, t.content, t.created_at, t.updated_at
+FROM event_terms t
+JOIN events e ON e.id = t.event_id
+WHERE e.slug = $1 AND e.status = 'PUBLISHED'
+`
+
+// Guest read: the dialog fetches terms by the event's public identifier.
+func (q *Queries) GetEventTermsByEventSlug(ctx context.Context, slug string) (EventTerm, error) {
+	row := q.db.QueryRow(ctx, getEventTermsByEventSlug, slug)
+	var i EventTerm
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Content,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getPackageAvailability = `-- name: GetPackageAvailability :one
+SELECT
+    COALESCE(MIN(tt.quota / pt.quantity), 0)::int AS available_units,
+    COALESCE(
+        (ARRAY_AGG(tt.id ORDER BY (tt.quota / pt.quantity) ASC, tt.id ASC))[1],
+        '00000000-0000-0000-0000-000000000000'::uuid
+    )::uuid AS limiting_ticket_type_id,
+    COUNT(*)::int AS component_count,
+    COALESCE(BOOL_AND(tt.sales_start <= now() AND tt.sales_end >= now()), FALSE)::boolean
+        AS all_components_on_sale
+FROM package_tickets pt
+JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+WHERE pt.package_id = $1
+`
+
+type GetPackageAvailabilityRow struct {
+	AvailableUnits       int32
+	LimitingTicketTypeID uuid.UUID
+	ComponentCount       int32
+	AllComponentsOnSale  bool
+}
+
+// Single-package form, for the admin availability diagnostic.
+//
+// The aggregates are COALESCEd because a componentless package groups over zero
+// rows and would otherwise return NULLs that fail to scan. component_count = 0 is
+// the signal callers read as "no composition, therefore unavailable"; a NIL
+// limiting id means the same.
+func (q *Queries) GetPackageAvailability(ctx context.Context, packageID uuid.UUID) (GetPackageAvailabilityRow, error) {
+	row := q.db.QueryRow(ctx, getPackageAvailability, packageID)
+	var i GetPackageAvailabilityRow
+	err := row.Scan(
+		&i.AvailableUnits,
+		&i.LimitingTicketTypeID,
+		&i.ComponentCount,
+		&i.AllComponentsOnSale,
+	)
+	return i, err
+}
+
+const getPackageByID = `-- name: GetPackageByID :one
+SELECT id, event_id, name, description, price, sales_start, sales_end, status,
+       created_at, updated_at
+FROM packages
+WHERE id = $1
+`
+
+func (q *Queries) GetPackageByID(ctx context.Context, id uuid.UUID) (Package, error) {
+	row := q.db.QueryRow(ctx, getPackageByID, id)
+	var i Package
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Name,
+		&i.Description,
+		&i.Price,
+		&i.SalesStart,
+		&i.SalesEnd,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getPublishedEventBySlug = `-- name: GetPublishedEventBySlug :one
-SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status
+SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, scale
 FROM events
 WHERE slug = $1 AND status = 'PUBLISHED'
 `
@@ -204,6 +601,7 @@ type GetPublishedEventBySlugRow struct {
 	EndDate     time.Time
 	BannerUrl   *string
 	Status      string
+	Scale       *int64
 }
 
 func (q *Queries) GetPublishedEventBySlug(ctx context.Context, slug string) (GetPublishedEventBySlugRow, error) {
@@ -220,23 +618,38 @@ func (q *Queries) GetPublishedEventBySlug(ctx context.Context, slug string) (Get
 		&i.EndDate,
 		&i.BannerUrl,
 		&i.Status,
+		&i.Scale,
 	)
 	return i, err
 }
 
 const getTicketTypeAdmin = `-- name: GetTicketTypeAdmin :one
-SELECT id, event_id, name, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
 FROM ticket_types
 WHERE id = $1
 `
 
-func (q *Queries) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (TicketType, error) {
+type GetTicketTypeAdminRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+func (q *Queries) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (GetTicketTypeAdminRow, error) {
 	row := q.db.QueryRow(ctx, getTicketTypeAdmin, id)
-	var i TicketType
+	var i GetTicketTypeAdminRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
 		&i.Name,
+		&i.Description,
 		&i.Price,
 		&i.Quota,
 		&i.SalesStart,
@@ -248,19 +661,20 @@ func (q *Queries) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (TicketT
 }
 
 const getTicketTypeByID = `-- name: GetTicketTypeByID :one
-SELECT id, event_id, name, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end
 FROM ticket_types
 WHERE id = $1
 `
 
 type GetTicketTypeByIDRow struct {
-	ID         uuid.UUID
-	EventID    uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
 }
 
 func (q *Queries) GetTicketTypeByID(ctx context.Context, id uuid.UUID) (GetTicketTypeByIDRow, error) {
@@ -270,6 +684,7 @@ func (q *Queries) GetTicketTypeByID(ctx context.Context, id uuid.UUID) (GetTicke
 		&i.ID,
 		&i.EventID,
 		&i.Name,
+		&i.Description,
 		&i.Price,
 		&i.Quota,
 		&i.SalesStart,
@@ -278,9 +693,116 @@ func (q *Queries) GetTicketTypeByID(ctx context.Context, id uuid.UUID) (GetTicke
 	return i, err
 }
 
+const listEventActivities = `-- name: ListEventActivities :many
+
+SELECT id, event_id, title, description, icon, position, created_at, updated_at
+FROM event_activities
+WHERE event_id = $1
+ORDER BY position ASC, created_at ASC
+`
+
+// Spec 008: content blocks --------------------------------------------------
+func (q *Queries) ListEventActivities(ctx context.Context, eventID uuid.UUID) ([]EventActivity, error) {
+	rows, err := q.db.Query(ctx, listEventActivities, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EventActivity{}
+	for rows.Next() {
+		var i EventActivity
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.Title,
+			&i.Description,
+			&i.Icon,
+			&i.Position,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEventGuestStars = `-- name: ListEventGuestStars :many
+SELECT id, event_id, name, position, created_at, updated_at
+FROM event_guest_stars
+WHERE event_id = $1
+ORDER BY position ASC, created_at ASC
+`
+
+func (q *Queries) ListEventGuestStars(ctx context.Context, eventID uuid.UUID) ([]EventGuestStar, error) {
+	rows, err := q.db.Query(ctx, listEventGuestStars, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EventGuestStar{}
+	for rows.Next() {
+		var i EventGuestStar
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.Name,
+			&i.Position,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEventGuidelines = `-- name: ListEventGuidelines :many
+SELECT id, event_id, description, icon, position, created_at, updated_at
+FROM event_guidelines
+WHERE event_id = $1
+ORDER BY position ASC, created_at ASC
+`
+
+func (q *Queries) ListEventGuidelines(ctx context.Context, eventID uuid.UUID) ([]EventGuideline, error) {
+	rows, err := q.db.Query(ctx, listEventGuidelines, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EventGuideline{}
+	for rows.Next() {
+		var i EventGuideline
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.Description,
+			&i.Icon,
+			&i.Position,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEvents = `-- name: ListEvents :many
 
-SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at
+SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
 FROM events
 ORDER BY start_date DESC
 `
@@ -308,6 +830,282 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Scale,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackageComponentsByPackageIDs = `-- name: ListPackageComponentsByPackageIDs :many
+SELECT pt.package_id, pt.ticket_type_id, pt.quantity AS quantity_per_unit,
+       tt.name AS ticket_type_name, tt.price, tt.quota, tt.sales_start, tt.sales_end
+FROM package_tickets pt
+JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+WHERE pt.package_id = ANY($1::uuid[])
+ORDER BY pt.package_id, tt.name
+`
+
+type ListPackageComponentsByPackageIDsRow struct {
+	PackageID       uuid.UUID
+	TicketTypeID    uuid.UUID
+	QuantityPerUnit int32
+	TicketTypeName  string
+	Price           decimal.Decimal
+	Quota           int32
+	SalesStart      time.Time
+	SalesEnd        time.Time
+}
+
+// Batched over the whole list so rendering "what is inside this bundle" stays one
+// query regardless of how many packages an event has.
+func (q *Queries) ListPackageComponentsByPackageIDs(ctx context.Context, packageIds []uuid.UUID) ([]ListPackageComponentsByPackageIDsRow, error) {
+	rows, err := q.db.Query(ctx, listPackageComponentsByPackageIDs, packageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackageComponentsByPackageIDsRow{}
+	for rows.Next() {
+		var i ListPackageComponentsByPackageIDsRow
+		if err := rows.Scan(
+			&i.PackageID,
+			&i.TicketTypeID,
+			&i.QuantityPerUnit,
+			&i.TicketTypeName,
+			&i.Price,
+			&i.Quota,
+			&i.SalesStart,
+			&i.SalesEnd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackageDisplaysByIDs = `-- name: ListPackageDisplaysByIDs :many
+SELECT p.id, p.name, e.name AS event_name, e.slug AS event_slug,
+       e.venue AS event_venue, e.address AS event_address,
+       e.start_date AS event_start_date, e.end_date AS event_end_date
+FROM packages p
+JOIN events e ON e.id = p.event_id
+WHERE p.id = ANY($1::uuid[])
+`
+
+type ListPackageDisplaysByIDsRow struct {
+	ID             uuid.UUID
+	Name           string
+	EventName      string
+	EventSlug      string
+	EventVenue     string
+	EventAddress   string
+	EventStartDate time.Time
+	EventEndDate   time.Time
+}
+
+// Both tables belong to this domain, so the JOIN stays inside the boundary the
+// order domain is not allowed to cross itself.
+func (q *Queries) ListPackageDisplaysByIDs(ctx context.Context, ids []uuid.UUID) ([]ListPackageDisplaysByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listPackageDisplaysByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackageDisplaysByIDsRow{}
+	for rows.Next() {
+		var i ListPackageDisplaysByIDsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.EventName,
+			&i.EventSlug,
+			&i.EventVenue,
+			&i.EventAddress,
+			&i.EventStartDate,
+			&i.EventEndDate,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackagesByTicketTypeID = `-- name: ListPackagesByTicketTypeID :many
+SELECT p.id, p.name
+FROM package_tickets pt
+JOIN packages p ON p.id = pt.package_id
+WHERE pt.ticket_type_id = $1
+ORDER BY p.name
+`
+
+type ListPackagesByTicketTypeIDRow struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// Drives the ticket-type delete guard: a ticket inside a bundle cannot be deleted
+// until it is removed from that bundle. Returns names so the 400 can say which.
+func (q *Queries) ListPackagesByTicketTypeID(ctx context.Context, ticketTypeID uuid.UUID) ([]ListPackagesByTicketTypeIDRow, error) {
+	rows, err := q.db.Query(ctx, listPackagesByTicketTypeID, ticketTypeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackagesByTicketTypeIDRow{}
+	for rows.Next() {
+		var i ListPackagesByTicketTypeIDRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackagesByTicketTypeIDs = `-- name: ListPackagesByTicketTypeIDs :many
+SELECT DISTINCT p.id, p.name
+FROM package_tickets pt
+JOIN packages p ON p.id = pt.package_id
+WHERE pt.ticket_type_id = ANY($1::uuid[])
+ORDER BY p.name
+`
+
+type ListPackagesByTicketTypeIDsRow struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// Batched form used when deleting an event, which must consider every ticket type.
+func (q *Queries) ListPackagesByTicketTypeIDs(ctx context.Context, ids []uuid.UUID) ([]ListPackagesByTicketTypeIDsRow, error) {
+	rows, err := q.db.Query(ctx, listPackagesByTicketTypeIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackagesByTicketTypeIDsRow{}
+	for rows.Next() {
+		var i ListPackagesByTicketTypeIDsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackagesWithAvailabilityByEventID = `-- name: ListPackagesWithAvailabilityByEventID :many
+
+WITH component_stats AS (
+    SELECT
+        pt.package_id,
+        MIN(tt.quota / pt.quantity)::int AS available_units,
+        (ARRAY_AGG(tt.id ORDER BY (tt.quota / pt.quantity) ASC, tt.id ASC))[1]::uuid
+            AS limiting_ticket_type_id,
+        BOOL_AND(tt.sales_start <= now() AND tt.sales_end >= now())
+            AS all_components_on_sale,
+        COUNT(*) AS component_count
+    FROM package_tickets pt
+    JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+    GROUP BY pt.package_id
+)
+SELECT
+    p.id, p.event_id, p.name, p.description, p.price,
+    p.sales_start, p.sales_end, p.status, p.created_at, p.updated_at,
+    COALESCE(cs.available_units, 0)::int AS available_units,
+    cs.limiting_ticket_type_id,
+    (
+        COALESCE(cs.available_units, 0) > 0
+        AND COALESCE(cs.component_count, 0) > 0
+        AND COALESCE(cs.all_components_on_sale, FALSE)
+        AND p.status = 'ACTIVE'
+        AND p.sales_start <= now()
+        AND p.sales_end   >= now()
+    ) AS purchasable
+FROM packages p
+LEFT JOIN component_stats cs ON cs.package_id = p.id
+WHERE p.event_id = $1
+ORDER BY p.price ASC, p.name ASC
+`
+
+type ListPackagesWithAvailabilityByEventIDRow struct {
+	ID                   uuid.UUID
+	EventID              uuid.UUID
+	Name                 string
+	Description          *string
+	Price                decimal.Decimal
+	SalesStart           time.Time
+	SalesEnd             time.Time
+	Status               string
+	CreatedAt            *time.Time
+	UpdatedAt            *time.Time
+	AvailableUnits       int32
+	LimitingTicketTypeID uuid.NullUUID
+	Purchasable          *bool
+}
+
+// Packages (bundle offers) --------------------------------------------------
+// Owned by this domain: a package hangs off an event and joins only to that
+// event's ticket_types, so nothing here crosses a domain boundary.
+//
+// There is deliberately no quota column to read or write. Availability is derived
+// at read time from the remaining quota of the constituents reached through
+// package_tickets; a stored figure would be a second source of truth.
+// The booking-list query. Two queries serve the whole list (this one plus a batched
+// component read), never N+1 across packages.
+//
+// available_units = MIN(quota / quantity_per_unit): integer division floors, so a
+// constituent with 5 remaining consumed 2 at a time yields 2 whole sets, not 2.5.
+// MIN because the scarcest constituent governs.
+//
+// purchasable folds every gate into one boolean so the client cannot disagree with
+// the server about what is buyable: units > 0, at least one component, EVERY
+// constituent on sale (the binding constraint), ACTIVE, and the package's own window.
+//
+// LEFT JOIN, not JOIN: a componentless package must still list to an administrator
+// as broken rather than silently vanish.
+func (q *Queries) ListPackagesWithAvailabilityByEventID(ctx context.Context, eventID uuid.UUID) ([]ListPackagesWithAvailabilityByEventIDRow, error) {
+	rows, err := q.db.Query(ctx, listPackagesWithAvailabilityByEventID, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackagesWithAvailabilityByEventIDRow{}
+	for rows.Next() {
+		var i ListPackagesWithAvailabilityByEventIDRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.Name,
+			&i.Description,
+			&i.Price,
+			&i.SalesStart,
+			&i.SalesEnd,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.AvailableUnits,
+			&i.LimitingTicketTypeID,
+			&i.Purchasable,
 		); err != nil {
 			return nil, err
 		}
@@ -321,7 +1119,7 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 
 const listPublishedEvents = `-- name: ListPublishedEvents :many
 
-SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status
+SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, scale
 FROM events
 WHERE status = 'PUBLISHED'
 ORDER BY start_date ASC
@@ -338,6 +1136,7 @@ type ListPublishedEventsRow struct {
 	EndDate     time.Time
 	BannerUrl   *string
 	Status      string
+	Scale       *int64
 }
 
 // Guest-facing reads -------------------------------------------------------
@@ -361,6 +1160,7 @@ func (q *Queries) ListPublishedEvents(ctx context.Context) ([]ListPublishedEvent
 			&i.EndDate,
 			&i.BannerUrl,
 			&i.Status,
+			&i.Scale,
 		); err != nil {
 			return nil, err
 		}
@@ -372,18 +1172,52 @@ func (q *Queries) ListPublishedEvents(ctx context.Context) ([]ListPublishedEvent
 	return items, nil
 }
 
+const listPublishedPackagesByEventSlug = `-- name: ListPublishedPackagesByEventSlug :many
+SELECT p.id
+FROM packages p
+JOIN events e ON e.id = p.event_id
+WHERE e.slug = $1 AND e.status = 'PUBLISHED' AND p.status = 'ACTIVE'
+`
+
+// Guest-facing variant: only ACTIVE packages of a PUBLISHED event.
+func (q *Queries) ListPublishedPackagesByEventSlug(ctx context.Context, slug string) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPublishedPackagesByEventSlug, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTicketTypeDisplaysByIDs = `-- name: ListTicketTypeDisplaysByIDs :many
-SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug
+SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug,
+       e.venue AS event_venue, e.address AS event_address,
+       e.start_date AS event_start_date, e.end_date AS event_end_date
 FROM ticket_types tt
 JOIN events e ON e.id = tt.event_id
 WHERE tt.id = ANY($1::uuid[])
 `
 
 type ListTicketTypeDisplaysByIDsRow struct {
-	ID        uuid.UUID
-	Name      string
-	EventName string
-	EventSlug string
+	ID             uuid.UUID
+	Name           string
+	EventName      string
+	EventSlug      string
+	EventVenue     string
+	EventAddress   string
+	EventStartDate time.Time
+	EventEndDate   time.Time
 }
 
 // Both tables belong to this domain, so the JOIN stays inside the boundary the
@@ -402,6 +1236,10 @@ func (q *Queries) ListTicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UU
 			&i.Name,
 			&i.EventName,
 			&i.EventSlug,
+			&i.EventVenue,
+			&i.EventAddress,
+			&i.EventStartDate,
+			&i.EventEndDate,
 		); err != nil {
 			return nil, err
 		}
@@ -468,26 +1306,40 @@ func (q *Queries) ListTicketTypeNamesByIDs(ctx context.Context, ids []uuid.UUID)
 
 const listTicketTypesAdmin = `-- name: ListTicketTypesAdmin :many
 
-SELECT id, event_id, name, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY created_at ASC
 `
 
+type ListTicketTypesAdminRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
 // Admin ticket-type CRUD ---------------------------------------------------
-func (q *Queries) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID) ([]TicketType, error) {
+func (q *Queries) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID) ([]ListTicketTypesAdminRow, error) {
 	rows, err := q.db.Query(ctx, listTicketTypesAdmin, eventID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []TicketType{}
+	items := []ListTicketTypesAdminRow{}
 	for rows.Next() {
-		var i TicketType
+		var i ListTicketTypesAdminRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.EventID,
 			&i.Name,
+			&i.Description,
 			&i.Price,
 			&i.Quota,
 			&i.SalesStart,
@@ -506,20 +1358,21 @@ func (q *Queries) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID) (
 }
 
 const listTicketTypesByEventID = `-- name: ListTicketTypesByEventID :many
-SELECT id, event_id, name, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY price ASC, name ASC
 `
 
 type ListTicketTypesByEventIDRow struct {
-	ID         uuid.UUID
-	EventID    uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
 }
 
 func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUID) ([]ListTicketTypesByEventIDRow, error) {
@@ -535,6 +1388,7 @@ func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUI
 			&i.ID,
 			&i.EventID,
 			&i.Name,
+			&i.Description,
 			&i.Price,
 			&i.Quota,
 			&i.SalesStart,
@@ -548,6 +1402,40 @@ func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUI
 		return nil, err
 	}
 	return items, nil
+}
+
+const packageForCheckout = `-- name: PackageForCheckout :one
+SELECT id, event_id, name, price, sales_start, sales_end, status
+FROM packages
+WHERE id = $1
+`
+
+type PackageForCheckoutRow struct {
+	ID         uuid.UUID
+	EventID    uuid.UUID
+	Name       string
+	Price      decimal.Decimal
+	SalesStart time.Time
+	SalesEnd   time.Time
+	Status     string
+}
+
+// Server-side truth for a package at checkout: authoritative price, window, status
+// and owning event. Composition is read separately via
+// ListPackageComponentsByPackageIDs so both callers share one query.
+func (q *Queries) PackageForCheckout(ctx context.Context, id uuid.UUID) (PackageForCheckoutRow, error) {
+	row := q.db.QueryRow(ctx, packageForCheckout, id)
+	var i PackageForCheckoutRow
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Name,
+		&i.Price,
+		&i.SalesStart,
+		&i.SalesEnd,
+		&i.Status,
+	)
+	return i, err
 }
 
 const restoreQuota = `-- name: RestoreQuota :one
@@ -572,9 +1460,9 @@ func (q *Queries) RestoreQuota(ctx context.Context, arg RestoreQuotaParams) (int
 const updateEvent = `-- name: UpdateEvent :one
 UPDATE events
 SET name = $2, slug = $3, description = $4, venue = $5, address = $6,
-    start_date = $7, end_date = $8, banner_url = $9, status = $10, updated_at = now()
+    start_date = $7, end_date = $8, banner_url = $9, status = $10, scale = $11, updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at
+RETURNING id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
 `
 
 type UpdateEventParams struct {
@@ -588,6 +1476,7 @@ type UpdateEventParams struct {
 	EndDate     time.Time
 	BannerUrl   *string
 	Status      string
+	Scale       *int64
 }
 
 func (q *Queries) UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event, error) {
@@ -602,6 +1491,7 @@ func (q *Queries) UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event
 		arg.EndDate,
 		arg.BannerUrl,
 		arg.Status,
+		arg.Scale,
 	)
 	var i Event
 	err := row.Scan(
@@ -617,46 +1507,220 @@ func (q *Queries) UpdateEvent(ctx context.Context, arg UpdateEventParams) (Event
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Scale,
+	)
+	return i, err
+}
+
+const updateEventActivity = `-- name: UpdateEventActivity :execrows
+UPDATE event_activities
+SET title = $3, description = $4, icon = $5, position = $6, updated_at = now()
+WHERE id = $1 AND event_id = $2
+`
+
+type UpdateEventActivityParams struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Title       string
+	Description string
+	Icon        *string
+	Position    int32
+}
+
+func (q *Queries) UpdateEventActivity(ctx context.Context, arg UpdateEventActivityParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventActivity,
+		arg.ID,
+		arg.EventID,
+		arg.Title,
+		arg.Description,
+		arg.Icon,
+		arg.Position,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateEventGuestStar = `-- name: UpdateEventGuestStar :execrows
+UPDATE event_guest_stars
+SET name = $3, position = $4, updated_at = now()
+WHERE id = $1 AND event_id = $2
+`
+
+type UpdateEventGuestStarParams struct {
+	ID       uuid.UUID
+	EventID  uuid.UUID
+	Name     string
+	Position int32
+}
+
+func (q *Queries) UpdateEventGuestStar(ctx context.Context, arg UpdateEventGuestStarParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventGuestStar,
+		arg.ID,
+		arg.EventID,
+		arg.Name,
+		arg.Position,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateEventGuideline = `-- name: UpdateEventGuideline :execrows
+UPDATE event_guidelines
+SET description = $3, icon = $4, position = $5, updated_at = now()
+WHERE id = $1 AND event_id = $2
+`
+
+type UpdateEventGuidelineParams struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Description string
+	Icon        *string
+	Position    int32
+}
+
+func (q *Queries) UpdateEventGuideline(ctx context.Context, arg UpdateEventGuidelineParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventGuideline,
+		arg.ID,
+		arg.EventID,
+		arg.Description,
+		arg.Icon,
+		arg.Position,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updatePackage = `-- name: UpdatePackage :one
+UPDATE packages
+SET name = $2, description = $3, price = $4, sales_start = $5, sales_end = $6,
+    status = $7, updated_at = now()
+WHERE id = $1
+RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+          created_at, updated_at
+`
+
+type UpdatePackageParams struct {
+	ID          uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	Status      string
+}
+
+// event_id is absent on purpose: a package never moves between events, since its
+// composition is bound to that event by the composite foreign keys.
+func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (Package, error) {
+	row := q.db.QueryRow(ctx, updatePackage,
+		arg.ID,
+		arg.Name,
+		arg.Description,
+		arg.Price,
+		arg.SalesStart,
+		arg.SalesEnd,
+		arg.Status,
+	)
+	var i Package
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Name,
+		&i.Description,
+		&i.Price,
+		&i.SalesStart,
+		&i.SalesEnd,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const updateTicketType = `-- name: UpdateTicketType :one
 UPDATE ticket_types
-SET name = $2, price = $3, quota = $4, sales_start = $5, sales_end = $6, updated_at = now()
+SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, price, quota, sales_start, sales_end, created_at, updated_at
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
 `
 
 type UpdateTicketTypeParams struct {
-	ID         uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
+	ID          uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
+}
+
+type UpdateTicketTypeRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
 }
 
 // `quota` is set ABSOLUTELY to the submitted remaining quota; past sales are never
 // re-subtracted here (contracts/api.md, Admin Management).
-func (q *Queries) UpdateTicketType(ctx context.Context, arg UpdateTicketTypeParams) (TicketType, error) {
+func (q *Queries) UpdateTicketType(ctx context.Context, arg UpdateTicketTypeParams) (UpdateTicketTypeRow, error) {
 	row := q.db.QueryRow(ctx, updateTicketType,
 		arg.ID,
 		arg.Name,
+		arg.Description,
 		arg.Price,
 		arg.Quota,
 		arg.SalesStart,
 		arg.SalesEnd,
 	)
-	var i TicketType
+	var i UpdateTicketTypeRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
 		&i.Name,
+		&i.Description,
 		&i.Price,
 		&i.Quota,
 		&i.SalesStart,
 		&i.SalesEnd,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertEventTerms = `-- name: UpsertEventTerms :one
+INSERT INTO event_terms (event_id, content)
+VALUES ($1, $2)
+ON CONFLICT (event_id) DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+RETURNING id, event_id, content, created_at, updated_at
+`
+
+type UpsertEventTermsParams struct {
+	EventID uuid.UUID
+	Content string
+}
+
+// One live document per event (event_id UNIQUE): an edit overwrites in place.
+func (q *Queries) UpsertEventTerms(ctx context.Context, arg UpsertEventTermsParams) (EventTerm, error) {
+	row := q.db.QueryRow(ctx, upsertEventTerms, arg.EventID, arg.Content)
+	var i EventTerm
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.Content,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

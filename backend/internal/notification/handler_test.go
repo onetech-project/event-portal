@@ -49,9 +49,11 @@ func TestResendEndpointReturns200AndTheRecipient(t *testing.T) {
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.ElementsMatch(t, []string{"message", "sent_to"}, keysOfBody(body))
-	assert.Equal(t, "Email resent", body["message"])
-	assert.Equal(t, "budi@example.com", body["sent_to"])
+	data, ok := body["data"].(map[string]any)
+	require.True(t, ok, "resend payload rides the envelope's data field")
+	assert.ElementsMatch(t, []string{"message", "sent_to"}, keysOfBody(data))
+	assert.Equal(t, "Email resent", data["message"])
+	assert.Equal(t, "budi@example.com", data["sent_to"])
 
 	require.Len(t, f.mailer.sent, 1)
 	assert.Equal(t, 1, f.orders.markCalled, "a successful resend also sets email_sent")
@@ -69,7 +71,7 @@ func TestResendEndpointReturns400ForANonPaidOrder(t *testing.T) {
 
 			var body apperr.Body
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			assert.Equal(t, apperr.CodeOrderNotPaid, body.ErrorCode)
+			assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeOrderNotPaid), body.Code)
 			assert.Empty(t, f.mailer.sent)
 		})
 	}

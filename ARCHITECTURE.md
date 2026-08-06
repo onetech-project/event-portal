@@ -45,7 +45,7 @@ Rule: sqlc generated database structs MUST NOT be leaked to the HTTP response. E
 
 **3.4. Critical Data Flows & Mitigations**
 
-DB Transactions (Checkout): POST /api/v1/checkout MUST wrap the creation of orders, order_items, attendees, and atomic deduction of quota in a single SQL Transaction (BEGIN ... COMMIT). Pass pgx.Tx via context or explicitly to queries.
+DB Transactions (Booking, spec 008): POST /api/v1/ticket/book MUST wrap the creation of orders, order_items, empty attendee slots, and atomic deduction of quota in a single SQL Transaction (BEGIN ... COMMIT). Pass pgx.Tx via context or explicitly to queries. POST /api/v1/ticket/checkout/:order_id saves the visitor forms in its own transaction and calls the payment gateway only after it commits.
 
 Quota Restoration (Abandoned Cart): The webhook handler MUST listen for expire, cancel, or deny statuses. Upon receipt, update order status to Expired/Cancelled and atomically restore the quota in the ticket_types table.
 
@@ -94,24 +94,24 @@ than the admin ones and the ticket lookup is rate limited per IP.
 
 ```mermaid
 flowchart TD
-    A["Guest opens /events"] --> B["GET /api/v1/events — cache: no-store,<br/>so remaining quota is never stale"]
-    B --> C["Pick an event and its ticket types"]
-    C --> D["Fill buyer details and one attendee per ticket"]
-    D --> E["POST /api/v1/checkout"]
+    A["Guest opens the event grid at /"] --> B["GET /api/v1/event, then the detail<br/>at /event/:slug; the selection page reads<br/>GET /ticket/:slug + /packages/:slug —<br/>cache: no-store, so quota is never stale"]
+    B --> C["Pick ticket types and bundles"]
+    C --> D["Agree to the T&C in the booking dialog<br/>(GET /ticket/terms-condition/:slug)"]
+    D --> E["POST /api/v1/ticket/book, then<br/>POST /ticket/terms-condition/:order_id"]
 
-    E --> F{"On sale, and enough quota?"}
-    F -- no --> G["400 TICKET_TYPE_NOT_ON_SALE<br/>or INSUFFICIENT_QUOTA"]
+    E --> F{"Terms authored, on sale,<br/>and enough quota?"}
+    F -- no --> G["409001 no authored terms,<br/>400 not-on-sale or insufficient quota"]
     G --> C
-    F -- yes --> H["TX1 commits: quota deducted,<br/>order + items + attendees written,<br/>status = PENDING"]
+    F -- yes --> H["TX-B commits: quota deducted,<br/>order + items + EMPTY attendee slots,<br/>status = PENDING, 1-hour hold"]
 
-    H --> I{"Gateway created a QRIS session?"}
-    I -- no --> J["Compensating TX: order → CANCELLED,<br/>quota restored"]
-    J --> K["502 PAYMENT_INITIATION_FAILED —<br/>safe to retry, nothing is held"]
-    K --> C
-    I -- yes --> L["TX2 stamps qr_string<br/>and payment_expires_at"]
+    H --> I{"Forms submitted<br/>(POST /ticket/checkout/:order_id)<br/>and gateway created a QRIS session?"}
+    I -- no --> J["No compensation: the hold and the<br/>saved forms are kept"]
+    J --> K["502001 PAYMENT_INITIATION_FAILED —<br/>the guest retries from the same order"]
+    K --> I
+    I -- yes --> L["TX-P stamps qr_string and the<br/>14-minute payment_expires_at"]
 
-    L --> M["In-app route to the order page.<br/>No redirect off-site: the QR is rendered<br/>from qr_string on demand"]
-    M --> N["Poll GET /api/v1/orders/:orderNumber every 3s,<br/>even while the tab is backgrounded"]
+    L --> M["Same order page flips to the QR phase.<br/>No redirect off-site: the QR is rendered<br/>from qr_string on demand"]
+    M --> N["Poll GET /api/v1/ticket/order/:order_id every 3s<br/>+ SSE /ticket/checkout/:order_id/status,<br/>even while the tab is backgrounded"]
 
     N --> O{"Order status"}
     O -- "PENDING" --> P{"Past payment_expires_at?"}
@@ -140,35 +140,42 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant MT as Midtrans Core API
 
-    G->>FE: Choose tickets, fill buyer and attendees
-    FE->>API: POST /api/v1/checkout
-    API->>OS: Checkout(req)
+    G->>FE: Choose tickets, agree to the T&C
+    FE->>API: POST /api/v1/ticket/book
+    API->>OS: Book(req)
     OS->>OS: req.Validate() — reject before any I/O opens a transaction
+    OS->>EV: CurrentTerms(eventID) — 409001 if none authored
 
     rect rgb(238, 244, 255)
-    Note over OS,DB: TX1 — one transaction (§3.4)
+    Note over OS,DB: TX-B — one transaction (§3.4)
     OS->>EV: TicketTypeForCheckout(tx, id)
     EV->>DB: SELECT price, name, sales window
     OS->>OS: Reject if outside the sales window
     OS->>EV: CheckAndDeductQuota(tx, id, qty)
     EV->>DB: UPDATE ticket_types SET quota = quota - qty WHERE quota >= qty
     Note right of DB: The guard is in the WHERE clause, not in Go.<br/>Zero rows means someone else took the last seat.<br/>The row lock is held to COMMIT.
-    OS->>DB: INSERT orders, order_items, attendees
+    OS->>DB: INSERT orders (1-hour hold), order_items,<br/>EMPTY attendee slots
     Note over OS,DB: Total is recomputed from server-side prices —<br/>the client never sends one
     DB-->>OS: COMMIT
     end
 
-    OS->>MT: CreateTransaction — outside TX1, no lock held
+    OS-->>FE: order_id, PENDING, expires_at
+    FE->>API: POST /api/v1/ticket/terms-condition/:order_id
+    FE->>G: Route in-app to /events/:slug/orders/:order_id
+
+    G->>FE: Fill buyer + visitor forms, Continue to Payment
+    FE->>API: POST /api/v1/ticket/checkout/:order_id
+    API->>OS: CheckoutOrder(orderID, forms)
+    OS->>DB: TX-D — save buyer + attendee details
+    OS->>MT: CreateTransaction — outside any TX, no lock held
 
     alt Provider call fails
-        OS->>DB: Compensating TX — order → CANCELLED, quota restored
-        Note right of OS: Guarded on the order still being PENDING,<br/>so a webhook that beat us here wins instead
-        OS-->>FE: 502 PAYMENT_INITIATION_FAILED
+        OS-->>FE: 502001 PAYMENT_INITIATION_FAILED
+        Note right of OS: No compensation: the hold and the saved forms<br/>are kept, and the guest retries from the same order
     else QRIS session created
         MT-->>OS: qr_string, expiry
-        OS->>DB: TX2 — UPDATE orders SET payment_qr_string, payment_expires_at
-        OS-->>FE: order_number, PENDING, total
-        FE->>G: Route in-app to /orders/:orderNumber
+        OS->>DB: TX-P — UPDATE orders SET payment_qr_string,<br/>payment_expires_at = now() + 14m<br/>WHERE payment_qr_string IS NULL
+        OS-->>FE: qr_string, expires_at, qr_image_url
     end
 ```
 
@@ -194,11 +201,11 @@ sequenceDiagram
 
     par Guest watches the page
         loop Every 3s until the status is final
-            FE->>API: GET /api/v1/orders/:orderNumber
+            FE->>API: GET /api/v1/ticket/order/:order_id
             API-->>FE: status, total, payment.expires_at
         end
         G->>FE: Press "check payment status"
-        FE->>API: POST /api/v1/orders/:orderNumber/payment/refresh
+        FE->>API: POST /api/v1/ticket/order/:order_id/payment/refresh
         Note right of API: Rate limited to ~1 press per 5s per IP:<br/>each one costs an outbound provider call
         API->>PS: RefreshStatus
         PS->>MT: FetchStatus

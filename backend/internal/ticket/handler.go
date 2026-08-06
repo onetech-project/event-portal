@@ -7,6 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // Handler exposes the ticket domain over HTTP.
@@ -53,7 +55,7 @@ func (h *Handler) validate(c echo.Context) error {
 	}
 	// Always 200: Valid, Already Used, and Invalid are all normal answers at a
 	// door, and the scanner UI branches on `result`, not on the status code.
-	return c.JSON(http.StatusOK, result)
+	return httpx.Respond(c, http.StatusOK, result)
 }
 
 func (h *Handler) markUsed(c echo.Context) error {
@@ -61,7 +63,7 @@ func (h *Handler) markUsed(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, resp)
+	return httpx.Respond(c, http.StatusOK, resp)
 }
 
 func (h *Handler) lookup(c echo.Context) error {
@@ -69,5 +71,5 @@ func (h *Handler) lookup(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, got)
+	return httpx.Respond(c, http.StatusOK, got)
 }

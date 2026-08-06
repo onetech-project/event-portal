@@ -45,6 +45,21 @@ type Config struct {
 	// provider notification arrives.
 	PaymentSweepInterval time.Duration
 
+	// BookingHold is how long a booked order holds its seats before the guest
+	// must start payment. Booking writes payment_expires_at = now()+BookingHold;
+	// the same sweeper that expires unpaid payment windows reclaims lapsed holds.
+	BookingHold time.Duration
+	// PaymentWindow is the server-owned payment deadline stamped when the guest
+	// continues to payment. It is deliberately shorter than PaymentExpiry (the
+	// gateway-side QR validity): the sweeper expires the order first, and a
+	// payment landing in the gap goes through the webhook-after-expiry
+	// reconciliation path instead of silently succeeding.
+	PaymentWindow time.Duration
+	// QRRefreshAfter is when the client swaps in a fresh QR during the payment
+	// window. Purely a frontend timer — served to the client in the checkout
+	// response; no background job runs on it.
+	QRRefreshAfter time.Duration
+
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -165,6 +180,10 @@ func Load() (*Config, error) {
 		PaymentExpiry:        l.duration("PAYMENT_EXPIRY", 15*time.Minute),
 		PaymentSweepInterval: l.duration("PAYMENT_SWEEP_INTERVAL", 30*time.Second),
 
+		BookingHold:    l.duration("BOOKING_HOLD", time.Hour),
+		PaymentWindow:  l.duration("PAYMENT_WINDOW", 14*time.Minute),
+		QRRefreshAfter: l.duration("QR_REFRESH_AFTER", 7*time.Minute),
+
 		SMTPHost:     l.str("SMTP_HOST", "localhost"),
 		SMTPPort:     l.integer("SMTP_PORT", 1025),
 		SMTPUsername: l.str("SMTP_USERNAME", ""),
@@ -196,6 +215,24 @@ func Load() (*Config, error) {
 	if cfg.PaymentSweepInterval <= 0 {
 		l.errs = append(l.errs, fmt.Errorf(
 			"PAYMENT_SWEEP_INTERVAL must be positive, got %s", cfg.PaymentSweepInterval))
+	}
+	if cfg.BookingHold <= 0 {
+		l.errs = append(l.errs, fmt.Errorf(
+			"BOOKING_HOLD must be positive, got %s", cfg.BookingHold))
+	}
+	// The server deadline must sit strictly inside the gateway-side QR validity,
+	// otherwise a QR could outlive the order it belongs to (research R2).
+	if cfg.PaymentWindow <= 0 || cfg.PaymentWindow >= cfg.PaymentExpiry {
+		l.errs = append(l.errs, fmt.Errorf(
+			"PAYMENT_WINDOW must be positive and shorter than PAYMENT_EXPIRY (%s), got %s",
+			cfg.PaymentExpiry, cfg.PaymentWindow))
+	}
+	// The refresh must land while the window is still open, or the client would
+	// swap in a QR for an order the sweeper is about to expire.
+	if cfg.QRRefreshAfter <= 0 || cfg.QRRefreshAfter >= cfg.PaymentWindow {
+		l.errs = append(l.errs, fmt.Errorf(
+			"QR_REFRESH_AFTER must be positive and shorter than PAYMENT_WINDOW (%s), got %s",
+			cfg.PaymentWindow, cfg.QRRefreshAfter))
 	}
 
 	if len(l.errs) > 0 {

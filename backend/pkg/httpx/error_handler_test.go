@@ -48,7 +48,7 @@ func TestAppErrorRendersItsCodeAndStatus(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	body := decodeBody(t, rec)
-	assert.Equal(t, apperr.CodeInsufficientQuota, body.ErrorCode)
+	assert.Equal(t, 400002, body.Code)
 	assert.Equal(t, "only 2 left", body.Message)
 }
 
@@ -59,7 +59,7 @@ func TestWrappedAppErrorIsStillUnwrapped(t *testing.T) {
 	})
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, apperr.CodeTicketNotFound, decodeBody(t, rec).ErrorCode)
+	assert.Equal(t, 404001, decodeBody(t, rec).Code)
 }
 
 // An unexpected error must never leak its text to the client.
@@ -70,7 +70,7 @@ func TestUnknownErrorBecomesOpaque500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	body := decodeBody(t, rec)
-	assert.Equal(t, apperr.CodeInternal, body.ErrorCode)
+	assert.Equal(t, 500000, body.Code)
 	assert.NotContains(t, rec.Body.String(), "password authentication failed")
 }
 
@@ -80,7 +80,7 @@ func TestEchoNotFoundIsRenderedInTheSameShape(t *testing.T) {
 	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/does-not-exist", nil))
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, apperr.CodeNotFound, decodeBody(t, rec).ErrorCode)
+	assert.Equal(t, 404001, decodeBody(t, rec).Code)
 }
 
 // spec FR-020 / contracts: the rate limiter's 429 must use the same error envelope.
@@ -90,7 +90,7 @@ func TestEchoHTTPErrorStatusIsMappedToARateLimitCode(t *testing.T) {
 	})
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, apperr.CodeRateLimited, decodeBody(t, rec).ErrorCode)
+	assert.Equal(t, 429001, decodeBody(t, rec).Code)
 }
 
 // Every rejected or failed request must be linkable to its trace. Logging

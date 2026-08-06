@@ -28,4 +28,13 @@ type OrderChecker interface {
 	// SoldCountByTicketType returns the derived sold count per ticket type,
 	// batched for a whole page. Never stored, never JOINed across domains.
 	SoldCountByTicketType(ctx context.Context, ticketTypeIDs []uuid.UUID) (map[uuid.UUID]int, error)
+	// SoldCountByPackage returns the derived sold count per package, batched
+	// for the admin dashboard. Uses the package_id column on order_items.
+	SoldCountByPackage(ctx context.Context, packageIDs []uuid.UUID) (map[uuid.UUID]int, error)
+	// HasOrdersForPackage reports whether a package is referenced by an
+	// order_items or attendees row, guarding its delete.
+	HasOrdersForPackage(ctx context.Context, tx pgx.Tx, packageID uuid.UUID) (bool, error)
+	// HasPendingOrdersForPackage reports whether an open PENDING order holds the
+	// package, locking its composition while the hold exists (research.md R-004).
+	HasPendingOrdersForPackage(ctx context.Context, tx pgx.Tx, packageID uuid.UUID) (bool, error)
 }

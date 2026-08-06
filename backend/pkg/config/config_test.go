@@ -50,6 +50,57 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	assert.GreaterOrEqual(t, float64(cfg.TicketLookupBurst), cfg.TicketLookupRateLimit)
 	assert.Equal(t, 15*time.Minute, cfg.PaymentExpiry, "the provider's documented QRIS default")
 	assert.Equal(t, 30*time.Second, cfg.PaymentSweepInterval)
+	// 008: booking hold + server-owned payment window + client QR refresh point.
+	assert.Equal(t, time.Hour, cfg.BookingHold)
+	assert.Equal(t, 14*time.Minute, cfg.PaymentWindow)
+	assert.Equal(t, 7*time.Minute, cfg.QRRefreshAfter)
+}
+
+// The server-owned deadline must sit strictly inside the gateway-side QR
+// validity, and the refresh point strictly inside the window (research R2/R3).
+func TestLoadRejectsPaymentWindowNotInsidePaymentExpiry(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYMENT_WINDOW", "15m") // equal to PAYMENT_EXPIRY default — invalid
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAYMENT_WINDOW")
+}
+
+func TestLoadRejectsQRRefreshAfterNotInsidePaymentWindow(t *testing.T) {
+	setRequired(t)
+	t.Setenv("QR_REFRESH_AFTER", "14m") // equal to PAYMENT_WINDOW default — invalid
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "QR_REFRESH_AFTER")
+}
+
+func TestLoadRejectsNonPositiveBookingHold(t *testing.T) {
+	setRequired(t)
+	t.Setenv("BOOKING_HOLD", "0s")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BOOKING_HOLD")
+}
+
+func TestBookingTimersOverridableFromEnv(t *testing.T) {
+	setRequired(t)
+	t.Setenv("BOOKING_HOLD", "3m")
+	t.Setenv("PAYMENT_EXPIRY", "20m")
+	t.Setenv("PAYMENT_WINDOW", "10m")
+	t.Setenv("QR_REFRESH_AFTER", "1m")
+
+	cfg, err := config.Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, 3*time.Minute, cfg.BookingHold)
+	assert.Equal(t, 10*time.Minute, cfg.PaymentWindow)
+	assert.Equal(t, time.Minute, cfg.QRRefreshAfter)
 }
 
 func TestLoadOverridesDefaultsFromEnv(t *testing.T) {

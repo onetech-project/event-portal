@@ -1,5 +1,23 @@
 <!--
 Sync Impact Report
+Version change: 1.1.0 → 1.1.1 (PATCH — wording only, no semantic change)
+
+Trigger: spec 008 (e2e purchase flow) split the single-call checkout into the two-phase
+guest flow and renamed the guest endpoints (research R10, clarification 2026-08-05).
+Principle IV named `POST /api/v1/checkout` literally; that path no longer exists. The
+transactional rule itself transfers unchanged: the order-creating transaction is now
+`POST /ticket/book` (TX-B: order + order_items + attendee slots + quota deduction), and
+the gateway call sits behind `POST /ticket/checkout/:order_id`, still outside any
+row-locking transaction.
+
+Modified sections:
+  - Principle IV — replaced the literal `POST /api/v1/checkout` reference with the
+    booking/checkout endpoints; no rule added, removed, or weakened.
+
+Templates requiring follow-up: none.
+
+Previous report (1.0.0 → 1.1.0) follows.
+
 Version change: 1.0.0 → 1.1.0 (MINOR — materially expanded guidance, no principle removed
 or redefined; all 1.0.0 rules remain in force unchanged)
 
@@ -56,13 +74,15 @@ Rationale: Decouples the wire contract from the storage schema so either can evo
 independently.
 
 ### IV. Transactional Integrity & Idempotency
-Checkout (`POST /api/v1/checkout`) MUST wrap creation of `orders`, `order_items`,
+Booking (`POST /api/v1/ticket/book`) MUST wrap creation of `orders`, `order_items`,
 `attendees`, and the atomic deduction of `ticket_types` quota in a single SQL
 transaction (`BEGIN ... COMMIT`), passed explicitly or via context as `pgx.Tx`.
-That transaction MUST NOT contain any external network call — notably the payment
-gateway's `CreateTransaction`, which MUST be invoked only after the transaction has
-committed, with its result persisted by a subsequent short transaction and a failed
-call compensated by cancelling the order and restoring its quota.
+No order-writing transaction — booking's, or checkout's
+(`POST /api/v1/ticket/checkout/:order_id`) form-saving one — may contain any external
+network call: notably the payment gateway's `CreateTransaction`, which MUST be invoked
+only after the transaction has committed, with its result persisted by a subsequent
+short transaction and a failed call compensated without losing the guest's hold or
+saved forms.
 Payment webhook handlers MUST be idempotent: if an order's status is already `PAID`,
 the handler MUST return `200 OK` immediately without reprocessing. Webhooks receiving
 `expire`, `cancel`, `deny`, or `failure` MUST atomically update order status to
@@ -158,4 +178,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-07-31
+**Version**: 1.1.1 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-05

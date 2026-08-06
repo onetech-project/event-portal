@@ -8,7 +8,7 @@ import type { OrderStatus } from "@/lib/types";
 
 type Props = {
   status: OrderStatus;
-  buyerEmail: string;
+  buyerEmail: string | null;
   eventSlug: string;
 };
 
@@ -33,8 +33,11 @@ export function PaymentStatusCard({ status, buyerEmail, eventSlug }: Readonly<Pr
           </p>
 
           <p className="text-sm">
-            <Link href="/events" className="underline">
-              Browse more events
+            <Link
+              href={eventSlug ? `/events/${eventSlug}` : "/events"}
+              className="underline"
+            >
+              {eventSlug ? "Back to the event" : "Browse events"}
             </Link>
           </p>
         </CardContent>

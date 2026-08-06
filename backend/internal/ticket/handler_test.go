@@ -41,15 +41,15 @@ func post(t *testing.T, e *echo.Echo, path, body string) *httptest.ResponseRecor
 func objectOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 	return body
 }
 
-func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+func errorCode(t *testing.T, rec *httptest.ResponseRecorder) int {
 	t.Helper()
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	return body.ErrorCode
+	return body.Code
 }
 
 // --- Validate -------------------------------------------------------------
@@ -168,7 +168,7 @@ func TestMarkUsedEndpointReturns409ForAnAlreadyUsedTicket(t *testing.T) {
 	rec := post(t, e, "/api/v1/admin/tickets/AGAIN234AB/use", "")
 
 	require.Equal(t, http.StatusConflict, rec.Code)
-	assert.Equal(t, apperr.CodeAlreadyUsed, errorCode(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeAlreadyUsed), errorCode(t, rec))
 }
 
 func TestMarkUsedEndpointReturns409ForARevokedTicket(t *testing.T) {
@@ -186,7 +186,7 @@ func TestMarkUsedEndpointReturns404ForAnUnknownCode(t *testing.T) {
 	rec := post(t, e, "/api/v1/admin/tickets/GHOST234AB/use", "")
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, apperr.CodeTicketNotFound, errorCode(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeTicketNotFound), errorCode(t, rec))
 }
 
 // The full door loop: validate, admit, re-validate.

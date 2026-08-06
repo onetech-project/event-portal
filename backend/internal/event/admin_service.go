@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/sanitize"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
@@ -77,7 +79,10 @@ func (s *Service) UpdateEvent(ctx context.Context, id uuid.UUID, req EventReques
 // The sequence matters and cannot be collapsed: ticket_types.event_id is
 // ON DELETE RESTRICT, so the ticket types must go first, and the order guard must
 // run inside the same transaction or an order could be placed between the check
-// and the delete. If anything is referenced, the whole transaction rolls back and
+// and the delete. Packages are checked first: packages.event_id is ON DELETE
+// RESTRICT, so the DB would reject the delete with a raw constraint violation if
+// a package existed, but we surface a clean 400 instead (Constitution Principle
+// VI). If anything is referenced, the whole transaction rolls back and
 // nothing is deleted.
 func (s *Service) DeleteEvent(ctx context.Context, id uuid.UUID) error {
 	if s.orders == nil {
@@ -87,6 +92,16 @@ func (s *Service) DeleteEvent(ctx context.Context, id uuid.UUID) error {
 	var found bool
 
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		// Guard 1: packages with this event cannot exist.
+		packageCount, err := s.repo.CountPackagesByEventID(ctx, id)
+		if err != nil {
+			return err
+		}
+		if packageCount > 0 {
+			return apperr.BadRequest(apperr.CodeEventHasOrders,
+				"This event cannot be deleted because it has associated packages.")
+		}
+
 		ticketTypeIDs, err := s.repo.ListTicketTypeIDsByEventID(ctx, tx, id)
 		if err != nil {
 			return err
@@ -183,12 +198,13 @@ func (s *Service) CreateTicketType(ctx context.Context, req TicketTypeRequest) (
 	}
 
 	created, err := s.repo.CreateTicketType(ctx, AdminTicketTypeParams{
-		EventID:    req.EventID,
-		Name:       req.Name,
-		Price:      req.Price.Decimal(),
-		Quota:      req.Quota,
-		SalesStart: req.SalesStart,
-		SalesEnd:   req.SalesEnd,
+		EventID:     req.EventID,
+		Name:        req.Name,
+		Description: normalizeOptionalText(req.Description),
+		Price:       req.Price.Decimal(),
+		Quota:       req.Quota,
+		SalesStart:  req.SalesStart,
+		SalesEnd:    req.SalesEnd,
 	})
 	if err != nil {
 		return TicketTypeAdminView{}, err
@@ -209,11 +225,12 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 	}
 
 	updated, err := s.repo.UpdateTicketType(ctx, id, AdminTicketTypeParams{
-		Name:       req.Name,
-		Price:      req.Price.Decimal(),
-		Quota:      req.Quota,
-		SalesStart: req.SalesStart,
-		SalesEnd:   req.SalesEnd,
+		Name:        req.Name,
+		Description: normalizeOptionalText(req.Description),
+		Price:       req.Price.Decimal(),
+		Quota:       req.Quota,
+		SalesStart:  req.SalesStart,
+		SalesEnd:    req.SalesEnd,
 	})
 	if errors.Is(err, ErrNotFound) {
 		return TicketTypeAdminView{}, ticketTypeNotFound()
@@ -231,14 +248,31 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 
 // DeleteTicketType removes a ticket type, guarded inside the same transaction as
 // the delete so no order can appear between the check and the DELETE.
+//
+// A ticket type that is part of a package composition cannot be deleted until it
+// is removed from that composition: package_tickets.ticket_type_id is ON DELETE
+// RESTRICT, but we surface a clean 400 naming the packages (Constitution
+// Principle VI) instead of letting a raw constraint violation surface.
 func (s *Service) DeleteTicketType(ctx context.Context, id uuid.UUID) error {
 	if s.orders == nil {
 		return errors.New("event: no order checker configured")
 	}
 
+	// Guard: ticket type referenced by a package composition cannot be deleted.
+	packages, err := s.repo.ListPackagesByTicketTypeID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(packages) > 0 {
+		return apperr.BadRequest(apperr.CodeTicketTypeHasOrders,
+			fmt.Sprintf(
+				"This ticket type cannot be deleted because it is part of package %q.",
+				packages[0].Name))
+	}
+
 	var found bool
 
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		hasOrders, err := s.orders.HasOrdersForTicketType(ctx, tx, id)
 		if err != nil {
 			return err
@@ -290,28 +324,59 @@ func (s *Service) withSoldCounts(ctx context.Context, rows []TicketTypeRow) ([]T
 
 func toTicketTypeView(row TicketTypeRow, sold int) TicketTypeAdminView {
 	return TicketTypeAdminView{
-		ID:         row.ID,
-		EventID:    row.EventID,
-		Name:       row.Name,
-		Price:      money.From(row.Price),
-		Quota:      row.Quota,
-		Sold:       sold,
-		SalesStart: row.SalesStart,
-		SalesEnd:   row.SalesEnd,
+		ID:          row.ID,
+		EventID:     row.EventID,
+		Name:        row.Name,
+		Description: row.Description,
+		Price:       money.From(row.Price),
+		Quota:       row.Quota,
+		Sold:        sold,
+		SalesStart:  row.SalesStart,
+		SalesEnd:    row.SalesEnd,
 	}
 }
 
+// normalizeOptionalText collapses a whitespace-only optional field to nil.
+//
+// Without this, a form that submits an empty textarea would store "" and the
+// booking card would render a blank notice line instead of falling back to the
+// standard non-refundable wording (FR-042).
+func normalizeOptionalText(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
 func toEventParams(req EventRequest) AdminEventParams {
+	// The description is WYSIWYG HTML — sanitized on write (spec 008 T031), so
+	// nothing stored ever needs escaping on the way out.
+	description := req.Description
+	if description != nil {
+		clean := sanitize.HTML(*description)
+		description = &clean
+	}
+	// Scale is a count; zero or negative means "no scale line" and is stored
+	// as NULL rather than rendering "0+ Visitors".
+	scale := req.Scale
+	if scale != nil && *scale <= 0 {
+		scale = nil
+	}
 	return AdminEventParams{
 		Name:        req.Name,
 		Slug:        req.Slug,
-		Description: req.Description,
+		Description: description,
 		Venue:       req.Venue,
 		Address:     req.Address,
 		StartDate:   req.StartDate,
 		EndDate:     req.EndDate,
 		BannerURL:   req.BannerURL,
 		Status:      req.Status,
+		Scale:       scale,
 	}
 }
 

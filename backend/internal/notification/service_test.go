@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,10 +18,11 @@ import (
 )
 
 type fakeOrders struct {
-	order      notification.OrderDelivery
-	getErr     error
-	markCalled int
-	markErr    error
+	order       notification.OrderDelivery
+	getErr      error
+	markCalled  int
+	markErr     error
+	byNumberErr error
 }
 
 func (f *fakeOrders) OrderForDelivery(context.Context, uuid.UUID) (notification.OrderDelivery, error) {
@@ -33,6 +35,13 @@ func (f *fakeOrders) OrderForDelivery(context.Context, uuid.UUID) (notification.
 func (f *fakeOrders) MarkEmailSent(context.Context, uuid.UUID) error {
 	f.markCalled++
 	return f.markErr
+}
+
+func (f *fakeOrders) OrderIDByNumber(context.Context, string) (uuid.UUID, error) {
+	if f.byNumberErr != nil {
+		return uuid.Nil, f.byNumberErr
+	}
+	return f.order.ID, nil
 }
 
 type fakeTickets struct {
@@ -75,6 +84,7 @@ func newDeliveryFixture(t *testing.T) deliveryFixture {
 		BuyerName:   "Budi Santoso",
 		BuyerEmail:  "budi@example.com",
 		Status:      "PAID",
+		TotalAmount: decimal.NewFromInt(550000),
 	}}
 	tickets := &fakeTickets{tickets: sampleTickets(2)}
 	mailer := &fakeMailer{}
@@ -202,4 +212,21 @@ func TestSendTicketEmailBodyNamesTheBuyerAndTicketCount(t *testing.T) {
 	body := f.mailer.sent[0].HTMLBody
 	assert.Contains(t, body, "Budi Santoso")
 	assert.Contains(t, body, "ORD-20260731-ABCDEF")
+}
+
+// Figma 251-2: the body is a receipt — PAID badge, an e-ticket card per
+// attendee with its code, and the amount paid.
+func TestSendTicketEmailBodyIsTheReceiptLayout(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	require.NoError(t, f.svc.SendTicketEmail(context.Background(), f.orderID))
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.Contains(t, body, "PAID")
+	assert.Contains(t, body, "E-Ticket")
+	assert.Contains(t, body, "Total Payment")
+	assert.Contains(t, body, "Rp 550.000")
+	for _, ticket := range f.tickets.tickets {
+		assert.Contains(t, body, ticket.TicketCode)
+	}
 }

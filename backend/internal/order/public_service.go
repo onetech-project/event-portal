@@ -3,7 +3,6 @@ package order
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,7 +61,7 @@ func (s *PublicService) OrderByNumber(ctx context.Context, orderNumber string) (
 		return PublicOrderDetail{}, err
 	}
 
-	displays, err := s.ticketTypeDisplays(ctx, items)
+	displays, err := s.lineDisplays(ctx, items)
 	if err != nil {
 		return PublicOrderDetail{}, err
 	}
@@ -72,8 +71,8 @@ func (s *PublicService) OrderByNumber(ctx context.Context, orderNumber string) (
 		OrderNumber: record.OrderNumber,
 		Status:      record.Status,
 		TotalAmount: money.From(record.TotalAmount),
-		BuyerName:   record.BuyerName,
-		BuyerEmail:  record.BuyerEmail,
+		BuyerName:   strv(record.BuyerName),
+		BuyerEmail:  strv(record.BuyerEmail),
 		CreatedAt:   record.CreatedAt,
 		Event:       eventOf(items, displays),
 		Items:       publicItems(items, displays),
@@ -81,6 +80,96 @@ func (s *PublicService) OrderByNumber(ctx context.Context, orderNumber string) (
 		Payment:     s.paymentInstruction(record, now),
 	}
 	return detail, nil
+}
+
+// TicketOrderByNumber assembles the 008 guest order read
+// (GET /ticket/order/:order_id): status, live deadline, agreement stamp,
+// whether payment has started, and the attendee slots with details or nulls.
+//
+// Like OrderByNumber it stays a handful of indexed reads — this is the polling
+// fallback while SSE is down, so no provider call and no writes.
+func (s *PublicService) TicketOrderByNumber(ctx context.Context, orderNumber string) (TicketOrderDetail, error) {
+	record, err := s.repo.GetOrderByNumber(ctx, orderNumber)
+	if errors.Is(err, ErrNotFound) {
+		return TicketOrderDetail{}, apperr.NotFound(apperr.CodeOrderNotFound, orderNotFoundMessage)
+	}
+	if err != nil {
+		return TicketOrderDetail{}, err
+	}
+
+	items, err := s.repo.ListOrderItemsByOrderID(ctx, record.ID)
+	if err != nil {
+		return TicketOrderDetail{}, err
+	}
+	displays, err := s.lineDisplays(ctx, items)
+	if err != nil {
+		return TicketOrderDetail{}, err
+	}
+	slots, err := s.repo.ListAttendeeSlotsByOrderID(ctx, record.ID)
+	if err != nil {
+		return TicketOrderDetail{}, err
+	}
+	feeRecords, err := s.repo.ListOrderFeesByOrderID(ctx, record.ID)
+	if err != nil {
+		return TicketOrderDetail{}, err
+	}
+	fees := make([]PublicOrderFee, 0, len(feeRecords))
+	for _, fee := range feeRecords {
+		fees = append(fees, PublicOrderFee{Name: fee.Name, Amount: money.From(fee.Amount)})
+	}
+	var subtotal *money.Money
+	if record.Subtotal.Valid {
+		v := money.From(record.Subtotal.Decimal)
+		subtotal = &v
+	}
+
+	slotDTOs := make([]TicketOrderSlot, 0, len(slots))
+	for _, slot := range slots {
+		dto := TicketOrderSlot{
+			ID:             slot.ID,
+			TicketTypeName: slot.TicketTypeName,
+			Name:           slot.Name,
+			Email:          slot.Email,
+			Phone:          slot.Phone,
+			Gender:         slot.Gender,
+		}
+		if slot.PackageID.Valid {
+			pkgID := slot.PackageID.UUID
+			dto.PackageID = &pkgID
+			if display, ok := displays.packages[pkgID]; ok {
+				name := display.PackageName
+				dto.PackageName = &name
+			}
+		}
+		if slot.PackageUnit != nil {
+			unit := int(*slot.PackageUnit)
+			dto.PackageUnit = &unit
+		}
+		if slot.Dob != nil {
+			dob := slot.Dob.Format("2006-01-02")
+			dto.Dob = &dob
+		}
+		slotDTOs = append(slotDTOs, dto)
+	}
+
+	now := s.now()
+	return TicketOrderDetail{
+		OrderID:        record.OrderNumber,
+		Status:         record.Status,
+		TotalAmount:    money.From(record.TotalAmount),
+		Subtotal:       subtotal,
+		Fees:           fees,
+		BuyerName:      record.BuyerName,
+		BuyerEmail:     record.BuyerEmail,
+		ExpiresAt:      record.PaymentExpiresAt,
+		TermsAgreedAt:  record.TermsAgreedAt,
+		PaymentStarted: record.PaymentQRString != nil && *record.PaymentQRString != "",
+		Event:          eventOf(items, displays),
+		Items:          publicItems(items, displays),
+		Slots:          slotDTOs,
+		ServerTime:     now.UTC(),
+		Payment:        s.paymentInstruction(record, now),
+	}, nil
 }
 
 // PaymentQRPayload returns the QRIS payload to render for an order.
@@ -136,57 +225,129 @@ func (s *PublicService) paymentInstruction(record OrderRecord, now time.Time) *P
 	}
 }
 
-// QRImagePath is where the order's QR code is rendered on demand. Exported so
-// the handler and the DTO agree on one definition of the route.
+// QRImagePath is where the order's QR code is rendered on demand — the 008
+// /ticket/order namespace (one definition, shared with the checkout response).
 func QRImagePath(orderNumber string) string {
-	return fmt.Sprintf("/api/v1/orders/%s/qris.png", orderNumber)
+	return TicketQRImagePath(orderNumber)
 }
 
-// ticketTypeDisplays resolves every line's ticket type through the event domain
-// in one batched lookup — never one per row, and never a JOIN across the domain
-// boundary (Constitution Principle II).
-func (s *PublicService) ticketTypeDisplays(ctx context.Context, items []OrderItemRecord) (map[uuid.UUID]TicketTypeDisplay, error) {
+// lineDisplays is every label an order's lines need, resolved through the event
+// domain in two batched lookups — never one per row, and never a JOIN across the
+// domain boundary (Constitution Principle II).
+//
+// Both maps are needed because a line is a ticket type XOR a package: an order
+// made entirely of bundles populates only the second.
+type lineDisplays struct {
+	ticketTypes map[uuid.UUID]TicketTypeDisplay
+	packages    map[uuid.UUID]PackageDisplay
+}
+
+func (s *PublicService) lineDisplays(ctx context.Context, items []OrderItemRecord) (lineDisplays, error) {
+	out := lineDisplays{
+		ticketTypes: map[uuid.UUID]TicketTypeDisplay{},
+		packages:    map[uuid.UUID]PackageDisplay{},
+	}
 	if len(items) == 0 {
-		return map[uuid.UUID]TicketTypeDisplay{}, nil
+		return out, nil
 	}
 
+	ticketTypeIDs := distinctRefs(items, func(r LineRef) uuid.NullUUID { return r.TicketTypeID })
+	packageIDs := distinctRefs(items, func(r LineRef) uuid.NullUUID { return r.PackageID })
+
+	if len(ticketTypeIDs) > 0 {
+		displays, err := s.events.TicketTypeDisplays(ctx, ticketTypeIDs)
+		if err != nil {
+			return lineDisplays{}, err
+		}
+		out.ticketTypes = displays
+	}
+	if len(packageIDs) > 0 {
+		displays, err := s.events.PackageDisplays(ctx, packageIDs)
+		if err != nil {
+			return lineDisplays{}, err
+		}
+		out.packages = displays
+	}
+	return out, nil
+}
+
+// distinctRefs collects the set ids one side of the XOR contributes, skipping the
+// lines of the other kind.
+func distinctRefs(items []OrderItemRecord, pick func(LineRef) uuid.NullUUID) []uuid.UUID {
 	seen := make(map[uuid.UUID]struct{}, len(items))
 	ids := make([]uuid.UUID, 0, len(items))
 	for _, item := range items {
-		if _, ok := seen[item.TicketTypeID]; ok {
+		ref := pick(item.Ref)
+		if !ref.Valid {
 			continue
 		}
-		seen[item.TicketTypeID] = struct{}{}
-		ids = append(ids, item.TicketTypeID)
+		if _, ok := seen[ref.UUID]; ok {
+			continue
+		}
+		seen[ref.UUID] = struct{}{}
+		ids = append(ids, ref.UUID)
 	}
-
-	return s.events.TicketTypeDisplays(ctx, ids)
+	return ids
 }
 
 // eventOf names the event this order belongs to. An order is placed from a
-// single event's page, so the first line settles it; a line whose ticket type
-// has since been deleted simply leaves the name blank rather than failing the
-// whole read.
-func eventOf(items []OrderItemRecord, displays map[uuid.UUID]TicketTypeDisplay) PublicOrderEvent {
+// single event's page, so the first line that resolves settles it; a line whose
+// ticket type or package has since been deleted simply leaves the name blank
+// rather than failing the whole read.
+func eventOf(items []OrderItemRecord, displays lineDisplays) PublicOrderEvent {
 	for _, item := range items {
-		if display, ok := displays[item.TicketTypeID]; ok {
-			return PublicOrderEvent{Name: display.EventName, Slug: display.EventSlug}
+		if id := item.Ref.TicketTypeID; id.Valid {
+			if display, ok := displays.ticketTypes[id.UUID]; ok {
+				return PublicOrderEvent{
+					Name:      display.EventName,
+					Slug:      display.EventSlug,
+					Venue:     display.EventVenue,
+					Address:   display.EventAddress,
+					StartDate: display.EventStartDate,
+					EndDate:   display.EventEndDate,
+				}
+			}
+		}
+		if id := item.Ref.PackageID; id.Valid {
+			if display, ok := displays.packages[id.UUID]; ok {
+				return PublicOrderEvent{
+					Name:      display.EventName,
+					Slug:      display.EventSlug,
+					Venue:     display.EventVenue,
+					Address:   display.EventAddress,
+					StartDate: display.EventStartDate,
+					EndDate:   display.EventEndDate,
+				}
+			}
 		}
 	}
 	return PublicOrderEvent{}
 }
 
-func publicItems(items []OrderItemRecord, displays map[uuid.UUID]TicketTypeDisplay) []PublicOrderItem {
+func publicItems(items []OrderItemRecord, displays lineDisplays) []PublicOrderItem {
 	out := make([]PublicOrderItem, 0, len(items))
 	for _, item := range items {
-		out = append(out, PublicOrderItem{
-			TicketTypeName: displays[item.TicketTypeID].TicketTypeName,
-			Quantity:       item.Quantity,
-			UnitPrice:      money.From(item.Price),
+		line := PublicOrderItem{
+			Kind:      LineKindTicket,
+			Quantity:  item.Quantity,
+			UnitPrice: money.From(item.Price),
 			// Recomputed rather than stored: order_items holds the unit price it
 			// was sold at, and the line total follows from it.
 			Subtotal: money.From(item.Price.Mul(decimal.NewFromInt32(item.Quantity))),
-		})
+		}
+
+		if id := item.Ref.PackageID; id.Valid {
+			// A package line is shown whole, under the bundle's own name and its
+			// own price — never decomposed into its constituent ticket types.
+			line.Kind = LineKindPackage
+			name := displays.packages[id.UUID].PackageName
+			line.PackageName = &name
+		} else if id := item.Ref.TicketTypeID; id.Valid {
+			name := displays.ticketTypes[id.UUID].TicketTypeName
+			line.TicketTypeName = &name
+		}
+
+		out = append(out, line)
 	}
 	return out
 }
