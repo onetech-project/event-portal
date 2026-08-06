@@ -64,7 +64,7 @@ func TestRequireAuthRejectsMissingHeader(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, apperr.CodeUnauthorized, body.ErrorCode)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeUnauthorized), body.Code)
 }
 
 func TestRequireAuthRejectsNonBearerScheme(t *testing.T) {

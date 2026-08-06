@@ -3,12 +3,18 @@ package payment
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 
+	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/logger"
 )
@@ -36,10 +42,24 @@ type OrderRef struct {
 	// nil for an order that never had one. Past it, the order is expired no
 	// matter what the provider says.
 	PaymentExpiresAt *time.Time
+	// TotalAmount and the buyer fields feed the provider request when a QR is
+	// re-issued (spec 008 FR-015); buyer fields are nil before checkout.
+	TotalAmount decimal.Decimal
+	BuyerName   *string
+	BuyerEmail  *string
+	BuyerPhone  *string
+	// PaymentStarted reports whether a QR payload is stamped on the order.
+	PaymentStarted bool
 }
 
-// LineItem is one reserved quantity, used to know how much quota to restore.
-type LineItem struct {
+// QuotaHold is one ticket type's total reserved quantity for an order — how much
+// quota to restore when the order is released.
+//
+// It is a hold, not a line: a package line holds quota in every ticket type it
+// contains, so one order line can produce several holds. Reading order lines
+// directly would restore nothing for a bundle, since a package line carries no
+// ticket type of its own.
+type QuotaHold struct {
 	TicketTypeID uuid.UUID
 	Quantity     int32
 }
@@ -50,8 +70,14 @@ type OrderProvider interface {
 	// OrderByNumber resolves the provider's order_id echo, returning
 	// ErrOrderNotFound when there is no such order.
 	OrderByNumber(ctx context.Context, orderNumber string) (OrderRef, error)
-	// LineItems returns the order's reserved quantities.
-	LineItems(ctx context.Context, orderID uuid.UUID) ([]LineItem, error)
+	// QuotaHolds returns what the order actually holds per ticket type, with any
+	// package lines already expanded through their composition.
+	//
+	// It takes the caller's transaction rather than borrowing its own connection:
+	// restoration runs inside the transaction that guarded the status change, and
+	// asking the pool for a second connection while holding one can exhaust the
+	// pool and deadlock under load.
+	QuotaHolds(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]QuotaHold, error)
 	// UpdateStatusIfPending applies a transition only while the order is still
 	// PENDING, reporting whether it actually applied.
 	UpdateStatusIfPending(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, status string) (bool, error)
@@ -59,6 +85,9 @@ type OrderProvider interface {
 	// oldest first, capped at limit. It is what lets abandoned orders release
 	// their seats without anyone opening the page.
 	DueForExpiry(ctx context.Context, now time.Time, limit int32) ([]OrderRef, error)
+	// UpdatePaymentQR swaps the order's QR payload WITHOUT touching its
+	// deadline (spec 008 FR-015), guarded on the order still being PENDING.
+	UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error)
 }
 
 // QuotaRestorer is the contract this domain needs from the event domain.
@@ -93,6 +122,10 @@ type Service struct {
 	// fulfillment tracks the post-payment goroutines so tests and graceful
 	// shutdown can wait for them.
 	fulfillment sync.WaitGroup
+
+	// hub fans status transitions out to open SSE streams (spec 008). Always
+	// non-nil; publishing with no subscribers is a cheap no-op.
+	hub *StreamHub
 }
 
 // NewService builds the payment service.
@@ -110,8 +143,12 @@ func NewService(
 		pool: pool, repo: repo, gateway: gateway, orders: orders,
 		quota: quota, issuer: issuer, deliverer: deliverer, log: log,
 		now: time.Now,
+		hub: NewStreamHub(),
 	}
 }
+
+// Hub exposes the status stream hub (used by tests and diagnostics).
+func (s *Service) Hub() *StreamHub { return s.hub }
 
 // WaitForFulfillment blocks until every in-flight post-payment goroutine finishes.
 // Used by graceful shutdown and by tests that assert on their effects.
@@ -133,7 +170,12 @@ func (s *Service) HandleNotification(ctx context.Context, provider string, paylo
 		return err
 	}
 
-	ord, err := s.orders.OrderByNumber(ctx, result.OrderNumber)
+	// A re-issued QR lives under a suffixed provider reference
+	// ({orderNumber}-R{n}); strip it so every session of the same order feeds
+	// the identical idempotent settlement path — first settlement wins.
+	orderNumber := stripReissueSuffix(result.OrderNumber)
+
+	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
 	if errors.Is(err, ErrOrderNotFound) {
 		s.log.ErrorContext(ctx, "notification names an unknown order; acknowledging without processing",
 			"provider", provider, "order_number", result.OrderNumber)
@@ -209,7 +251,7 @@ func (s *Service) applyProviderResult(
 		return false, nil
 	}
 
-	applied, err := s.applyOutcome(ctx, ord, outcome)
+	applied, _, err := s.applyOutcome(ctx, ord, outcome)
 	if err != nil {
 		return false, err
 	}
@@ -262,6 +304,123 @@ func (s *Service) ExpireDueOrders(ctx context.Context) (int, error) {
 		}
 	}
 	return expired, nil
+}
+
+// reissueSuffix matches the -R{n} tail a re-issued QR's provider reference
+// carries (contracts/booking-flow.md §4).
+var reissueSuffix = regexp.MustCompile(`-R\d+$`)
+
+// stripReissueSuffix maps any session reference back onto its order number.
+func stripReissueSuffix(reference string) string {
+	return reissueSuffix.ReplaceAllString(reference, "")
+}
+
+// ReissuedQR is what a 7-minute refresh hands back: a fresh payload under the
+// same, untouched deadline.
+type ReissuedQR struct {
+	OrderNumber string
+	QRString    string
+	// ExpiresAt is the order's existing payment deadline — re-issuing never
+	// extends the 14-minute window (FR-015).
+	ExpiresAt time.Time
+}
+
+// ReissueQR opens a fresh provider session for an order mid-payment and swaps
+// the stored QR payload, leaving the deadline untouched (FR-015; spec 008
+// research R3 — a QRIS payload's practical scan-life is shorter than the
+// payment window, so the screen refreshes it at the 7-minute mark).
+//
+//	guards  PENDING ∧ payment started (else 409005) ∧ unexpired (else 410001)
+//	network Gateway.CreateTransaction("{orderNumber}-R{n}", same total) — no TX
+//	write   swap payment_url + payment_qr_string; deadline NOT touched
+//
+// n is derived from the payments log, where every re-issue is recorded — the
+// audit trail that also lets support match a provider reference back to its
+// order. A gateway failure leaves the old QR in place (client keeps showing it).
+func (s *Service) ReissueQR(ctx context.Context, orderNumber string) (ReissuedQR, error) {
+	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
+	if errors.Is(err, ErrOrderNotFound) {
+		return ReissuedQR{}, apperr.NotFound(apperr.CodeOrderNotFound, "Order not found.")
+	}
+	if err != nil {
+		return ReissuedQR{}, err
+	}
+
+	if ord.Status != OrderStatusPending ||
+		(ord.PaymentExpiresAt != nil && s.now().After(*ord.PaymentExpiresAt)) {
+		return ReissuedQR{}, apperr.New(http.StatusGone, apperr.CodeOrderExpired,
+			"This order can no longer be paid. Please book again.")
+	}
+	if !ord.PaymentStarted {
+		return ReissuedQR{}, apperr.Conflict(apperr.CodePaymentNotStarted,
+			"Payment for this order has not started yet.")
+	}
+
+	prior, err := s.repo.CountReissuedQRs(ctx, ord.ID)
+	if err != nil {
+		return ReissuedQR{}, err
+	}
+	reference := fmt.Sprintf("%s-R%d", ord.OrderNumber, prior+1)
+
+	req := TransactionRequest{
+		OrderNumber: reference,
+		GrossAmount: ord.TotalAmount,
+		Items: []TransactionItem{{
+			ID: ord.OrderNumber, Name: "Order " + ord.OrderNumber,
+			Price: ord.TotalAmount, Quantity: 1,
+		}},
+	}
+	if ord.BuyerName != nil {
+		req.CustomerName = *ord.BuyerName
+	}
+	if ord.BuyerEmail != nil {
+		req.CustomerEmail = *ord.BuyerEmail
+	}
+	if ord.BuyerPhone != nil {
+		req.CustomerPhone = *ord.BuyerPhone
+	}
+
+	session, err := s.gateway.CreateTransaction(ctx, req)
+	if err != nil {
+		s.log.ErrorContext(ctx, "QR re-issue failed; old QR remains live",
+			"order_number", ord.OrderNumber, "reference", reference, "error", err.Error())
+		return ReissuedQR{}, apperr.Wrap(err, http.StatusBadGateway, apperr.CodePaymentInitiationFailed,
+			"We could not refresh the payment code. The previous code may still work.")
+	}
+
+	swapped, err := s.orders.UpdatePaymentQR(ctx, ord.ID, session.QRImageURL, session.QRString)
+	if err != nil {
+		return ReissuedQR{}, err
+	}
+	if !swapped {
+		// The order settled or expired between the guard and the swap.
+		return ReissuedQR{}, apperr.New(http.StatusGone, apperr.CodeOrderExpired,
+			"This order can no longer be paid.")
+	}
+
+	// The audit row is what makes n monotonic and the suffixed reference
+	// traceable back to its order.
+	if err := s.repo.CreatePayment(ctx, PaymentLog{
+		OrderID:       ord.ID,
+		Provider:      s.gateway.Name(),
+		TransactionID: reference,
+		PaymentType:   "qris",
+		Status:        "QR_REISSUED",
+		RawResponse:   []byte(fmt.Sprintf(`{"reference":%q,"provider_ref":%q}`, reference, session.ProviderRef)),
+	}); err != nil {
+		// The swap already happened; a lost audit row must not fail the guest.
+		s.log.ErrorContext(ctx, "could not record QR re-issue",
+			"order_number", ord.OrderNumber, "reference", reference, "error", err.Error())
+	}
+
+	s.log.InfoContext(ctx, "payment QR re-issued",
+		"order_number", ord.OrderNumber, "reference", reference)
+
+	expiresAt := time.Time{}
+	if ord.PaymentExpiresAt != nil {
+		expiresAt = ord.PaymentExpiresAt.UTC()
+	}
+	return ReissuedQR{OrderNumber: ord.OrderNumber, QRString: session.QRString, ExpiresAt: expiresAt}, nil
 }
 
 // RefreshResult reports what a reconciliation found.
@@ -345,43 +504,69 @@ func (s *Service) expireIfDue(ctx context.Context, ord OrderRef) (bool, error) {
 		return false, nil
 	}
 
-	applied, err := s.applyOutcome(ctx, ord, expiredOutcome)
+	applied, restored, err := s.applyOutcome(ctx, ord, expiredOutcome)
 	if err != nil {
 		return false, err
 	}
 	if applied {
+		// FR-009: every expired order is auditable from the logs alone — its
+		// identity plus exactly which quota went back to the pool.
+		lines := make([]string, 0, len(restored))
+		for _, hold := range restored {
+			lines = append(lines, fmt.Sprintf("%s:+%d", hold.TicketTypeID, hold.Quantity))
+		}
 		s.log.InfoContext(ctx, "order expired at its payment deadline; quota restored",
-			"order_number", ord.OrderNumber, "expired_at", ord.PaymentExpiresAt.UTC())
+			"order_number", ord.OrderNumber,
+			"order_id", ord.ID.String(),
+			"expired_at", ord.PaymentExpiresAt.UTC(),
+			"restored_quota", strings.Join(lines, ","))
 	}
 	return applied, nil
 }
 
 // applyOutcome moves the order and, when the outcome calls for it, restores its
 // quota — in one transaction guarded on the order still being PENDING, so a
-// replayed notification can never restore quota twice.
-func (s *Service) applyOutcome(ctx context.Context, ord OrderRef, outcome Outcome) (bool, error) {
-	var applied bool
+// replayed notification can never restore quota twice. The holds it restored
+// are returned so callers can log the quota lines (FR-009).
+func (s *Service) applyOutcome(ctx context.Context, ord OrderRef, outcome Outcome) (bool, []QuotaHold, error) {
+	var (
+		applied  bool
+		restored []QuotaHold
+	)
 
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		restored = nil // reset on a retried transaction
 		var err error
 		applied, err = s.orders.UpdateStatusIfPending(ctx, tx, ord.ID, outcome.OrderStatus)
 		if err != nil || !applied || !outcome.RestoreQuota {
 			return err
 		}
 
-		items, err := s.orders.LineItems(ctx, ord.ID)
+		// Holds arrive with package lines already expanded and sorted by ticket
+		// type — the same order checkout deducts in, which keeps restoration on
+		// the same deterministic lock sequence and out of deadlock range.
+		holds, err := s.orders.QuotaHolds(ctx, tx, ord.ID)
 		if err != nil {
 			return err
 		}
-		for _, item := range items {
-			if err := s.quota.RestoreQuota(ctx, tx, item.TicketTypeID, item.Quantity); err != nil {
+		for _, hold := range holds {
+			if err := s.quota.RestoreQuota(ctx, tx, hold.TicketTypeID, hold.Quantity); err != nil {
 				return err
 			}
 		}
+		restored = holds
 		return nil
 	})
 
-	return applied, err
+	if err == nil && applied {
+		// Open payment screens learn the transition live (SSE); the webhook,
+		// the sweeper, and reconciliation all pass through here.
+		s.hub.Publish(ord.OrderNumber, StatusEvent{
+			OrderID: ord.OrderNumber, Status: outcome.OrderStatus,
+			ExpiresAt: ord.PaymentExpiresAt,
+		})
+	}
+	return applied, restored, err
 }
 
 // fulfillAsync runs post-payment work off the request path so the provider gets

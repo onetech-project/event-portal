@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,12 +28,23 @@ type stubGateway struct {
 	// what its webhook says — the case reconciliation exists for.
 	statusResult *payment.WebhookResult
 	statusErr    error
+	// session/createErr/createCalls back the QR re-issue tests.
+	session     payment.PaymentSession
+	createErr   error
+	createCalls []payment.TransactionRequest
 }
 
 func (g *stubGateway) Name() string { return "midtrans" }
 
-func (g *stubGateway) CreateTransaction(context.Context, payment.TransactionRequest) (payment.PaymentSession, error) {
-	return payment.PaymentSession{}, errors.New("not used in these tests")
+func (g *stubGateway) CreateTransaction(_ context.Context, req payment.TransactionRequest) (payment.PaymentSession, error) {
+	g.createCalls = append(g.createCalls, req)
+	if g.createErr != nil {
+		return payment.PaymentSession{}, g.createErr
+	}
+	if g.session.QRString == "" {
+		return payment.PaymentSession{}, errors.New("no session configured")
+	}
+	return g.session, nil
 }
 
 func (g *stubGateway) FetchStatus(context.Context, string) (*payment.WebhookResult, error) {
@@ -69,6 +81,11 @@ func (a orderAdapter) OrderByNumber(ctx context.Context, number string) (payment
 		OrderNumber:      rec.OrderNumber,
 		Status:           rec.Status,
 		PaymentExpiresAt: rec.PaymentExpiresAt,
+		TotalAmount:      rec.TotalAmount,
+		BuyerName:        rec.BuyerName,
+		BuyerEmail:       rec.BuyerEmail,
+		BuyerPhone:       rec.BuyerPhone,
+		PaymentStarted:   rec.PaymentQRString != nil && *rec.PaymentQRString != "",
 	}, nil
 }
 
@@ -89,20 +106,24 @@ func (a orderAdapter) DueForExpiry(ctx context.Context, now time.Time, limit int
 	return out, nil
 }
 
-func (a orderAdapter) LineItems(ctx context.Context, orderID uuid.UUID) ([]payment.LineItem, error) {
-	items, err := a.repo.ListOrderItemsByOrderID(ctx, orderID)
+func (a orderAdapter) QuotaHolds(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) ([]payment.QuotaHold, error) {
+	items, err := a.repo.ListQuotaHoldsByOrderID(ctx, tx, orderID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]payment.LineItem, 0, len(items))
+	out := make([]payment.QuotaHold, 0, len(items))
 	for _, item := range items {
-		out = append(out, payment.LineItem{TicketTypeID: item.TicketTypeID, Quantity: item.Quantity})
+		out = append(out, payment.QuotaHold{TicketTypeID: item.TicketTypeID, Quantity: item.Quantity})
 	}
 	return out, nil
 }
 
 func (a orderAdapter) UpdateStatusIfPending(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, status string) (bool, error) {
 	return a.repo.UpdateOrderStatusIfPending(ctx, tx, orderID, status)
+}
+
+func (a orderAdapter) UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error) {
+	return a.repo.UpdatePaymentQRByID(ctx, orderID, url, qrString)
 }
 
 type quotaAdapter struct{ svc *event.Service }
@@ -149,7 +170,7 @@ type webhookFixture struct {
 	gateway   *stubGateway
 	fulfiller *spyFulfiller
 	orderID   uuid.UUID
-	ticketID  uuid.UUID
+	ticketIDs []uuid.UUID
 }
 
 // newWebhookFixture seeds a PENDING order for 3 tickets whose quota has already
@@ -180,8 +201,63 @@ func newWebhookFixture(t *testing.T) webhookFixture {
 
 	return webhookFixture{
 		svc: svc, pool: pool, gateway: gw, fulfiller: fulfiller,
-		orderID: ord.ID, ticketID: tt.ID,
+		orderID: ord.ID, ticketIDs: []uuid.UUID{tt.ID},
 	}
+}
+
+// newBundleWebhookFixture seeds a PENDING order holding three package units
+// across two constituents; each constituent was deducted from 10 down to 7 at
+// checkout (3 units × quantity_per_unit 1 each).
+func newBundleWebhookFixture(t *testing.T) webhookFixture {
+	t.Helper()
+	pool := testsupport.RequirePool(t)
+
+	ev := testsupport.SeedEvent(t, pool, "webhook-bundle", "PUBLISHED")
+	day1 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 7)
+	day2 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 7)
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, day1.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, day2.ID, ev.ID, 1)
+	ord := testsupport.SeedOrder(t, pool, "ORD-WEBHOOK-BUNDLE", "PENDING")
+	// 3 package units × 1 seat per constituent = 3 deducted from each (10 → 7).
+	testsupport.SeedOrderItemPackage(t, pool, ord.ID, pkg.ID, 3, decimal.NewFromInt(50000))
+	for i := 0; i < 3; i++ {
+		testsupport.SeedAttendeeWithPackage(t, pool, ord.ID, day1.ID, uuid.NullUUID{UUID: pkg.ID, Valid: true}, "Budi", "budi@example.com")
+	}
+
+	gw := &stubGateway{}
+	fulfiller := &spyFulfiller{}
+
+	svc := payment.NewService(
+		pool,
+		payment.NewRepository(pool),
+		gw,
+		orderAdapter{repo: order.NewRepository(pool)},
+		quotaAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		fulfiller,
+		fulfiller,
+		testsupport.DiscardLogger(),
+	)
+
+	return webhookFixture{
+		svc: svc, pool: pool, gateway: gw, fulfiller: fulfiller,
+		orderID: ord.ID, ticketIDs: []uuid.UUID{day1.ID, day2.ID},
+	}
+}
+
+func (f webhookFixture) notifyBundle(t *testing.T, transactionStatus, fraudStatus string) error {
+	t.Helper()
+	f.gateway.result = &payment.WebhookResult{
+		OrderNumber:       "ORD-WEBHOOK-BUNDLE",
+		TransactionID:     "tx-1",
+		TransactionStatus: transactionStatus,
+		FraudStatus:       fraudStatus,
+		PaymentType:       "bank_transfer",
+		RawPayload:        []byte(`{"transaction_status":"` + transactionStatus + `"}`),
+	}
+	err := f.svc.HandleNotification(context.Background(), "midtrans", f.gateway.result.RawPayload, "")
+	f.svc.WaitForFulfillment()
+	return err
 }
 
 func (f webhookFixture) notify(t *testing.T, transactionStatus, fraudStatus string) error {
@@ -220,7 +296,7 @@ func TestSettlementMarksTheOrderPaidWithoutTouchingQuota(t *testing.T) {
 	require.NoError(t, f.notify(t, "settlement", ""))
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota was already deducted at checkout and must not move again")
 }
 
@@ -290,7 +366,7 @@ func TestCancelRestoresQuotaAndCancelsTheOrder(t *testing.T) {
 	require.NoError(t, f.notify(t, "cancel", ""))
 
 	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 func TestExpireRestoresQuotaAndExpiresTheOrder(t *testing.T) {
@@ -299,7 +375,7 @@ func TestExpireRestoresQuotaAndExpiresTheOrder(t *testing.T) {
 	require.NoError(t, f.notify(t, "expire", ""))
 
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 func TestDenyAndFailureBothCancelAndRestore(t *testing.T) {
@@ -310,7 +386,7 @@ func TestDenyAndFailureBothCancelAndRestore(t *testing.T) {
 			require.NoError(t, f.notify(t, status, ""))
 
 			assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-			assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID))
+			assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 		})
 	}
 }
@@ -324,7 +400,7 @@ func TestReplayedCancelDoesNotRestoreQuotaTwice(t *testing.T) {
 	require.NoError(t, f.notify(t, "cancel", ""))
 	require.NoError(t, f.notify(t, "cancel", ""))
 
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota must be restored exactly once")
 }
 
@@ -335,7 +411,35 @@ func TestCancelAfterPaidDoesNotRestoreQuota(t *testing.T) {
 	require.NoError(t, f.notify(t, "cancel", ""))
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
+}
+
+// T051: cancelling a bundle order restores every constituent to its pre-checkout
+// value — the release is driven by the package-expanded holds, not by a single
+// flat count — and a replayed cancel cannot restore any of them twice.
+func TestCancelRestoresEveryBundleConstituentExactlyOnce(t *testing.T) {
+	f := newBundleWebhookFixture(t)
+
+	require.NoError(t, f.notifyBundle(t, "cancel", ""))
+	require.NoError(t, f.notifyBundle(t, "cancel", ""))
+
+	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	for _, ticketID := range f.ticketIDs {
+		assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, ticketID),
+			"each package constituent must be restored to its original quota exactly once")
+	}
+}
+
+func TestExpireRestoresEveryBundleConstituent(t *testing.T) {
+	f := newBundleWebhookFixture(t)
+
+	require.NoError(t, f.notifyBundle(t, "expire", ""))
+
+	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	for _, ticketID := range f.ticketIDs {
+		assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, ticketID),
+			"an expiry signal restores every package constituent, not just one")
+	}
 }
 
 // --- No-op outcomes -------------------------------------------------------
@@ -346,7 +450,7 @@ func TestPendingLeavesTheOrderAndQuotaUntouched(t *testing.T) {
 	require.NoError(t, f.notify(t, "pending", ""))
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 
 	issued, _ := f.fulfiller.counts()
 	assert.Zero(t, issued)
@@ -358,7 +462,7 @@ func TestCaptureWithChallengeLeavesTheOrderPending(t *testing.T) {
 	require.NoError(t, f.notify(t, "capture", "challenge"))
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID),
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota is held until a definitive notification arrives")
 }
 
@@ -369,7 +473,7 @@ func TestAnUnrecognizedStatusChangesNothingButIsAcknowledged(t *testing.T) {
 
 	require.NoError(t, err, "the provider is acknowledged so it stops retrying")
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketID))
+	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
 // --- Unknown order --------------------------------------------------------

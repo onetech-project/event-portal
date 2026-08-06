@@ -50,8 +50,10 @@ func (s *Service) ListPublishedEvents(ctx context.Context) ([]EventSummary, erro
 	return events, nil
 }
 
-// GetPublishedEventBySlug returns one published event with its ticket types.
-// Unpublished events are reported as not found so drafts stay invisible to guests.
+// GetPublishedEventBySlug returns one published event's content-only detail
+// (clarification 2026-08-05): no ticket or package data — those load through
+// TicketTypesForEventSlug / PackagesForEventSlug on the selection page only.
+// Unpublished events are reported as not found so drafts stay invisible.
 func (s *Service) GetPublishedEventBySlug(ctx context.Context, slug string) (EventDetail, error) {
 	detail, err := s.repo.GetPublishedEventBySlug(ctx, slug)
 	if errors.Is(err, ErrNotFound) {
@@ -61,23 +63,185 @@ func (s *Service) GetPublishedEventBySlug(ctx context.Context, slug string) (Eve
 		return EventDetail{}, err
 	}
 
-	rows, err := s.repo.ListTicketTypesByEventID(ctx, detail.ID)
+	hasTerms, err := s.repo.EventHasTerms(ctx, detail.ID)
 	if err != nil {
 		return EventDetail{}, err
 	}
+	detail.HasTerms = hasTerms
 
-	detail.TicketTypes = make([]TicketTypeSummary, 0, len(rows))
+	// CMS content blocks, position-ordered (T032). Three cheap indexed reads;
+	// the detail page is static content, not live inventory.
+	activities, err := s.repo.ListActivities(ctx, detail.ID)
+	if err != nil {
+		return EventDetail{}, err
+	}
+	detail.Activities = make([]ActivityDTO, 0, len(activities))
+	for _, row := range activities {
+		detail.Activities = append(detail.Activities, ActivityDTO{
+			ID: row.ID, Title: row.Title, Description: row.Description,
+			Icon: row.Icon, Position: row.Position,
+		})
+	}
+
+	stars, err := s.repo.ListGuestStars(ctx, detail.ID)
+	if err != nil {
+		return EventDetail{}, err
+	}
+	detail.GuestStars = make([]GuestStarDTO, 0, len(stars))
+	for _, row := range stars {
+		detail.GuestStars = append(detail.GuestStars, GuestStarDTO{
+			ID: row.ID, Name: row.Name, Position: row.Position,
+		})
+	}
+
+	guidelines, err := s.repo.ListGuidelines(ctx, detail.ID)
+	if err != nil {
+		return EventDetail{}, err
+	}
+	detail.Guidelines = make([]GuidelineDTO, 0, len(guidelines))
+	for _, row := range guidelines {
+		detail.Guidelines = append(detail.Guidelines, GuidelineDTO{
+			ID: row.ID, Description: row.Description, Icon: row.Icon, Position: row.Position,
+		})
+	}
+	return detail, nil
+}
+
+// TermsForEventSlug returns the published event's current Terms & Conditions
+// document (GET /ticket/terms-condition/:event_id).
+//
+// The two failure modes carry distinct codes on purpose: an unknown or
+// unpublished event is 404001, while a known event whose organizer has not
+// authored terms yet is 404002 — the dialog words those differently.
+func (s *Service) TermsForEventSlug(ctx context.Context, slug string) (EventTermsDTO, error) {
+	detail, err := s.repo.GetPublishedEventBySlug(ctx, slug)
+	if errors.Is(err, ErrNotFound) {
+		return EventTermsDTO{}, apperr.NotFound(apperr.CodeEventNotFound, "Event not found.")
+	}
+	if err != nil {
+		return EventTermsDTO{}, err
+	}
+
+	row, err := s.repo.GetEventTermsByEventID(ctx, detail.ID)
+	if errors.Is(err, ErrNotFound) {
+		return EventTermsDTO{}, apperr.NotFound(apperr.CodeTermsMissing,
+			"This event has no Terms & Conditions yet.")
+	}
+	if err != nil {
+		return EventTermsDTO{}, err
+	}
+	return EventTermsDTO{ID: row.ID, Content: row.Content, UpdatedAt: row.UpdatedAt}, nil
+}
+
+// TicketTypesForEventSlug returns the sellable ticket types of a published
+// event with live remaining quota (GET /ticket/:event_id).
+func (s *Service) TicketTypesForEventSlug(ctx context.Context, slug string) ([]TicketTypeSummary, error) {
+	detail, err := s.repo.GetPublishedEventBySlug(ctx, slug)
+	if errors.Is(err, ErrNotFound) {
+		return nil, apperr.NotFound(apperr.CodeEventNotFound, "Event not found.")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.repo.ListTicketTypesByEventID(ctx, detail.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]TicketTypeSummary, 0, len(rows))
 	for _, row := range rows {
-		detail.TicketTypes = append(detail.TicketTypes, TicketTypeSummary{
+		out = append(out, TicketTypeSummary{
 			ID:             row.ID,
 			Name:           row.Name,
+			Description:    row.Description,
 			Price:          money.From(row.Price),
 			QuotaRemaining: row.Quota,
 			SalesStart:     row.SalesStart,
 			SalesEnd:       row.SalesEnd,
 		})
 	}
-	return detail, nil
+	return out, nil
+}
+
+// PackagesForEventSlug returns the ACTIVE packages of a published event with
+// derived availability (GET /packages/:event_id).
+func (s *Service) PackagesForEventSlug(ctx context.Context, slug string) ([]PackageSummaryDTO, error) {
+	detail, err := s.repo.GetPublishedEventBySlug(ctx, slug)
+	if errors.Is(err, ErrNotFound) {
+		return nil, apperr.NotFound(apperr.CodeEventNotFound, "Event not found.")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.PackagesForEvent(ctx, detail.ID)
+}
+
+// PackagesForEvent returns every ACTIVE package of an event as public summary
+// rows with derived availability, in exactly two queries regardless of package
+// count. Used by GET /events/:slug and the availability-only polling route.
+func (s *Service) PackagesForEvent(ctx context.Context, eventID uuid.UUID) ([]PackageSummaryDTO, error) {
+	rows, err := s.repo.ListPackagesWithAvailabilityByEventID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only ACTIVE packages appear to guests; inactive ones are admin-visible only.
+	filtered := rows[:0]
+	for _, row := range rows {
+		if row.Status == PackageStatusActive {
+			filtered = append(filtered, row)
+		}
+	}
+
+	return s.assemblePackageSummaries(ctx, filtered)
+}
+
+// assemblePackageSummaries attaches batched components and maps rows to the
+// public DTO. Rows already carry availability, so this never re-queries it.
+func (s *Service) assemblePackageSummaries(ctx context.Context, rows []PackageRowWithAvailability) ([]PackageSummaryDTO, error) {
+	ids := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+
+	components, err := s.repo.ListPackageComponentsByPackageIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	byPackage := make(map[uuid.UUID][]PackageComponentRow, len(rows))
+	for _, c := range components {
+		byPackage[c.PackageID] = append(byPackage[c.PackageID], c)
+	}
+
+	out := make([]PackageSummaryDTO, 0, len(rows))
+	for _, row := range rows {
+		purchasable := false
+		if row.Purchasable != nil {
+			purchasable = *row.Purchasable
+		}
+		packageComponents := byPackage[row.ID]
+		componentDTOs := make([]PackageComponentDTO, 0, len(packageComponents))
+		for _, c := range packageComponents {
+			componentDTOs = append(componentDTOs, PackageComponentDTO{
+				TicketTypeID:    c.TicketTypeID.String(),
+				TicketTypeName:  c.Name,
+				QuantityPerUnit: c.QuantityPerUnit,
+			})
+		}
+		out = append(out, PackageSummaryDTO{
+			ID:             row.ID.String(),
+			Name:           row.Name,
+			Description:    row.Description,
+			Price:          money.From(row.Price),
+			SalesStart:     row.SalesStart,
+			SalesEnd:       row.SalesEnd,
+			AvailableUnits: row.AvailableUnits,
+			Purchasable:    purchasable,
+			Components:     componentDTOs,
+		})
+	}
+	return out, nil
 }
 
 // --- Quota contract (consumed by the order domain) ------------------------
@@ -92,6 +256,14 @@ func (s *Service) CheckAndDeductQuota(ctx context.Context, tx pgx.Tx, ticketType
 // RestoreQuota returns qty seats to a ticket type inside the caller's transaction.
 func (s *Service) RestoreQuota(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID, qty int32) error {
 	return s.repo.RestoreQuota(ctx, tx, ticketTypeID, qty)
+}
+
+// CurrentTermsForEvent returns the identity of the event's current Terms &
+// Conditions document, or ErrNotFound when none is authored. The order domain
+// consumes this through its EventProvider contract: booking refuses events
+// without terms, and agreement recording pins the id the guest actually saw.
+func (s *Service) CurrentTermsForEvent(ctx context.Context, eventID uuid.UUID) (TermsRow, error) {
+	return s.repo.GetEventTermsByEventID(ctx, eventID)
 }
 
 // GetTicketTypeForCheckout returns the current server-side price and sales window

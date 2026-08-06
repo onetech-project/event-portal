@@ -7,6 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // RegisterAdminRoutes mounts the admin CRUD surface. The caller applies the JWT
@@ -36,7 +38,7 @@ func (h *Handler) adminListEvents(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, events)
+	return httpx.Respond(c, http.StatusOK, events)
 }
 
 func (h *Handler) adminCreateEvent(c echo.Context) error {
@@ -49,7 +51,7 @@ func (h *Handler) adminCreateEvent(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusCreated, created)
+	return httpx.Respond(c, http.StatusCreated, created)
 }
 
 func (h *Handler) adminGetEvent(c echo.Context) error {
@@ -62,7 +64,7 @@ func (h *Handler) adminGetEvent(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, detail)
+	return httpx.Respond(c, http.StatusOK, detail)
 }
 
 func (h *Handler) adminUpdateEvent(c echo.Context) error {
@@ -79,7 +81,7 @@ func (h *Handler) adminUpdateEvent(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, updated)
+	return httpx.Respond(c, http.StatusOK, updated)
 }
 
 func (h *Handler) adminDeleteEvent(c echo.Context) error {
@@ -111,7 +113,7 @@ func (h *Handler) adminListTicketTypes(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, types)
+	return httpx.Respond(c, http.StatusOK, types)
 }
 
 func (h *Handler) adminCreateTicketType(c echo.Context) error {
@@ -124,7 +126,7 @@ func (h *Handler) adminCreateTicketType(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusCreated, created)
+	return httpx.Respond(c, http.StatusCreated, created)
 }
 
 func (h *Handler) adminGetTicketType(c echo.Context) error {
@@ -137,7 +139,7 @@ func (h *Handler) adminGetTicketType(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, got)
+	return httpx.Respond(c, http.StatusOK, got)
 }
 
 func (h *Handler) adminUpdateTicketType(c echo.Context) error {
@@ -154,7 +156,7 @@ func (h *Handler) adminUpdateTicketType(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, updated)
+	return httpx.Respond(c, http.StatusOK, updated)
 }
 
 func (h *Handler) adminDeleteTicketType(c echo.Context) error {

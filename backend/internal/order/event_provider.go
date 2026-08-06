@@ -14,6 +14,17 @@ import (
 // quantity. Providers translate their own error onto this one.
 var ErrInsufficientQuota = errors.New("order: insufficient quota")
 
+// ErrNoTerms reports that an event has no authored Terms & Conditions document.
+// Providers translate their own not-found onto this one.
+var ErrNoTerms = errors.New("order: event has no terms")
+
+// EventTermsInfo is the slice of a terms document the booking flow needs: the
+// identity to stamp on the order when agreement is recorded.
+type EventTermsInfo struct {
+	ID      uuid.UUID
+	EventID uuid.UUID
+}
+
 // TicketTypeInfo is the slice of a ticket type checkout needs: the authoritative
 // price and the sales window.
 type TicketTypeInfo struct {
@@ -23,6 +34,29 @@ type TicketTypeInfo struct {
 	Price      decimal.Decimal
 	SalesStart time.Time
 	SalesEnd   time.Time
+}
+
+// PackageInfo is the slice of a bundle checkout needs: the authoritative price,
+// sales window, and full composition. Composition must arrive fully expanded so
+// checkout can aggregate demand without a second lookup.
+type PackageInfo struct {
+	ID         uuid.UUID
+	EventID    uuid.UUID
+	Name       string
+	Price      decimal.Decimal
+	SalesStart time.Time
+	SalesEnd   time.Time
+	Components []PackageComponentInfo
+}
+
+// PackageComponentInfo is one constituent of a bundle: how many of the
+// ticket-type one package unit consumes, plus its own sales window so the
+// checkout can reject a package whose constituent is outside its window.
+type PackageComponentInfo struct {
+	TicketTypeID uuid.UUID
+	Quantity     int32
+	SalesStart   time.Time
+	SalesEnd     time.Time
 }
 
 // EventProvider is the contract checkout needs from the event domain, declared
@@ -40,11 +74,21 @@ type EventProvider interface {
 	// transaction and then asks the pool for a second connection can exhaust the
 	// pool and deadlock once concurrent buyers outnumber it.
 	TicketTypeForCheckout(ctx context.Context, tx pgx.Tx, id uuid.UUID) (TicketTypeInfo, error)
+	// PackageForCheckout returns the authoritative price, sales window, and full
+	// composition of a package inside the caller's transaction. The caller is
+	// responsible for rejecting packages whose status or composition makes them
+	// unpurchasable.
+	PackageForCheckout(ctx context.Context, tx pgx.Tx, id uuid.UUID) (PackageInfo, error)
 	// CheckAndDeductQuota atomically reserves qty seats inside the caller's
 	// transaction, returning ErrInsufficientQuota when it cannot.
 	CheckAndDeductQuota(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID, qty int32) error
 	// RestoreQuota releases qty seats inside the caller's transaction.
 	RestoreQuota(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID, qty int32) error
+	// CurrentTerms returns the event's current Terms & Conditions identity, or
+	// ErrNoTerms when none is authored. Booking refuses events without terms
+	// (409001), and agreement recording compares the id the guest saw against
+	// this current one (409002).
+	CurrentTerms(ctx context.Context, eventID uuid.UUID) (EventTermsInfo, error)
 }
 
 // PaymentItem is one line shown on the provider's payment page.

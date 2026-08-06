@@ -4,6 +4,7 @@
 package testsupport
 
 import (
+	"encoding/json"
 	"context"
 	"io"
 	"os"
@@ -52,7 +53,7 @@ func RequirePool(t *testing.T) *pgxpool.Pool {
 func Truncate(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
-		`TRUNCATE tickets, payments, attendees, order_items, orders, ticket_types, events, admins CASCADE`)
+		`TRUNCATE tickets, payments, attendees, order_fees, order_items, orders, package_tickets, packages, ticket_types, events, admins, fees CASCADE`)
 	require.NoError(t, err)
 }
 
@@ -210,4 +211,117 @@ func OrderStatusOf(t *testing.T, pool *pgxpool.Pool, orderID uuid.UUID) string {
 		`SELECT status FROM orders WHERE id = $1`, orderID).Scan(&status)
 	require.NoError(t, err)
 	return status
+}
+
+// Package describes a seeded packages row.
+type Package struct {
+	ID      uuid.UUID
+	EventID uuid.UUID
+	Name    string
+	Price   decimal.Decimal
+	Status  string
+}
+
+// SeedPackage inserts a package with an open sales window and returns it.
+func SeedPackage(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, price string, status string) Package {
+	t.Helper()
+
+	amount, err := decimal.NewFromString(price)
+	require.NoError(t, err)
+
+	var id uuid.UUID
+	err = pool.QueryRow(context.Background(), `
+		INSERT INTO packages (event_id, name, price, sales_start, sales_end, status)
+		VALUES ($1, $2, $3, now() - interval '1 day', now() + interval '29 days', $4)
+		RETURNING id`, eventID, name, amount, status).Scan(&id)
+	require.NoError(t, err)
+
+	return Package{ID: id, EventID: eventID, Name: name, Price: amount, Status: status}
+}
+
+// SeedPackageTicket inserts a package_tickets junction row linking a package to
+// a ticket type with the given quantity per unit.
+func SeedPackageTicket(t *testing.T, pool *pgxpool.Pool, packageID, ticketTypeID, eventID uuid.UUID, quantityPerUnit int32) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO package_tickets (package_id, ticket_type_id, event_id, quantity)
+		VALUES ($1, $2, $3, $4)`, packageID, ticketTypeID, eventID, quantityPerUnit)
+	require.NoError(t, err)
+}
+
+// SeedOrderItemPackage inserts an order_items row for a package line.
+func SeedOrderItemPackage(t *testing.T, pool *pgxpool.Pool, orderID, packageID uuid.UUID, quantity int32, price decimal.Decimal) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO order_items (order_id, package_id, quantity, price)
+		VALUES ($1, $2, $3, $4)`, orderID, packageID, quantity, price)
+	require.NoError(t, err)
+}
+
+// SeedAttendeeWithPackage inserts an attendee with a package origin and returns
+// its id.
+func SeedAttendeeWithPackage(t *testing.T, pool *pgxpool.Pool, orderID, ticketTypeID uuid.UUID, packageID uuid.NullUUID, name, email string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO attendees (order_id, ticket_type_id, package_id, name, email)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id`, orderID, ticketTypeID, packageID, name, email).Scan(&id)
+	require.NoError(t, err)
+	return id
+}
+
+// PackageAvailableUnits reads a package's derived available units using the
+// same query the public API uses, for integration test assertions.
+func PackageAvailableUnits(t *testing.T, pool *pgxpool.Pool, packageID uuid.UUID) int32 {
+	t.Helper()
+
+	var units int32
+	err := pool.QueryRow(context.Background(), `
+		SELECT COALESCE(MIN(tt.quota / pt.quantity), 0)::int
+		FROM package_tickets pt
+		JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+		WHERE pt.package_id = $1`, packageID).Scan(&units)
+	require.NoError(t, err)
+	return units
+}
+
+// UnwrapData asserts a response rides the {code, message, data} envelope
+// (specs/008) and returns the raw data payload for the caller to decode into
+// its typed DTO. Success responses always carry code 200000.
+func UnwrapData(t *testing.T, body []byte) json.RawMessage {
+	t.Helper()
+	var envelope struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	require.Equal(t, 200000, envelope.Code, "success envelope code")
+	return envelope.Data
+}
+
+// SeedEventTerms authors a Terms & Conditions document for an event (spec 008)
+// and returns its id. Booking is refused for events without one.
+func SeedEventTerms(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, content string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO event_terms (event_id, content) VALUES ($1, $2)
+		ON CONFLICT (event_id) DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+		RETURNING id`, eventID, content).Scan(&id)
+	require.NoError(t, err)
+	return id
+}
+
+// SeedFee inserts one active fee master row (value is a decimal string, e.g.
+// "11.00" for an 11% PERCENT fee or "1200.00" for a FIXED amount).
+func SeedFee(t *testing.T, pool *pgxpool.Pool, name, feeType, value string, position int) {
+	t.Helper()
+
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO fees (name, fee_type, value, position) VALUES ($1, $2, $3::numeric, $4)`,
+		name, feeType, value, position)
+	require.NoError(t, err)
 }

@@ -67,7 +67,7 @@ func (r *Repository) GetDetailByCode(ctx context.Context, code string) (Detail, 
 	return Detail{
 		TicketCode:     row.TicketCode,
 		Status:         row.Status,
-		AttendeeName:   row.AttendeeName,
+		AttendeeName:   strv(row.AttendeeName),
 		TicketTypeName: row.TicketTypeName,
 		EventName:      row.EventName,
 	}, nil
@@ -133,7 +133,7 @@ func (r *Repository) ListDetailsByOrderID(ctx context.Context, orderID uuid.UUID
 		out = append(out, FullDetail{
 			TicketCode:     row.TicketCode,
 			Status:         row.Status,
-			AttendeeName:   row.AttendeeName,
+			AttendeeName:   strv(row.AttendeeName),
 			TicketTypeName: row.TicketTypeName,
 			EventName:      row.EventName,
 			Venue:          row.Venue,
@@ -156,4 +156,14 @@ func (r *Repository) CountByOrderID(ctx context.Context, orderID uuid.UUID) (int
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
+}
+
+// strv unwraps a nullable text column for display. Attendee identity became
+// nullable in 008 (empty booking slots), but every ticket is issued only after
+// checkout completed the slot, so nil here is a display fallback, not a state.
+func strv(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

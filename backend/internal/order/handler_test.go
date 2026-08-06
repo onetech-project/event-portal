@@ -2,7 +2,6 @@ package order_test
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +24,11 @@ func newCheckoutAPI(t *testing.T) (*echo.Echo, checkoutFixture) {
 
 	e := echo.New()
 	e.HTTPErrorHandler = httpx.ErrorHandler(testsupport.DiscardLogger())
-	order.NewHandler(f.svc, f.public, testsupport.DiscardLogger()).RegisterPublicRoutes(e.Group("/api/v1"))
+	h := order.NewHandler(f.svc, f.public, testsupport.DiscardLogger())
+	h.RegisterPublicRoutes(e.Group("/api/v1"))
+	// Unlimited here; the per-IP limiter is composition-root wiring.
+	h.RegisterBookRoute(e.Group("/api/v1"))
+	h.RegisterCheckoutRoutes(e.Group("/api/v1"))
 	return e, f
 }
 
@@ -38,121 +41,70 @@ func postJSON(t *testing.T, e *echo.Echo, path, body string) *httptest.ResponseR
 	return rec
 }
 
-func checkoutBody(ticketTypeID fmt.Stringer, quantity int) string {
-	attendees := make([]string, 0, quantity)
-	for i := range quantity {
-		attendees = append(attendees, fmt.Sprintf(
-			`{"ticket_type_id":"%s","name":"Attendee %d","email":"a%d@example.com"}`,
-			ticketTypeID, i, i))
-	}
-	return fmt.Sprintf(`{
-		"buyer_name":"Budi Santoso",
-		"buyer_email":"budi@example.com",
-		"buyer_phone":"+628123456789",
-		"items":[{"ticket_type_id":"%s","quantity":%d}],
-		"attendees":[%s]
-	}`, ticketTypeID, quantity, strings.Join(attendees, ","))
+// The pre-008 guest surface is gone, not aliased (spec clarification
+// 2026-08-05): a client still calling the old paths gets a plain 404, because a
+// silent alias would let two generations of clients drift apart unnoticed.
+func TestOldGuestPathsAreGone(t *testing.T) {
+	e, _ := newCheckoutAPI(t)
+
+	rec := postJSON(t, e, "/api/v1/checkout", `{}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "POST /checkout was replaced by /ticket/book + /ticket/checkout/:order_id")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/orders/ORD-20260731-ABCDEF", nil)
+	get := httptest.NewRecorder()
+	e.ServeHTTP(get, req)
+	assert.Equal(t, http.StatusNotFound, get.Code, "GET /orders/:orderNumber was replaced by GET /ticket/order/:order_id")
 }
 
-func TestCheckoutEndpointReturns201WithTheContractShape(t *testing.T) {
-	e, f := newCheckoutAPI(t)
-	tt := f.seedSellableEvent(t, 10)
+func TestBookEndpointReturns400ForMalformedJSON(t *testing.T) {
+	e, _ := newCheckoutAPI(t)
 
-	rec := postJSON(t, e, "/api/v1/checkout", checkoutBody(tt.ID, 2))
+	rec := postJSON(t, e, "/api/v1/ticket/book", `{"event_id":`)
 
-	require.Equal(t, http.StatusCreated, rec.Code)
-
-	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-
-	assert.ElementsMatch(t,
-		[]string{"order_number", "status", "total_amount", "payment_url"},
-		keysOfMap(body))
-	assert.Equal(t, "PENDING", body["status"])
-	assert.Equal(t, "300000.00", body["total_amount"])
-	assert.NotEmpty(t, body["payment_url"], "a 201 is only emitted once the payment URL exists")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeValidation), errorCodeOf(t, rec))
 }
 
-func TestCheckoutEndpointReturns400ForAnAttendeeCountMismatch(t *testing.T) {
+func TestBookEndpointReturns400ForAMalformedTicketTypeID(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	tt := f.seedSellableEvent(t, 10)
 
 	body := fmt.Sprintf(`{
-		"buyer_name":"Budi","buyer_email":"budi@example.com","buyer_phone":"+62812",
-		"items":[{"ticket_type_id":"%s","quantity":2}],
-		"attendees":[{"ticket_type_id":"%s","name":"Only One","email":"one@example.com"}]
-	}`, tt.ID, tt.ID)
+		"event_id":"%s",
+		"items":[{"ticket_type_id":"not-a-uuid","quantity":1}]
+	}`, tt.EventID)
 
-	rec := postJSON(t, e, "/api/v1/checkout", body)
-
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeAttendeeCountMismatch, errorCodeOf(t, rec))
-}
-
-func TestCheckoutEndpointReturns400ForInsufficientQuota(t *testing.T) {
-	e, f := newCheckoutAPI(t)
-	tt := f.seedSellableEvent(t, 1)
-
-	rec := postJSON(t, e, "/api/v1/checkout", checkoutBody(tt.ID, 3))
-
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeInsufficientQuota, errorCodeOf(t, rec))
-}
-
-// FR-021: the guest is told they may retry, and the server has already released
-// the reservation before answering.
-func TestCheckoutEndpointReturns502WhenPaymentInitiationFails(t *testing.T) {
-	e, f := newCheckoutAPI(t)
-	tt := f.seedSellableEvent(t, 10)
-	f.gateway.err = errors.New("provider unreachable")
-
-	rec := postJSON(t, e, "/api/v1/checkout", checkoutBody(tt.ID, 2))
-
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	assert.Equal(t, apperr.CodePaymentInitiationFailed, errorCodeOf(t, rec))
-	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, tt.ID))
-}
-
-func TestCheckoutEndpointReturns400ForMalformedJSON(t *testing.T) {
-	e, _ := newCheckoutAPI(t)
-
-	rec := postJSON(t, e, "/api/v1/checkout", `{"buyer_name":`)
-
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeValidation, errorCodeOf(t, rec))
-}
-
-func TestCheckoutEndpointReturns400ForAMalformedTicketTypeID(t *testing.T) {
-	e, _ := newCheckoutAPI(t)
-
-	body := `{
-		"buyer_name":"Budi","buyer_email":"budi@example.com","buyer_phone":"+62812",
-		"items":[{"ticket_type_id":"not-a-uuid","quantity":1}],
-		"attendees":[{"ticket_type_id":"not-a-uuid","name":"A","email":"a@example.com"}]
-	}`
-
-	rec := postJSON(t, e, "/api/v1/checkout", body)
+	rec := postJSON(t, e, "/api/v1/ticket/book", body)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // The error body must never echo internal detail back to a guest.
-func TestCheckoutErrorBodyOnlyContainsTheContractFields(t *testing.T) {
+func TestBookErrorBodyOnlyContainsTheContractFields(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	tt := f.seedSellableEvent(t, 1)
+	// Authored terms, so the request gets past the 409001 pre-check and fails on
+	// quota — the error under test.
+	testsupport.SeedEventTerms(t, f.pool, tt.EventID, "<p>terms</p>")
 
-	rec := postJSON(t, e, "/api/v1/checkout", checkoutBody(tt.ID, 5))
+	body := fmt.Sprintf(`{
+		"event_id":"%s",
+		"items":[{"ticket_type_id":"%s","quantity":5}]
+	}`, tt.EventID, tt.ID)
 
-	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.ElementsMatch(t, []string{"error_code", "message"}, keysOfMap(body))
+	rec := postJSON(t, e, "/api/v1/ticket/book", body)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &parsed))
+	assert.ElementsMatch(t, []string{"code", "message", "data"}, keysOfMap(parsed))
 }
 
-func errorCodeOf(t *testing.T, rec *httptest.ResponseRecorder) string {
+func errorCodeOf(t *testing.T, rec *httptest.ResponseRecorder) int {
 	t.Helper()
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	return body.ErrorCode
+	return body.Code
 }
 
 func keysOfMap(m map[string]any) []string {

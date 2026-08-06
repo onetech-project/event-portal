@@ -24,16 +24,65 @@ type Event struct {
 	Status      string
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
+	Scale       *int64
 }
 
-type TicketType struct {
-	ID         uuid.UUID
-	EventID    uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
-	CreatedAt  *time.Time
-	UpdatedAt  *time.Time
+type EventActivity struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Title       string
+	Description string
+	Icon        *string
+	Position    int32
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+type EventGuestStar struct {
+	ID        uuid.UUID
+	EventID   uuid.UUID
+	Name      string
+	Position  int32
+	CreatedAt *time.Time
+	UpdatedAt *time.Time
+}
+
+type EventGuideline struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Description string
+	Icon        *string
+	Position    int32
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+type EventTerm struct {
+	ID        uuid.UUID
+	EventID   uuid.UUID
+	Content   string
+	CreatedAt *time.Time
+	UpdatedAt *time.Time
+}
+
+type Package struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	Status      string
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+type PackageTicket struct {
+	ID           uuid.UUID
+	PackageID    uuid.UUID
+	TicketTypeID uuid.UUID
+	EventID      uuid.UUID
+	Quantity     int32
+	CreatedAt    *time.Time
 }

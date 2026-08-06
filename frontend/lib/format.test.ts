@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatCurrency, formatDateTime, toApiDateTime } from "./format";
+import {
+  formatCurrency,
+  formatDateRange,
+  formatDateTime,
+  formatVisitorCount,
+  toApiDateTime,
+} from "./format";
 
 describe("formatCurrency", () => {
   it("renders a decimal string as rupiah", () => {
@@ -36,6 +42,49 @@ describe("formatDateTime", () => {
 
   it("returns the raw value when it cannot be parsed", () => {
     expect(formatDateTime("tomorrow")).toBe("tomorrow");
+  });
+});
+
+describe("formatDateRange", () => {
+  // Midday instants so the local zone cannot flip the calendar day.
+  it("collapses a same-month range to one month and year", () => {
+    expect(formatDateRange("2026-09-26T05:00:00Z", "2026-09-27T05:00:00Z")).toMatch(
+      /^26 - 27 Sep(t)? 2026$/,
+    );
+  });
+
+  it("shows a single date when start and end fall on the same day", () => {
+    expect(formatDateRange("2026-09-26T05:00:00Z", "2026-09-26T10:00:00Z")).toMatch(
+      /^26 Sep(t)? 2026$/,
+    );
+  });
+
+  it("spells the month on both sides when the range crosses one", () => {
+    const formatted = formatDateRange("2026-09-28T05:00:00Z", "2026-10-02T05:00:00Z");
+
+    expect(formatted).toMatch(/Sep/);
+    expect(formatted).toMatch(/Okt/);
+  });
+
+  it("spells the year on both sides when the range crosses one", () => {
+    const formatted = formatDateRange("2026-12-30T05:00:00Z", "2027-01-02T05:00:00Z");
+
+    expect(formatted).toContain("2026");
+    expect(formatted).toContain("2027");
+  });
+});
+
+describe("formatVisitorCount", () => {
+  it("dot-groups counts below one million", () => {
+    expect(formatVisitorCount(100_000)).toBe("100.000");
+    expect(formatVisitorCount(30_000)).toBe("30.000");
+  });
+
+  it("compacts millions, billions, and trillions", () => {
+    expect(formatVisitorCount(1_000_000)).toBe("1M");
+    expect(formatVisitorCount(1_500_000)).toBe("1,5M");
+    expect(formatVisitorCount(2_000_000_000)).toBe("2B");
+    expect(formatVisitorCount(3_000_000_000_000)).toBe("3T");
   });
 });
 

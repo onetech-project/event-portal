@@ -46,10 +46,20 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   Admin can manually trigger "Resend Ticket Email".
 
 ### 1.5. API Specification
-**Public APIs**
-*   `GET /api/v1/events`
-*   `GET /api/v1/events/:slug`
-*   `POST /api/v1/checkout`
+**Public APIs** (spec 008 — every response wrapped in `{code, message, data}`)
+*   `GET /api/v1/event`
+*   `GET /api/v1/event/:slug` (content-only detail: description, activities, guest stars, guidelines)
+*   `GET /api/v1/ticket/:event_slug` (sellable ticket types, live quota)
+*   `GET /api/v1/packages/:event_slug`
+*   `GET /api/v1/ticket/terms-condition/:event_slug`
+*   `POST /api/v1/ticket/book` (creates the PENDING order + 1h hold)
+*   `POST /api/v1/ticket/terms-condition/:order_id` (records the T&C agreement)
+*   `POST /api/v1/ticket/checkout/:order_id` (saves visitor forms, opens the QRIS charge)
+*   `POST /api/v1/ticket/checkout/:order_id/refresh-qr`
+*   `GET /api/v1/ticket/checkout/:order_id/status` (SSE)
+*   `GET /api/v1/ticket/order/:order_id` (+ `/qris.png`)
+*   `POST /api/v1/ticket/order/:order_id/payment/refresh`
+*   `POST /api/v1/ticket/resend-email` (`{order_id}` body)
 *   `POST /api/v1/payment/webhook/:provider`
 *   `GET /api/v1/tickets/:code`
 
@@ -57,12 +67,20 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   `POST /api/v1/admin/login`
 *   `CRUD /api/v1/admin/events`
 *   `CRUD /api/v1/admin/ticket-types`
+*   `CRUD /api/v1/admin/packages`
+*   `GET /api/v1/admin/packages/:id/availability`
 *   `GET /api/v1/admin/orders`
 *   `POST /api/v1/admin/orders/:id/resend-email`
 *   `GET /api/v1/admin/attendees`
 *   `POST /api/v1/admin/tickets/validate`
 
+`GET /api/v1/packages/:event_slug` returns packages whose `available_units` and `purchasable` are both derived per request from the remaining quota of their constituent ticket types — a package stores no inventory of its own, so neither field is ever cached or persisted. `POST /api/v1/ticket/book` accepts a line referencing **either** a `ticket_type_id` or a `package_id`, never both.
+
+A package request that carries any quota-like field (`quota`, `stock`, `inventory`, `remaining`, `capacity`) is **rejected**, not silently ignored: ignoring it would teach clients that packages hold stock.
+
 ### 1.6. Out of Scope
 Microservices (deployment), Kafka/RabbitMQ, Redis, Kubernetes, CQRS, Event Sourcing, Loyalty Points, Leaderboard, Multi-Organizer, Refunds, Coupons, Promotions, Waiting Room, Queue System, Seat Selection, Multi-Currency, Multi-Language.
+
+**Packages (bundles) are in scope and are not "Promotions".** A promotion is a rule that alters the price of a purchase; a package is a sellable product with its own identity, price, and sales window that draws down the quota of the ticket types it contains. The out-of-scope ban on promotions still stands: there are no discount codes, percentage-off rules, or price-modifying engines.
 
 ---

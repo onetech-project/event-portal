@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jung-kurt/gofpdf"
@@ -70,28 +71,81 @@ func RenderTicketsPDF(order OrderDelivery, tickets []TicketDetail) ([]byte, erro
 	return buf.Bytes(), nil
 }
 
+// The brand palette from the frontend tokens, so the printed ticket matches the
+// site and the email (Figma 251-2).
+var (
+	pdfBrand   = [3]int{203, 28, 79}
+	pdfSurface = [3]int{251, 239, 243}
+	pdfLine    = [3]int{236, 171, 191}
+	pdfGray    = [3]int{110, 110, 110}
+)
+
+// renderTicketPage draws one e-ticket in the Figma 251-2 card layout: a header
+// with the order number, a brand-tinted card holding the ticket-type chip, event
+// details and attendee on the left and the QR panel on the right, and the entry
+// instructions underneath.
 func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail, index int) error {
 	pdf.AddPage()
 
-	pdf.SetFont("Helvetica", "B", 20)
-	pdf.CellFormat(0, 12, ticket.EventName, "", 1, "L", false, 0, "")
+	// Header: "E-Ticket" wordmark and the order number it belongs to.
+	pdf.SetTextColor(pdfBrand[0], pdfBrand[1], pdfBrand[2])
+	pdf.SetFont("Helvetica", "B", 16)
+	pdf.CellFormat(95, 10, "E-Ticket", "", 0, "L", false, 0, "")
+	pdf.SetTextColor(pdfGray[0], pdfGray[1], pdfGray[2])
+	pdf.SetFont("Helvetica", "", 10)
+	pdf.CellFormat(95, 10, "Inv: #"+order.OrderNumber, "", 1, "R", false, 0, "")
+	pdf.SetDrawColor(pdfBrand[0], pdfBrand[1], pdfBrand[2])
+	pdf.SetLineWidth(0.6)
+	pdf.Line(10, pdf.GetY()+1, 200, pdf.GetY()+1)
 
-	pdf.SetFont("Helvetica", "", 11)
-	pdf.CellFormat(0, 7, ticket.Venue, "", 1, "L", false, 0, "")
-	pdf.CellFormat(0, 7, ticket.StartDate.Format("Mon, 02 Jan 2006 15:04 MST"), "", 1, "L", false, 0, "")
-	pdf.Ln(4)
+	// The ticket card.
+	const cardTop, cardHeight = 32.0, 74.0
+	pdf.SetFillColor(pdfSurface[0], pdfSurface[1], pdfSurface[2])
+	pdf.SetDrawColor(pdfLine[0], pdfLine[1], pdfLine[2])
+	pdf.SetLineWidth(0.3)
+	pdf.Rect(10, cardTop, 190, cardHeight, "FD")
 
-	pdf.SetDrawColor(200, 200, 200)
-	pdf.Line(10, pdf.GetY(), 200, pdf.GetY())
-	pdf.Ln(6)
+	// Ticket-type chip.
+	pdf.SetFont("Helvetica", "B", 9)
+	chipLabel := strings.ToUpper(ticket.TicketTypeName)
+	chipWidth := pdf.GetStringWidth(chipLabel) + 8
+	pdf.SetFillColor(pdfBrand[0], pdfBrand[1], pdfBrand[2])
+	pdf.Rect(16, cardTop+6, chipWidth, 7, "F")
+	pdf.SetTextColor(255, 255, 255)
+	pdf.SetXY(16, cardTop+6)
+	pdf.CellFormat(chipWidth, 7, chipLabel, "", 1, "C", false, 0, "")
 
-	pdf.SetFont("Helvetica", "B", 14)
-	pdf.CellFormat(0, 8, ticket.AttendeeName, "", 1, "L", false, 0, "")
+	// Event name + detail rows, left of the QR panel.
+	const detailWidth = 116.0
+	pdf.SetTextColor(24, 24, 27)
+	pdf.SetFont("Helvetica", "B", 18)
+	pdf.SetXY(16, cardTop+16)
+	pdf.MultiCell(detailWidth, 8, ticket.EventName, "", "L", false)
 
-	pdf.SetFont("Helvetica", "", 11)
-	pdf.CellFormat(0, 7, "Ticket type: "+ticket.TicketTypeName, "", 1, "L", false, 0, "")
-	pdf.CellFormat(0, 7, "Order: "+order.OrderNumber, "", 1, "L", false, 0, "")
-	pdf.Ln(6)
+	labelValue := func(label, value string) {
+		pdf.SetX(16)
+		pdf.SetTextColor(pdfGray[0], pdfGray[1], pdfGray[2])
+		pdf.SetFont("Helvetica", "B", 7.5)
+		pdf.CellFormat(detailWidth, 4, label, "", 1, "L", false, 0, "")
+		pdf.SetX(16)
+		pdf.SetTextColor(24, 24, 27)
+		pdf.SetFont("Helvetica", "", 11)
+		pdf.MultiCell(detailWidth, 5.5, value, "", "L", false)
+		pdf.Ln(1.5)
+	}
+	labelValue("DATE & TIME", ticket.StartDate.Format("Mon, 02 Jan 2006 15:04 MST"))
+	labelValue("VENUE", ticket.Venue)
+
+	pdf.SetDrawColor(pdfLine[0], pdfLine[1], pdfLine[2])
+	pdf.Line(16, pdf.GetY(), 16+detailWidth, pdf.GetY())
+	pdf.Ln(2)
+	labelValue("ATTENDEE", ticket.AttendeeName)
+
+	// QR panel: white box on the card's right, code underneath.
+	const qrBoxX, qrBoxWidth = 140.0, 54.0
+	pdf.SetFillColor(255, 255, 255)
+	pdf.SetDrawColor(pdfLine[0], pdfLine[1], pdfLine[2])
+	pdf.Rect(qrBoxX, cardTop+8, qrBoxWidth, cardHeight-16, "FD")
 
 	png, err := RenderQR(ticket.TicketCode)
 	if err != nil {
@@ -102,17 +156,29 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	// reusing one name would print the first ticket's QR on every page.
 	imageName := fmt.Sprintf("qr-%d-%s", index, ticket.TicketCode)
 	pdf.RegisterImageOptionsReader(imageName, gofpdf.ImageOptions{ImageType: "PNG"}, bytes.NewReader(png))
-	pdf.ImageOptions(imageName, 10, pdf.GetY(), 60, 60, false, gofpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+	pdf.ImageOptions(imageName, qrBoxX+7, cardTop+12, 40, 40, false, gofpdf.ImageOptions{ImageType: "PNG"}, 0, "")
 
-	pdf.SetY(pdf.GetY() + 64)
-	pdf.SetFont("Courier", "B", 18)
-	pdf.CellFormat(0, 10, ticket.TicketCode, "", 1, "L", false, 0, "")
+	pdf.SetXY(qrBoxX, cardTop+54)
+	pdf.SetTextColor(pdfGray[0], pdfGray[1], pdfGray[2])
+	pdf.SetFont("Helvetica", "B", 6.5)
+	pdf.CellFormat(qrBoxWidth, 4, "SHOW AT ENTRY", "", 1, "C", false, 0, "")
+	pdf.SetX(qrBoxX)
+	pdf.SetTextColor(24, 24, 27)
+	pdf.SetFont("Courier", "B", 12)
+	pdf.CellFormat(qrBoxWidth, 6, ticket.TicketCode, "", 1, "C", false, 0, "")
 
+	// Entry instructions + legal line under the card.
+	pdf.SetY(cardTop + cardHeight + 6)
 	pdf.SetFont("Helvetica", "", 9)
-	pdf.SetTextColor(110, 110, 110)
+	pdf.SetTextColor(pdfGray[0], pdfGray[1], pdfGray[2])
 	pdf.MultiCell(0, 5,
 		"Show this QR code or read out the ticket code at the entrance. "+
 			"Each ticket admits one person and can only be used once.", "", "L", false)
+	pdf.Ln(2)
+	pdf.SetFont("Helvetica", "", 8)
+	pdf.MultiCell(0, 4,
+		"This is a valid proof of payment and your official e-ticket. No signature is required.",
+		"", "L", false)
 	pdf.SetTextColor(0, 0, 0)
 
 	return pdf.Error()

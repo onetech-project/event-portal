@@ -46,9 +46,39 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* JIVE booking-step palette. Held as tokens rather than inline hex so the
+     brand can move in one place; --primary above stays the neutral shadcn
+     default that the admin surfaces are built on. */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-surface: var(--brand-surface);
+  --color-brand-line: var(--brand-line);
+  --color-ticket-title: var(--ticket-title);
+  --color-ticket-ink: var(--ticket-ink);
+  --color-ticket-muted: var(--ticket-muted);
+  --color-ink: var(--ink);
+  --color-terms-heading: var(--terms-heading);
+  --color-terms-ink: var(--terms-ink);
 }
 
 :root {
+  /* JIVE booking-step palette, taken from the Figma booking frames. */
+  --brand: #cb1c4f;
+  --brand-foreground: #ffffff;
+  /* Fill and rule colour of a SELECTED ticket card. */
+  --brand-surface: #fbeff3;
+  --brand-line: #ecabbf;
+  --ticket-title: #222222;
+  --ticket-ink: #212b36;
+  --ticket-muted: #637381;
+  /* The dark bar the guest-facing header and footer sit on. */
+  --ink: #0a0e17;
+  /* Terms & Conditions dialog: navy for who the terms belong to, near-black for
+     the clauses themselves. */
+  --terms-heading: #001f5c;
+  --terms-ink: #3c3c3c;
+
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);

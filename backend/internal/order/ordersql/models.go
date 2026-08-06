@@ -8,23 +8,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 )
 
-type Attendee struct {
-	ID           uuid.UUID
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	Name         string
-	Email        string
+type Fee struct {
+	ID        uuid.UUID
+	Name      string
+	FeeType   string
+	Value     decimal.Decimal
+	Position  int32
+	IsActive  bool
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
 }
 
 type Order struct {
 	ID               uuid.UUID
 	OrderNumber      string
-	BuyerName        string
-	BuyerEmail       string
-	BuyerPhone       string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
 	TotalAmount      decimal.Decimal
 	Status           string
 	PaymentProvider  *string
@@ -34,12 +38,9 @@ type Order struct {
 	UpdatedAt        *time.Time
 	PaymentQrString  *string
 	PaymentExpiresAt *time.Time
-}
-
-type OrderItem struct {
-	ID           uuid.UUID
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	Quantity     int32
-	Price        decimal.Decimal
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	BuyerDob         pgtype.Date
+	BuyerGender      *string
+	Subtotal         decimal.NullDecimal
 }

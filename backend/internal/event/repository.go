@@ -29,13 +29,16 @@ var (
 // TicketTypeRow is the internal (non-wire) view of a ticket type used by services
 // in this domain and by the quota checks checkout relies on.
 type TicketTypeRow struct {
-	ID         uuid.UUID
-	EventID    uuid.UUID
-	Name       string
-	Price      decimal.Decimal
-	Quota      int32
-	SalesStart time.Time
-	SalesEnd   time.Time
+	ID      uuid.UUID
+	EventID uuid.UUID
+	Name    string
+	// Description is the admin-authored note the booking card shows in place of
+	// the standard non-refundable wording. Nil or blank falls back to it.
+	Description *string
+	Price       decimal.Decimal
+	Quota       int32
+	SalesStart  time.Time
+	SalesEnd    time.Time
 }
 
 // Repository is the only place in the codebase that talks to events/ticket_types.
@@ -99,7 +102,7 @@ func (r *Repository) GetPublishedEventBySlug(ctx context.Context, slug string) (
 		StartDate:   row.StartDate,
 		EndDate:     row.EndDate,
 		BannerURL:   row.BannerUrl,
-		TicketTypes: []TicketTypeSummary{},
+		Scale:       row.Scale,
 	}, nil
 }
 
@@ -113,13 +116,14 @@ func (r *Repository) ListTicketTypesByEventID(ctx context.Context, eventID uuid.
 	out := make([]TicketTypeRow, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, TicketTypeRow{
-			ID:         row.ID,
-			EventID:    row.EventID,
-			Name:       row.Name,
-			Price:      row.Price,
-			Quota:      row.Quota,
-			SalesStart: row.SalesStart,
-			SalesEnd:   row.SalesEnd,
+			ID:          row.ID,
+			EventID:     row.EventID,
+			Name:        row.Name,
+			Description: row.Description,
+			Price:       row.Price,
+			Quota:       row.Quota,
+			SalesStart:  row.SalesStart,
+			SalesEnd:    row.SalesEnd,
 		})
 	}
 	return out, nil
@@ -146,13 +150,14 @@ func (r *Repository) GetTicketTypeByID(ctx context.Context, tx pgx.Tx, id uuid.U
 	}
 
 	return TicketTypeRow{
-		ID:         row.ID,
-		EventID:    row.EventID,
-		Name:       row.Name,
-		Price:      row.Price,
-		Quota:      row.Quota,
-		SalesStart: row.SalesStart,
-		SalesEnd:   row.SalesEnd,
+		ID:          row.ID,
+		EventID:     row.EventID,
+		Name:        row.Name,
+		Description: row.Description,
+		Price:       row.Price,
+		Quota:       row.Quota,
+		SalesStart:  row.SalesStart,
+		SalesEnd:    row.SalesEnd,
 	}, nil
 }
 
@@ -191,4 +196,34 @@ func (r *Repository) RestoreQuota(ctx context.Context, tx pgx.Tx, ticketTypeID u
 		return fmt.Errorf("restore quota: %w", err)
 	}
 	return nil
+}
+
+// EventHasTerms reports whether an event has an authored Terms & Conditions
+// document. Booking is refused without one (spec 008, 409001).
+func (r *Repository) EventHasTerms(ctx context.Context, eventID uuid.UUID) (bool, error) {
+	has, err := r.queries.EventHasTerms(ctx, eventID)
+	if err != nil {
+		return false, fmt.Errorf("check event terms: %w", err)
+	}
+	return has, nil
+}
+
+// TermsRow is the current Terms & Conditions document of one event.
+type TermsRow struct {
+	ID        uuid.UUID
+	Content   string
+	UpdatedAt *time.Time
+}
+
+// GetEventTermsByEventID returns the event's current terms document, or
+// ErrNotFound when none has been authored.
+func (r *Repository) GetEventTermsByEventID(ctx context.Context, eventID uuid.UUID) (TermsRow, error) {
+	row, err := r.queries.GetEventTermsByEventID(ctx, eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TermsRow{}, ErrNotFound
+	}
+	if err != nil {
+		return TermsRow{}, fmt.Errorf("get event terms: %w", err)
+	}
+	return TermsRow{ID: row.ID, Content: row.Content, UpdatedAt: row.UpdatedAt}, nil
 }

@@ -10,36 +10,191 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 )
 
 const createAttendee = `-- name: CreateAttendee :one
-INSERT INTO attendees (order_id, ticket_type_id, name, email)
-VALUES ($1, $2, $3, $4)
-RETURNING id, order_id, ticket_type_id, name, email
+INSERT INTO attendees (order_id, ticket_type_id, package_id, name, email)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, order_id, ticket_type_id, package_id, name, email
 `
 
 type CreateAttendeeParams struct {
 	OrderID      uuid.UUID
 	TicketTypeID uuid.UUID
-	Name         string
-	Email        string
+	PackageID    uuid.NullUUID
+	Name         *string
+	Email        *string
 }
 
-func (q *Queries) CreateAttendee(ctx context.Context, arg CreateAttendeeParams) (Attendee, error) {
+type CreateAttendeeRow struct {
+	ID           uuid.UUID
+	OrderID      uuid.UUID
+	TicketTypeID uuid.UUID
+	PackageID    uuid.NullUUID
+	Name         *string
+	Email        *string
+}
+
+// ticket_type_id is never null, including for bundle-derived registrants: that is
+// what keeps one pass per attendee true for packages. package_id records only the
+// bundle a slot originated in.
+func (q *Queries) CreateAttendee(ctx context.Context, arg CreateAttendeeParams) (CreateAttendeeRow, error) {
 	row := q.db.QueryRow(ctx, createAttendee,
 		arg.OrderID,
 		arg.TicketTypeID,
+		arg.PackageID,
 		arg.Name,
 		arg.Email,
 	)
-	var i Attendee
+	var i CreateAttendeeRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderID,
 		&i.TicketTypeID,
+		&i.PackageID,
 		&i.Name,
 		&i.Email,
+	)
+	return i, err
+}
+
+const createAttendeeSlot = `-- name: CreateAttendeeSlot :one
+INSERT INTO attendees (order_id, ticket_type_id, package_id, package_unit)
+VALUES ($1, $2, $3, $4)
+RETURNING id, order_id, ticket_type_id, package_id, package_unit, name, email, phone, dob, gender
+`
+
+type CreateAttendeeSlotParams struct {
+	OrderID      uuid.UUID
+	TicketTypeID uuid.UUID
+	PackageID    uuid.NullUUID
+	PackageUnit  *int16
+}
+
+type CreateAttendeeSlotRow struct {
+	ID           uuid.UUID
+	OrderID      uuid.UUID
+	TicketTypeID uuid.UUID
+	PackageID    uuid.NullUUID
+	PackageUnit  *int16
+	Name         *string
+	Email        *string
+	Phone        *string
+	Dob          pgtype.Date
+	Gender       *string
+}
+
+// An EMPTY slot: ticket-type-bound at booking, identity filled at checkout.
+// package_unit ties bundle slots to their purchased unit (spec 010).
+func (q *Queries) CreateAttendeeSlot(ctx context.Context, arg CreateAttendeeSlotParams) (CreateAttendeeSlotRow, error) {
+	row := q.db.QueryRow(ctx, createAttendeeSlot,
+		arg.OrderID,
+		arg.TicketTypeID,
+		arg.PackageID,
+		arg.PackageUnit,
+	)
+	var i CreateAttendeeSlotRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrderID,
+		&i.TicketTypeID,
+		&i.PackageID,
+		&i.PackageUnit,
+		&i.Name,
+		&i.Email,
+		&i.Phone,
+		&i.Dob,
+		&i.Gender,
+	)
+	return i, err
+}
+
+const createBookedOrder = `-- name: CreateBookedOrder :one
+
+INSERT INTO orders (order_number, total_amount, subtotal, status, payment_expires_at)
+VALUES ($1, $2, $3, 'PENDING', $4)
+RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
+          payment_provider, payment_url, email_sent, created_at, updated_at,
+          payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
+       buyer_dob, buyer_gender, subtotal
+`
+
+type CreateBookedOrderParams struct {
+	OrderNumber      string
+	TotalAmount      decimal.Decimal
+	Subtotal         decimal.NullDecimal
+	PaymentExpiresAt *time.Time
+}
+
+// Spec 008: two-phase booking ------------------------------------------------
+// Booking (TX-B): the order exists before any buyer identity — those columns
+// stay NULL until checkout. payment_expires_at carries the 1-hour hold.
+func (q *Queries) CreateBookedOrder(ctx context.Context, arg CreateBookedOrderParams) (Order, error) {
+	row := q.db.QueryRow(ctx, createBookedOrder,
+		arg.OrderNumber,
+		arg.TotalAmount,
+		arg.Subtotal,
+		arg.PaymentExpiresAt,
+	)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.OrderNumber,
+		&i.BuyerName,
+		&i.BuyerEmail,
+		&i.BuyerPhone,
+		&i.TotalAmount,
+		&i.Status,
+		&i.PaymentProvider,
+		&i.PaymentUrl,
+		&i.EmailSent,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.BuyerDob,
+		&i.BuyerGender,
+		&i.Subtotal,
+	)
+	return i, err
+}
+
+const createFee = `-- name: CreateFee :one
+INSERT INTO fees (name, fee_type, value, position, is_active)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, name, fee_type, value, position, is_active, created_at, updated_at
+`
+
+type CreateFeeParams struct {
+	Name     string
+	FeeType  string
+	Value    decimal.Decimal
+	Position int32
+	IsActive bool
+}
+
+func (q *Queries) CreateFee(ctx context.Context, arg CreateFeeParams) (Fee, error) {
+	row := q.db.QueryRow(ctx, createFee,
+		arg.Name,
+		arg.FeeType,
+		arg.Value,
+		arg.Position,
+		arg.IsActive,
+	)
+	var i Fee
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.FeeType,
+		&i.Value,
+		&i.Position,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -50,14 +205,15 @@ INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_am
 VALUES ($1, $2, $3, $4, $5, 'PENDING')
 RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
           payment_provider, payment_url, email_sent, created_at, updated_at,
-          payment_qr_string, payment_expires_at
+          payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
+       buyer_dob, buyer_gender, subtotal
 `
 
 type CreateOrderParams struct {
 	OrderNumber string
-	BuyerName   string
-	BuyerEmail  string
-	BuyerPhone  string
+	BuyerName   *string
+	BuyerEmail  *string
+	BuyerPhone  *string
 	TotalAmount decimal.Decimal
 }
 
@@ -86,46 +242,102 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order
 		&i.UpdatedAt,
 		&i.PaymentQrString,
 		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.BuyerDob,
+		&i.BuyerGender,
+		&i.Subtotal,
 	)
 	return i, err
 }
 
-const createOrderItem = `-- name: CreateOrderItem :one
-INSERT INTO order_items (order_id, ticket_type_id, quantity, price)
+const createOrderFee = `-- name: CreateOrderFee :exec
+INSERT INTO order_fees (order_id, name, amount, position)
 VALUES ($1, $2, $3, $4)
-RETURNING id, order_id, ticket_type_id, quantity, price
+`
+
+type CreateOrderFeeParams struct {
+	OrderID  uuid.UUID
+	Name     string
+	Amount   decimal.Decimal
+	Position int32
+}
+
+// Booking (TX-B): freezes one computed fee line onto the order.
+func (q *Queries) CreateOrderFee(ctx context.Context, arg CreateOrderFeeParams) error {
+	_, err := q.db.Exec(ctx, createOrderFee,
+		arg.OrderID,
+		arg.Name,
+		arg.Amount,
+		arg.Position,
+	)
+	return err
+}
+
+const createOrderItem = `-- name: CreateOrderItem :one
+INSERT INTO order_items (order_id, ticket_type_id, package_id, quantity, price)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, order_id, ticket_type_id, package_id, quantity, price
 `
 
 type CreateOrderItemParams struct {
 	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
+	TicketTypeID uuid.NullUUID
+	PackageID    uuid.NullUUID
 	Quantity     int32
 	Price        decimal.Decimal
 }
 
-func (q *Queries) CreateOrderItem(ctx context.Context, arg CreateOrderItemParams) (OrderItem, error) {
+type CreateOrderItemRow struct {
+	ID           uuid.UUID
+	OrderID      uuid.UUID
+	TicketTypeID uuid.NullUUID
+	PackageID    uuid.NullUUID
+	Quantity     int32
+	Price        decimal.Decimal
+}
+
+// Exactly one of ticket_type_id / package_id is set (order_items_line_kind_chk). A
+// package line is stored ONCE at the package's own price rather than expanded into
+// per-constituent rows, so total_amount stays exactly SUM(quantity * price).
+func (q *Queries) CreateOrderItem(ctx context.Context, arg CreateOrderItemParams) (CreateOrderItemRow, error) {
 	row := q.db.QueryRow(ctx, createOrderItem,
 		arg.OrderID,
 		arg.TicketTypeID,
+		arg.PackageID,
 		arg.Quantity,
 		arg.Price,
 	)
-	var i OrderItem
+	var i CreateOrderItemRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderID,
 		&i.TicketTypeID,
+		&i.PackageID,
 		&i.Quantity,
 		&i.Price,
 	)
 	return i, err
 }
 
+const deleteFee = `-- name: DeleteFee :execrows
+DELETE FROM fees WHERE id = $1
+`
+
+func (q *Queries) DeleteFee(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFee, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getOrderByID = `-- name: GetOrderByID :one
 
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
        payment_provider, payment_url, email_sent, created_at, updated_at,
-       payment_qr_string, payment_expires_at
+       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
+       buyer_dob, buyer_gender, subtotal
 FROM orders
 WHERE id = $1
 `
@@ -152,6 +364,11 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.UpdatedAt,
 		&i.PaymentQrString,
 		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.BuyerDob,
+		&i.BuyerGender,
+		&i.Subtotal,
 	)
 	return i, err
 }
@@ -159,7 +376,8 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 const getOrderByNumber = `-- name: GetOrderByNumber :one
 SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
        payment_provider, payment_url, email_sent, created_at, updated_at,
-       payment_qr_string, payment_expires_at
+       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
+       buyer_dob, buyer_gender, subtotal
 FROM orders
 WHERE order_number = $1
 `
@@ -182,8 +400,84 @@ func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (Ord
 		&i.UpdatedAt,
 		&i.PaymentQrString,
 		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.BuyerDob,
+		&i.BuyerGender,
+		&i.Subtotal,
 	)
 	return i, err
+}
+
+const getOrderEventID = `-- name: GetOrderEventID :one
+SELECT tt.event_id
+FROM attendees a
+JOIN ticket_types tt ON tt.id = a.ticket_type_id
+WHERE a.order_id = $1
+LIMIT 1
+`
+
+// The event an order belongs to, resolved through its attendee slots (every
+// booked order has at least one, and each slot binds a concrete ticket type).
+func (q *Queries) GetOrderEventID(ctx context.Context, orderID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getOrderEventID, orderID)
+	var event_id uuid.UUID
+	err := row.Scan(&event_id)
+	return event_id, err
+}
+
+const getOrderWithTermsByNumber = `-- name: GetOrderWithTermsByNumber :one
+SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
+       payment_provider, payment_url, email_sent, created_at, updated_at,
+       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
+       buyer_dob, buyer_gender, subtotal
+FROM orders
+WHERE order_number = $1
+`
+
+// The 008 guest read: everything the order page needs to pick its screen.
+func (q *Queries) GetOrderWithTermsByNumber(ctx context.Context, orderNumber string) (Order, error) {
+	row := q.db.QueryRow(ctx, getOrderWithTermsByNumber, orderNumber)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.OrderNumber,
+		&i.BuyerName,
+		&i.BuyerEmail,
+		&i.BuyerPhone,
+		&i.TotalAmount,
+		&i.Status,
+		&i.PaymentProvider,
+		&i.PaymentUrl,
+		&i.EmailSent,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.BuyerDob,
+		&i.BuyerGender,
+		&i.Subtotal,
+	)
+	return i, err
+}
+
+const hasOrdersForPackage = `-- name: HasOrdersForPackage :one
+SELECT (
+    EXISTS (SELECT 1 FROM order_items oi WHERE oi.package_id = $1)
+    OR
+    EXISTS (SELECT 1 FROM attendees a WHERE a.package_id = $1)
+) AS has_orders
+`
+
+// Delete guard for a package. Both FKs are ON DELETE RESTRICT, so this must return
+// a clean 400 rather than letting a raw constraint violation surface.
+func (q *Queries) HasOrdersForPackage(ctx context.Context, packageID uuid.NullUUID) (*bool, error) {
+	row := q.db.QueryRow(ctx, hasOrdersForPackage, packageID)
+	var has_orders *bool
+	err := row.Scan(&has_orders)
+	return has_orders, err
 }
 
 const hasOrdersForTicketType = `-- name: HasOrdersForTicketType :one
@@ -199,7 +493,7 @@ SELECT (
 // Both FKs onto ticket_types are ON DELETE RESTRICT, so a guard that inspects only
 // order_items would surface a raw constraint violation instead of the required 400
 // (constitution, Principle VI).
-func (q *Queries) HasOrdersForTicketType(ctx context.Context, ticketTypeID uuid.UUID) (*bool, error) {
+func (q *Queries) HasOrdersForTicketType(ctx context.Context, ticketTypeID uuid.NullUUID) (*bool, error) {
 	row := q.db.QueryRow(ctx, hasOrdersForTicketType, ticketTypeID)
 	var has_orders *bool
 	err := row.Scan(&has_orders)
@@ -219,6 +513,159 @@ func (q *Queries) HasOrdersForTicketTypes(ctx context.Context, ids []uuid.UUID) 
 	var has_orders *bool
 	err := row.Scan(&has_orders)
 	return has_orders, err
+}
+
+const hasPendingOrdersForPackage = `-- name: HasPendingOrdersForPackage :one
+SELECT EXISTS (
+    SELECT 1 FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE oi.package_id = $1 AND o.status = 'PENDING'
+) AS has_pending
+`
+
+// Composition-lock guard (research.md R-004): an open PENDING order holding this
+// package means its composition cannot change, or restoration after expiry would
+// put back a different amount than was deducted. PAID or terminal orders are not
+// a constraint — their hold is permanent.
+func (q *Queries) HasPendingOrdersForPackage(ctx context.Context, packageID uuid.NullUUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPendingOrdersForPackage, packageID)
+	var has_pending bool
+	err := row.Scan(&has_pending)
+	return has_pending, err
+}
+
+const listActiveFees = `-- name: ListActiveFees :many
+
+SELECT id, name, fee_type, value, position
+FROM fees
+WHERE is_active
+ORDER BY position, name
+`
+
+type ListActiveFeesRow struct {
+	ID       uuid.UUID
+	Name     string
+	FeeType  string
+	Value    decimal.Decimal
+	Position int32
+}
+
+// Fees (master + per-order snapshot; clarified 2026-08-05) -------------------
+// The fee master rows booking applies, in display order.
+func (q *Queries) ListActiveFees(ctx context.Context) ([]ListActiveFeesRow, error) {
+	rows, err := q.db.Query(ctx, listActiveFees)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListActiveFeesRow{}
+	for rows.Next() {
+		var i ListActiveFeesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.FeeType,
+			&i.Value,
+			&i.Position,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveGenders = `-- name: ListActiveGenders :many
+SELECT id, name FROM genders WHERE is_active ORDER BY name
+`
+
+type ListActiveGendersRow struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// The gender master list (clarified 2026-08-05): the forms' options and the
+// values checkout accepts both come from here, never a hardcoded set.
+func (q *Queries) ListActiveGenders(ctx context.Context) ([]ListActiveGendersRow, error) {
+	rows, err := q.db.Query(ctx, listActiveGenders)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListActiveGendersRow{}
+	for rows.Next() {
+		var i ListActiveGendersRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAttendeeSlotsByOrderID = `-- name: ListAttendeeSlotsByOrderID :many
+SELECT a.id, a.order_id, a.ticket_type_id, a.package_id, a.package_unit,
+       a.name, a.email, a.phone, a.dob, a.gender,
+       tt.name AS ticket_type_name
+FROM attendees a
+JOIN ticket_types tt ON tt.id = a.ticket_type_id
+WHERE a.order_id = $1
+ORDER BY a.package_id NULLS FIRST, a.package_unit ASC, a.id ASC
+`
+
+type ListAttendeeSlotsByOrderIDRow struct {
+	ID             uuid.UUID
+	OrderID        uuid.UUID
+	TicketTypeID   uuid.UUID
+	PackageID      uuid.NullUUID
+	PackageUnit    *int16
+	Name           *string
+	Email          *string
+	Phone          *string
+	Dob            pgtype.Date
+	Gender         *string
+	TicketTypeName string
+}
+
+// Slot list incl. the 008 detail columns and the human ticket-type name.
+// Ordering (spec 010): standalone slots first, then bundle slots contiguous
+// per (package_id, package_unit), so one visitor form maps to one unit.
+func (q *Queries) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListAttendeeSlotsByOrderIDRow, error) {
+	rows, err := q.db.Query(ctx, listAttendeeSlotsByOrderID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAttendeeSlotsByOrderIDRow{}
+	for rows.Next() {
+		var i ListAttendeeSlotsByOrderIDRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderID,
+			&i.TicketTypeID,
+			&i.PackageID,
+			&i.PackageUnit,
+			&i.Name,
+			&i.Email,
+			&i.Phone,
+			&i.Dob,
+			&i.Gender,
+			&i.TicketTypeName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAttendeesAdmin = `-- name: ListAttendeesAdmin :many
@@ -242,8 +689,8 @@ type ListAttendeesAdminRow struct {
 	ID           uuid.UUID
 	OrderID      uuid.UUID
 	TicketTypeID uuid.UUID
-	Name         string
-	Email        string
+	Name         *string
+	Email        *string
 	OrderNumber  string
 }
 
@@ -275,25 +722,35 @@ func (q *Queries) ListAttendeesAdmin(ctx context.Context, arg ListAttendeesAdmin
 }
 
 const listAttendeesByOrderID = `-- name: ListAttendeesByOrderID :many
-SELECT id, order_id, ticket_type_id, name, email
+SELECT id, order_id, ticket_type_id, package_id, name, email
 FROM attendees
 WHERE order_id = $1
 ORDER BY id ASC
 `
 
-func (q *Queries) ListAttendeesByOrderID(ctx context.Context, orderID uuid.UUID) ([]Attendee, error) {
+type ListAttendeesByOrderIDRow struct {
+	ID           uuid.UUID
+	OrderID      uuid.UUID
+	TicketTypeID uuid.UUID
+	PackageID    uuid.NullUUID
+	Name         *string
+	Email        *string
+}
+
+func (q *Queries) ListAttendeesByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListAttendeesByOrderIDRow, error) {
 	rows, err := q.db.Query(ctx, listAttendeesByOrderID, orderID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Attendee{}
+	items := []ListAttendeesByOrderIDRow{}
 	for rows.Next() {
-		var i Attendee
+		var i ListAttendeesByOrderIDRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrderID,
 			&i.TicketTypeID,
+			&i.PackageID,
 			&i.Name,
 			&i.Email,
 		); err != nil {
@@ -307,25 +764,110 @@ func (q *Queries) ListAttendeesByOrderID(ctx context.Context, orderID uuid.UUID)
 	return items, nil
 }
 
+const listFees = `-- name: ListFees :many
+SELECT id, name, fee_type, value, position, is_active, created_at, updated_at
+FROM fees
+ORDER BY position, name
+`
+
+// Admin read: every fee, active or not.
+func (q *Queries) ListFees(ctx context.Context) ([]Fee, error) {
+	rows, err := q.db.Query(ctx, listFees)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Fee{}
+	for rows.Next() {
+		var i Fee
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.FeeType,
+			&i.Value,
+			&i.Position,
+			&i.IsActive,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrderFeesByOrderID = `-- name: ListOrderFeesByOrderID :many
+SELECT id, name, amount, position
+FROM order_fees
+WHERE order_id = $1
+ORDER BY position, name
+`
+
+type ListOrderFeesByOrderIDRow struct {
+	ID       uuid.UUID
+	Name     string
+	Amount   decimal.Decimal
+	Position int32
+}
+
+func (q *Queries) ListOrderFeesByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListOrderFeesByOrderIDRow, error) {
+	rows, err := q.db.Query(ctx, listOrderFeesByOrderID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrderFeesByOrderIDRow{}
+	for rows.Next() {
+		var i ListOrderFeesByOrderIDRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Amount,
+			&i.Position,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOrderItemsByOrderID = `-- name: ListOrderItemsByOrderID :many
-SELECT id, order_id, ticket_type_id, quantity, price
+SELECT id, order_id, ticket_type_id, package_id, quantity, price
 FROM order_items
 WHERE order_id = $1
 `
 
-func (q *Queries) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID) ([]OrderItem, error) {
+type ListOrderItemsByOrderIDRow struct {
+	ID           uuid.UUID
+	OrderID      uuid.UUID
+	TicketTypeID uuid.NullUUID
+	PackageID    uuid.NullUUID
+	Quantity     int32
+	Price        decimal.Decimal
+}
+
+func (q *Queries) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListOrderItemsByOrderIDRow, error) {
 	rows, err := q.db.Query(ctx, listOrderItemsByOrderID, orderID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []OrderItem{}
+	items := []ListOrderItemsByOrderIDRow{}
 	for rows.Next() {
-		var i OrderItem
+		var i ListOrderItemsByOrderIDRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrderID,
 			&i.TicketTypeID,
+			&i.PackageID,
 			&i.Quantity,
 			&i.Price,
 		); err != nil {
@@ -364,9 +906,9 @@ type ListOrdersAdminParams struct {
 type ListOrdersAdminRow struct {
 	ID              uuid.UUID
 	OrderNumber     string
-	BuyerName       string
-	BuyerEmail      string
-	BuyerPhone      string
+	BuyerName       *string
+	BuyerEmail      *string
+	BuyerPhone      *string
 	TotalAmount     decimal.Decimal
 	Status          string
 	PaymentProvider *string
@@ -460,6 +1002,58 @@ func (q *Queries) ListOrdersDueForExpiry(ctx context.Context, arg ListOrdersDueF
 	return items, nil
 }
 
+const listQuotaHoldsByOrderID = `-- name: ListQuotaHoldsByOrderID :many
+SELECT ticket_type_id, SUM(qty)::int AS qty
+FROM (
+    SELECT oi.ticket_type_id, oi.quantity AS qty
+    FROM order_items oi
+    WHERE oi.order_id = $1 AND oi.ticket_type_id IS NOT NULL
+
+    UNION ALL
+
+    SELECT pt.ticket_type_id, oi.quantity * pt.quantity AS qty
+    FROM order_items oi
+    JOIN package_tickets pt ON pt.package_id = oi.package_id
+    WHERE oi.order_id = $1 AND oi.package_id IS NOT NULL
+) holds
+GROUP BY ticket_type_id
+ORDER BY ticket_type_id
+`
+
+type ListQuotaHoldsByOrderIDRow struct {
+	TicketTypeID uuid.NullUUID
+	Qty          int32
+}
+
+// An order's total per-ticket-type hold, expanding package lines through the
+// junction. This is the exact inverse of the checkout aggregation, so restoring
+// returns precisely what deducting took.
+//
+// ORDER BY ticket_type_id matches the deduction order, keeping restore on the same
+// deterministic lock sequence and out of deadlock range.
+//
+// It reconstructs the hold from the package's CURRENT composition, which is why
+// composition edits are rejected while a PENDING order exists (research.md R-004).
+func (q *Queries) ListQuotaHoldsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListQuotaHoldsByOrderIDRow, error) {
+	rows, err := q.db.Query(ctx, listQuotaHoldsByOrderID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListQuotaHoldsByOrderIDRow{}
+	for rows.Next() {
+		var i ListQuotaHoldsByOrderIDRow
+		if err := rows.Scan(&i.TicketTypeID, &i.Qty); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const orderNumberExists = `-- name: OrderNumberExists :one
 SELECT EXISTS (SELECT 1 FROM orders WHERE order_number = $1) AS taken
 `
@@ -469,6 +1063,27 @@ func (q *Queries) OrderNumberExists(ctx context.Context, orderNumber string) (bo
 	var taken bool
 	err := row.Scan(&taken)
 	return taken, err
+}
+
+const recordTermsAgreement = `-- name: RecordTermsAgreement :execrows
+UPDATE orders
+SET terms_agreed_at = now(), event_terms_id = $2, updated_at = now()
+WHERE id = $1 AND status = 'PENDING'
+`
+
+type RecordTermsAgreementParams struct {
+	ID           uuid.UUID
+	EventTermsID uuid.NullUUID
+}
+
+// Same "Agree" click as booking, its own call. Guarded on PENDING; idempotent
+// because re-stamping the same agreement is harmless.
+func (q *Queries) RecordTermsAgreement(ctx context.Context, arg RecordTermsAgreementParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordTermsAgreement, arg.ID, arg.EventTermsID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setEmailSent = `-- name: SetEmailSent :execrows
@@ -483,20 +1098,69 @@ func (q *Queries) SetEmailSent(ctx context.Context, id uuid.UUID) (int64, error)
 	return result.RowsAffected(), nil
 }
 
-const soldCountByTicketTypes = `-- name: SoldCountByTicketTypes :many
-SELECT ticket_type_id, SUM(quantity)::bigint AS sold
+const soldCountByPackage = `-- name: SoldCountByPackage :many
+SELECT package_id, SUM(quantity)::bigint AS sold
 FROM order_items
-WHERE ticket_type_id = ANY($1::uuid[])
+WHERE package_id = ANY($1::uuid[])
+GROUP BY package_id
+`
+
+type SoldCountByPackageRow struct {
+	PackageID uuid.NullUUID
+	Sold      int64
+}
+
+// Derived count of how many units of each package have been sold, used by the
+// admin package dashboard. A package line is stored once at the package's own
+// price, so the count is a straight SUM(quantity) over order_items, no expansion.
+func (q *Queries) SoldCountByPackage(ctx context.Context, ids []uuid.UUID) ([]SoldCountByPackageRow, error) {
+	rows, err := q.db.Query(ctx, soldCountByPackage, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SoldCountByPackageRow{}
+	for rows.Next() {
+		var i SoldCountByPackageRow
+		if err := rows.Scan(&i.PackageID, &i.Sold); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const soldCountByTicketTypes = `-- name: SoldCountByTicketTypes :many
+SELECT ticket_type_id, SUM(qty)::bigint AS sold
+FROM (
+    SELECT oi.ticket_type_id, oi.quantity AS qty
+    FROM order_items oi
+    WHERE oi.ticket_type_id = ANY($1::uuid[])
+
+    UNION ALL
+
+    SELECT pt.ticket_type_id, oi.quantity * pt.quantity AS qty
+    FROM order_items oi
+    JOIN package_tickets pt ON pt.package_id = oi.package_id
+    WHERE oi.package_id IS NOT NULL
+      AND pt.ticket_type_id = ANY($1::uuid[])
+) sales
 GROUP BY ticket_type_id
 `
 
 type SoldCountByTicketTypesRow struct {
-	TicketTypeID uuid.UUID
+	TicketTypeID uuid.NullUUID
 	Sold         int64
 }
 
 // Derived, never stored (constitution, Critical Data Flow Rules). Batched over a
 // whole page of ticket types so admin listings issue one query, not N.
+//
+// The UNION arm is not optional: a package line carries no ticket_type_id, so a
+// count reading only the first arm would under-report every bundled sale.
 func (q *Queries) SoldCountByTicketTypes(ctx context.Context, ids []uuid.UUID) ([]SoldCountByTicketTypesRow, error) {
 	rows, err := q.db.Query(ctx, soldCountByTicketTypes, ids)
 	if err != nil {
@@ -515,6 +1179,111 @@ func (q *Queries) SoldCountByTicketTypes(ctx context.Context, ids []uuid.UUID) (
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateAttendeeDetails = `-- name: UpdateAttendeeDetails :execrows
+UPDATE attendees
+SET name = $3, email = $4, phone = $5, dob = $6, gender = $7
+WHERE id = $1 AND order_id = $2
+`
+
+type UpdateAttendeeDetailsParams struct {
+	ID      uuid.UUID
+	OrderID uuid.UUID
+	Name    *string
+	Email   *string
+	Phone   *string
+	Dob     pgtype.Date
+	Gender  *string
+}
+
+// Checkout TX-D: fills one slot. order_id in the predicate stops a forged slot
+// id from writing into another order's attendee.
+func (q *Queries) UpdateAttendeeDetails(ctx context.Context, arg UpdateAttendeeDetailsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateAttendeeDetails,
+		arg.ID,
+		arg.OrderID,
+		arg.Name,
+		arg.Email,
+		arg.Phone,
+		arg.Dob,
+		arg.Gender,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateFee = `-- name: UpdateFee :one
+UPDATE fees
+SET name = $2, fee_type = $3, value = $4, position = $5, is_active = $6, updated_at = now()
+WHERE id = $1
+RETURNING id, name, fee_type, value, position, is_active, created_at, updated_at
+`
+
+type UpdateFeeParams struct {
+	ID       uuid.UUID
+	Name     string
+	FeeType  string
+	Value    decimal.Decimal
+	Position int32
+	IsActive bool
+}
+
+func (q *Queries) UpdateFee(ctx context.Context, arg UpdateFeeParams) (Fee, error) {
+	row := q.db.QueryRow(ctx, updateFee,
+		arg.ID,
+		arg.Name,
+		arg.FeeType,
+		arg.Value,
+		arg.Position,
+		arg.IsActive,
+	)
+	var i Fee
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.FeeType,
+		&i.Value,
+		&i.Position,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateOrderBuyer = `-- name: UpdateOrderBuyer :execrows
+UPDATE orders
+SET buyer_name = $2, buyer_email = $3, buyer_phone = $4,
+    buyer_dob = $5, buyer_gender = $6, updated_at = now()
+WHERE id = $1 AND status = 'PENDING'
+`
+
+type UpdateOrderBuyerParams struct {
+	ID          uuid.UUID
+	BuyerName   *string
+	BuyerEmail  *string
+	BuyerPhone  *string
+	BuyerDob    pgtype.Date
+	BuyerGender *string
+}
+
+// Checkout TX-D: buyer identity arrives with the visitor forms.
+func (q *Queries) UpdateOrderBuyer(ctx context.Context, arg UpdateOrderBuyerParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateOrderBuyer,
+		arg.ID,
+		arg.BuyerName,
+		arg.BuyerEmail,
+		arg.BuyerPhone,
+		arg.BuyerDob,
+		arg.BuyerGender,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateOrderStatusIfPending = `-- name: UpdateOrderStatusIfPending :execrows
@@ -569,6 +1338,62 @@ func (q *Queries) UpdatePaymentDetails(ctx context.Context, arg UpdatePaymentDet
 		arg.PaymentQrString,
 		arg.PaymentExpiresAt,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updatePaymentDetailsIfUnstarted = `-- name: UpdatePaymentDetailsIfUnstarted :execrows
+UPDATE orders
+SET payment_url = $2,
+    payment_provider = $3,
+    payment_qr_string = $4,
+    payment_expires_at = $5,
+    updated_at = now()
+WHERE id = $1 AND status = 'PENDING' AND payment_qr_string IS NULL
+`
+
+type UpdatePaymentDetailsIfUnstartedParams struct {
+	ID               uuid.UUID
+	PaymentUrl       *string
+	PaymentProvider  *string
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+}
+
+// Checkout TX-P: stamps the gateway session and the payment window, guarded so
+// a concurrent checkout cannot overwrite a live QR.
+func (q *Queries) UpdatePaymentDetailsIfUnstarted(ctx context.Context, arg UpdatePaymentDetailsIfUnstartedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updatePaymentDetailsIfUnstarted,
+		arg.ID,
+		arg.PaymentUrl,
+		arg.PaymentProvider,
+		arg.PaymentQrString,
+		arg.PaymentExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updatePaymentQR = `-- name: UpdatePaymentQR :execrows
+UPDATE orders
+SET payment_url = $2, payment_qr_string = $3, updated_at = now()
+WHERE id = $1 AND status = 'PENDING'
+`
+
+type UpdatePaymentQRParams struct {
+	ID              uuid.UUID
+	PaymentUrl      *string
+	PaymentQrString *string
+}
+
+// QR re-issue (7-minute refresh): swaps the payload WITHOUT touching the
+// deadline — the 14-minute window never extends (FR-015).
+func (q *Queries) UpdatePaymentQR(ctx context.Context, arg UpdatePaymentQRParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updatePaymentQR, arg.ID, arg.PaymentUrl, arg.PaymentQrString)
 	if err != nil {
 		return 0, err
 	}

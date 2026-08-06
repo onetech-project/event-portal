@@ -54,3 +54,13 @@ func (r *Repository) CreatePayment(ctx context.Context, log PaymentLog) error {
 	}
 	return nil
 }
+
+// CountReissuedQRs reports how many QR re-issues the order has logged, which
+// drives the next -R{n} suffix.
+func (r *Repository) CountReissuedQRs(ctx context.Context, orderID uuid.UUID) (int64, error) {
+	n, err := r.queries.CountReissuedQRs(ctx, orderID)
+	if err != nil {
+		return 0, fmt.Errorf("count reissued QRs: %w", err)
+	}
+	return n, nil
+}

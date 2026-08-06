@@ -70,18 +70,54 @@ func ticketTypeBody(eventID uuid.UUID, quota int) string {
 	}`, eventID, quota, start, end)
 }
 
+// ticketTypeBodyWithDescription is the same body carrying the admin-authored
+// remark that replaces the booking card's standard non-refundable notice.
+func ticketTypeBodyWithDescription(eventID uuid.UUID, quota int, description string) string {
+	start := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	end := time.Now().Add(29 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	return fmt.Sprintf(`{
+		"event_id":"%s","name":"Regular","description":%q,"price":"150000.00","quota":%d,
+		"sales_start":"%s","sales_end":"%s"
+	}`, eventID, description, quota, start, end)
+}
+
+func TestAdminTicketTypeRoundTripsItsDescription(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	ev := testsupport.SeedEvent(t, pool, "jazz-night", "DRAFT")
+
+	rec := do(t, e, http.MethodPost, "/api/v1/admin/ticket-types",
+		ticketTypeBodyWithDescription(ev.ID, 42, "Includes entry 10:00-22:00. No re-entry."))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, "Includes entry 10:00-22:00. No re-entry.",
+		decodeObject(t, rec)["description"])
+}
+
+func TestAdminTicketTypeStoresABlankDescriptionAsNull(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	ev := testsupport.SeedEvent(t, pool, "jazz-night", "DRAFT")
+
+	// A submitted-but-empty textarea must not become "", or the booking card
+	// would render a blank notice instead of the standard wording (FR-042).
+	rec := do(t, e, http.MethodPost, "/api/v1/admin/ticket-types",
+		ticketTypeBodyWithDescription(ev.ID, 42, "   "))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Nil(t, decodeObject(t, rec)["description"])
+}
+
 func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 	return body
 }
 
-func codeFromBody(t *testing.T, rec *httptest.ResponseRecorder) string {
+func codeFromBody(t *testing.T, rec *httptest.ResponseRecorder) int {
 	t.Helper()
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	return body.ErrorCode
+	return body.Code
 }
 
 // --- Events ---------------------------------------------------------------
@@ -107,7 +143,7 @@ func TestAdminListEventsReturnsAnArray(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var body []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 	assert.Len(t, body, 2)
 }
 
@@ -127,7 +163,8 @@ func TestAdminGetEventIncludesItsTicketTypes(t *testing.T) {
 
 	first := types[0].(map[string]any)
 	assert.ElementsMatch(t,
-		[]string{"id", "event_id", "name", "price", "quota", "sold", "sales_start", "sales_end"},
+		[]string{"id", "event_id", "name", "description", "price", "quota", "sold",
+			"sales_start", "sales_end"},
 		keysOf(first))
 	assert.InDelta(t, 42.0, first["quota"], 0.001)
 	assert.InDelta(t, 0.0, first["sold"], 0.001)
@@ -166,7 +203,7 @@ func TestAdminCreateEventReturns400ForADuplicateSlug(t *testing.T) {
 	rec := do(t, e, http.MethodPost, "/api/v1/admin/events", eventBody("taken"))
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeSlugNotUnique, codeFromBody(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeSlugNotUnique), codeFromBody(t, rec))
 }
 
 func TestAdminCreateEventReturns400ForAnInvertedDateRange(t *testing.T) {
@@ -177,7 +214,7 @@ func TestAdminCreateEventReturns400ForAnInvertedDateRange(t *testing.T) {
 	rec := do(t, e, http.MethodPost, "/api/v1/admin/events", body)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeInvalidDateRange, codeFromBody(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeInvalidDateRange), codeFromBody(t, rec))
 }
 
 func TestAdminDeleteEventReturns204(t *testing.T) {
@@ -201,7 +238,7 @@ func TestAdminDeleteEventReturns400WhenItHasOrders(t *testing.T) {
 	rec := do(t, e, http.MethodDelete, "/api/v1/admin/events/"+ev.ID.String(), "")
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeEventHasOrders, codeFromBody(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeEventHasOrders), codeFromBody(t, rec))
 }
 
 // --- Ticket types (flat routes per the locked PRD §1.5) -------------------
@@ -248,7 +285,7 @@ func TestAdminListTicketTypesScopesToTheEvent(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var body []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
 	assert.Len(t, body, 2)
 }
 
@@ -324,5 +361,5 @@ func TestAdminDeleteTicketTypeReturns400WhenOrdered(t *testing.T) {
 	rec := do(t, e, http.MethodDelete, "/api/v1/admin/ticket-types/"+tt.ID.String(), "")
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, apperr.CodeTicketTypeHasOrders, codeFromBody(t, rec))
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeTicketTypeHasOrders), codeFromBody(t, rec))
 }

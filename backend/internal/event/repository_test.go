@@ -4,8 +4,11 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -233,4 +236,110 @@ func TestGetTicketTypeByIDReportsMissingRow(t *testing.T) {
 	_, err := repo.GetTicketTypeByID(context.Background(), nil, ev.ID)
 
 	assert.ErrorIs(t, err, event.ErrNotFound)
+}
+
+// --- T020: availability equals MIN(quota / quantity_per_unit) ---------------
+
+func TestPackageAvailabilityEqualsMinQuotaPerUnitAcrossConstituents(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := event.NewRepository(pool)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "avail-event", "PUBLISHED")
+	day1 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 5)
+	day2 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 2)
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2 Bundle", "50000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, day1.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, day2.ID, ev.ID, 1)
+
+	packages, err := repo.ListPackagesWithAvailabilityByEventID(ctx, ev.ID)
+
+	require.NoError(t, err)
+	require.Len(t, packages, 1)
+	assert.Equal(t, int32(2), packages[0].AvailableUnits,
+		"MIN(5/1, 2/1) = 2")
+	assert.Equal(t, day2.ID, packages[0].LimitingTicketTypeID.UUID,
+		"Day 2 (quota=2) is the limiting constituent")
+	assert.True(t, *packages[0].Purchasable)
+}
+
+// --- T021: whole-sets-only — quota 5 with quantity_per_unit 2 = 2, not 3 ---
+
+func TestPackageAvailabilityUsesWholeSetsOnly(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := event.NewRepository(pool)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "whole-sets", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "General", "15000.00", 5)
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Pair Pack", "25000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, tt.ID, ev.ID, 2)
+
+	packages, err := repo.ListPackagesWithAvailabilityByEventID(ctx, ev.ID)
+
+	require.NoError(t, err)
+	require.Len(t, packages, 1)
+	assert.Equal(t, int32(2), packages[0].AvailableUnits,
+		"5 / 2 = 2 whole sets, not 3 (integer division truncates)")
+}
+
+// --- T022: componentless package returns 0 units, not absent ---------------
+
+func TestComponentlessPackageReturnsZeroUnitsNotAbsent(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := event.NewRepository(pool)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "no-components", "PUBLISHED")
+	_ = testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "10000.00", 10)
+	_ = testsupport.SeedPackage(t, pool, ev.ID, "Empty Bundle", "5000.00", "ACTIVE")
+	// No SeedPackageTicket — zero components.
+
+	packages, err := repo.ListPackagesWithAvailabilityByEventID(ctx, ev.ID)
+
+	require.NoError(t, err)
+	require.Len(t, packages, 1, "componentless package must still appear")
+	assert.Equal(t, int32(0), packages[0].AvailableUnits)
+	assert.False(t, *packages[0].Purchasable,
+		"componentless package is not purchasable")
+}
+
+// T063 (FR-015): a package component referencing another event's ticket type is
+// unrepresentable at the data layer. The composite FK on
+// package_tickets(ticket_type_id, event_id) rejects it even when application
+// validation is bypassed and the write goes straight to the repository.
+func TestPackageComponentFromAnotherEventFailsAtTheDatabase(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := event.NewRepository(pool)
+	ctx := context.Background()
+
+	eventA := testsupport.SeedEvent(t, pool, "cross-a", "PUBLISHED")
+	eventB := testsupport.SeedEvent(t, pool, "cross-b", "PUBLISHED")
+	_ = testsupport.SeedTicketType(t, pool, eventA.ID, "Day 1", "30000.00", 10)
+	ttInB := testsupport.SeedTicketType(t, pool, eventB.ID, "Day 2", "30000.00", 10)
+
+	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		pkg, err := repo.CreatePackage(ctx, tx, event.AdminPackageParams{
+			EventID:    eventA.ID,
+			Name:       "Cross-event bundle",
+			Price:      decimal.NewFromInt(50000),
+			SalesStart: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			SalesEnd:   time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+			Status:     "ACTIVE",
+		})
+		if err != nil {
+			return err
+		}
+		// The only component is eventB's ticket: the pair (ticket_type_id,
+		// event_id) does not exist in ticket_types, so the composite FK rejects it.
+		return repo.ReplacePackageComponents(ctx, tx, pkg.ID, eventA.ID, []event.AdminPackageComponentParams{
+			{TicketTypeID: ttInB.ID, QuantityPerUnit: 1},
+		})
+	})
+
+	require.Error(t, err, "cross-event composition must fail at the database")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "23503", pgErr.Code,
+		"a foreign key violation is expected, not a silent success or an unrelated error")
 }

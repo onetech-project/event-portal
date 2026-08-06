@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -49,6 +50,42 @@ func (a eventProviderAdapter) CheckAndDeductQuota(ctx context.Context, tx pgx.Tx
 
 func (a eventProviderAdapter) RestoreQuota(ctx context.Context, tx pgx.Tx, id uuid.UUID, qty int32) error {
 	return a.svc.RestoreQuota(ctx, tx, id, qty)
+}
+
+func (a eventProviderAdapter) CurrentTerms(ctx context.Context, eventID uuid.UUID) (order.EventTermsInfo, error) {
+	row, err := a.svc.CurrentTermsForEvent(ctx, eventID)
+	if errors.Is(err, event.ErrNotFound) {
+		return order.EventTermsInfo{}, order.ErrNoTerms
+	}
+	if err != nil {
+		return order.EventTermsInfo{}, err
+	}
+	return order.EventTermsInfo{ID: row.ID, EventID: eventID}, nil
+}
+
+func (a eventProviderAdapter) PackageForCheckout(ctx context.Context, tx pgx.Tx, id uuid.UUID) (order.PackageInfo, error) {
+	row, err := a.svc.GetPackageForCheckout(ctx, tx, id)
+	if err != nil {
+		return order.PackageInfo{}, err
+	}
+	components := make([]order.PackageComponentInfo, len(row.Components))
+	for i, c := range row.Components {
+		components[i] = order.PackageComponentInfo{
+			TicketTypeID: c.TicketTypeID,
+			Quantity:     c.PerUnit,
+			SalesStart:   c.SalesStart,
+			SalesEnd:     c.SalesEnd,
+		}
+	}
+	return order.PackageInfo{
+		ID:         row.ID,
+		EventID:    row.EventID,
+		Name:       row.Name,
+		Price:      row.Price,
+		SalesStart: row.SalesStart,
+		SalesEnd:   row.SalesEnd,
+		Components: components,
+	}, nil
 }
 
 // fakeGateway stands in for the payment provider so checkout can be driven through
@@ -133,6 +170,20 @@ func (f checkoutFixture) seedSellableEvent(t *testing.T, quota int32) testsuppor
 	return testsupport.SeedTicketType(t, f.pool, ev.ID, "Regular", "150000.00", quota)
 }
 
+// seedBundleEvent seeds an event with two ticket types and a bundle over both
+// (Day 1 + Day 2, quantity_per_unit 1 each). Returns the event, both ticket
+// types and the package.
+func (f checkoutFixture) seedBundleEvent(t *testing.T, day1Quota, day2Quota int32) (testsupport.Event, testsupport.TicketType, testsupport.TicketType, testsupport.Package) {
+	t.Helper()
+	ev := testsupport.SeedEvent(t, f.pool, "bundle-event", "PUBLISHED")
+	day1 := testsupport.SeedTicketType(t, f.pool, ev.ID, "Day 1", "30000.00", day1Quota)
+	day2 := testsupport.SeedTicketType(t, f.pool, ev.ID, "Day 2", "20000.00", day2Quota)
+	pkg := testsupport.SeedPackage(t, f.pool, ev.ID, "Day 1+2 Bundle", "50000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, f.pool, pkg.ID, day1.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, f.pool, pkg.ID, day2.ID, ev.ID, 1)
+	return ev, day1, day2, pkg
+}
+
 func checkoutFor(tt testsupport.TicketType, quantity int32) order.CheckoutRequest {
 	attendees := make([]order.CheckoutAttendee, 0, quantity)
 	for range int(quantity) {
@@ -146,7 +197,26 @@ func checkoutFor(tt testsupport.TicketType, quantity int32) order.CheckoutReques
 		BuyerName:  "Budi Santoso",
 		BuyerEmail: "budi@example.com",
 		BuyerPhone: "+628123456789",
-		Items:      []order.CheckoutItem{{TicketTypeID: tt.ID, Quantity: quantity}},
+		Items:      []order.CheckoutItem{{TicketTypeID: &tt.ID, Quantity: quantity}},
+		Attendees:  attendees,
+	}
+}
+
+// bundleCheckoutFor builds a request buying quantity units of a package with
+// constituents day1 and day2, one attendee per constituent unit.
+func bundleCheckoutFor(pkg testsupport.Package, day1, day2 testsupport.TicketType, quantity int32) order.CheckoutRequest {
+	var attendees []order.CheckoutAttendee
+	for range int(quantity) {
+		attendees = append(attendees,
+			order.CheckoutAttendee{TicketTypeID: day1.ID, PackageID: &pkg.ID, Name: "Budi", Email: "budi@example.com"},
+			order.CheckoutAttendee{TicketTypeID: day2.ID, PackageID: &pkg.ID, Name: "Siti", Email: "siti@example.com"},
+		)
+	}
+	return order.CheckoutRequest{
+		BuyerName:  "Budi Santoso",
+		BuyerEmail: "budi@example.com",
+		BuyerPhone: "+628123456789",
+		Items:      []order.CheckoutItem{{PackageID: &pkg.ID, Quantity: quantity}},
 		Attendees:  attendees,
 	}
 }
@@ -207,8 +277,8 @@ func TestCheckoutPricesFromTheServerNotTheClient(t *testing.T) {
 		BuyerEmail: "budi@example.com",
 		BuyerPhone: "+62812",
 		Items: []order.CheckoutItem{
-			{TicketTypeID: regular.ID, Quantity: 2},
-			{TicketTypeID: vip.ID, Quantity: 1},
+			{TicketTypeID: &regular.ID, Quantity: 2},
+			{TicketTypeID: &vip.ID, Quantity: 1},
 		},
 		Attendees: []order.CheckoutAttendee{
 			{TicketTypeID: regular.ID, Name: "A", Email: "a@example.com"},
@@ -283,8 +353,8 @@ func TestCheckoutRollsBackEveryDeductionWhenOneLineIsShort(t *testing.T) {
 	req := order.CheckoutRequest{
 		BuyerName: "Budi", BuyerEmail: "budi@example.com", BuyerPhone: "+62812",
 		Items: []order.CheckoutItem{
-			{TicketTypeID: plenty.ID, Quantity: 2},
-			{TicketTypeID: scarce.ID, Quantity: 2},
+			{TicketTypeID: &plenty.ID, Quantity: 2},
+			{TicketTypeID: &scarce.ID, Quantity: 2},
 		},
 		Attendees: []order.CheckoutAttendee{
 			{TicketTypeID: plenty.ID, Name: "A", Email: "a@example.com"},
@@ -307,7 +377,7 @@ func TestCheckoutRejectsAnUnknownTicketType(t *testing.T) {
 
 	req := checkoutFor(tt, 1)
 	ghost := uuid.New()
-	req.Items[0].TicketTypeID = ghost
+	req.Items[0].TicketTypeID = &ghost
 	req.Attendees[0].TicketTypeID = ghost
 
 	_, err := f.svc.Checkout(context.Background(), req)
@@ -462,6 +532,99 @@ func TestConcurrentCheckoutsGetDistinctOrderNumbers(t *testing.T) {
 	}
 }
 
+// T048: N goroutines contend for one remaining complete set; exactly one wins,
+// quotas land at 0, never negative (SC-003, SC-004). The whole-set guarantee is
+// what stops a bundle from being split across two buyers.
+func TestConcurrentBundleCheckoutsCannotOversell(t *testing.T) {
+	f := newCheckoutFixture(t)
+	_, day1, day2, pkg := f.seedBundleEvent(t, 1, 1)
+	ctx := context.Background()
+
+	const buyers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, buyers)
+	for i := range buyers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = f.svc.Checkout(ctx, bundleCheckoutFor(pkg, day1, day2, 1))
+		}()
+	}
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+
+	assert.Equal(t, 1, succeeded, "exactly one buyer may win the last complete set")
+	assert.Equal(t, int32(0), testsupport.QuotaOf(t, f.pool, day1.ID), "never negative")
+	assert.Equal(t, int32(0), testsupport.QuotaOf(t, f.pool, day2.ID), "never negative")
+}
+
+// T049: two overlapping bundles (Day1+Day2, Day2+Day3) bought concurrently over
+// many iterations must produce zero SQLSTATE 40P01 deadlock errors — the
+// ascending ticket_type_id lock order makes the two transactions always touch
+// the shared Day 2 row in the same direction.
+func TestOverlappingBundlesNeverDeadlock(t *testing.T) {
+	f := newCheckoutFixture(t)
+	ev := testsupport.SeedEvent(t, f.pool, "overlap", "PUBLISHED")
+	day1 := testsupport.SeedTicketType(t, f.pool, ev.ID, "Day 1", "30000.00", 100)
+	day2 := testsupport.SeedTicketType(t, f.pool, ev.ID, "Day 2", "20000.00", 100)
+	day3 := testsupport.SeedTicketType(t, f.pool, ev.ID, "Day 3", "20000.00", 100)
+
+	pkgA := testsupport.SeedPackage(t, f.pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, f.pool, pkgA.ID, day1.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, f.pool, pkgA.ID, day2.ID, ev.ID, 1)
+
+	pkgB := testsupport.SeedPackage(t, f.pool, ev.ID, "Day 2+3", "40000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, f.pool, pkgB.ID, day2.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, f.pool, pkgB.ID, day3.ID, ev.ID, 1)
+
+	ctx := context.Background()
+	const iterations = 25
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var deadlockErrors int
+
+	for range iterations {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := f.svc.Checkout(ctx, bundleCheckoutFor(pkgA, day1, day2, 1))
+			if isDeadlockError(err) {
+				mu.Lock()
+				deadlockErrors++
+				mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := f.svc.Checkout(ctx, bundleCheckoutFor(pkgB, day2, day3, 1))
+			if isDeadlockError(err) {
+				mu.Lock()
+				deadlockErrors++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Zero(t, deadlockErrors, "ascending lock order must prevent SQLSTATE 40P01")
+	assert.GreaterOrEqual(t, testsupport.QuotaOf(t, f.pool, day2.ID), int32(0), "shared constituent never oversold")
+}
+
+// isDeadlockError reports whether err is a Postgres deadlock (SQLSTATE 40P01).
+func isDeadlockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "40P01"
+}
+
 func allOrders(t *testing.T, pool *testsupport.Pool) []string {
 	t.Helper()
 	rows, err := pool.Query(context.Background(), `SELECT status FROM orders ORDER BY created_at`)
@@ -475,4 +638,130 @@ func allOrders(t *testing.T, pool *testsupport.Pool) []string {
 		out = append(out, status)
 	}
 	return out
+}
+
+// --- Bundle checkout (US3) --------------------------------------------------
+
+// T045: a bundle checkout deducts each constituent and records ONE order_items
+// row at the package's own price.
+func TestCheckoutBundleDeductsConstituentsAndStoresOnePackageLine(t *testing.T) {
+	f := newCheckoutFixture(t)
+	_, day1, day2, pkg := f.seedBundleEvent(t, 5, 5)
+	ctx := context.Background()
+
+	req := order.CheckoutRequest{
+		BuyerName:  "Budi Santoso",
+		BuyerEmail: "budi@example.com",
+		BuyerPhone: "+628123456789",
+		Items: []order.CheckoutItem{
+			{PackageID: &pkg.ID, Quantity: 1},
+		},
+		Attendees: []order.CheckoutAttendee{
+			{TicketTypeID: day1.ID, PackageID: &pkg.ID, Name: "Budi", Email: "budi@example.com"},
+			{TicketTypeID: day2.ID, PackageID: &pkg.ID, Name: "Siti", Email: "siti@example.com"},
+		},
+	}
+
+	resp, err := f.svc.Checkout(ctx, req)
+
+	require.NoError(t, err)
+	assert.Equal(t, "50000.00", resp.TotalAmount.String())
+	assert.Equal(t, int32(4), testsupport.QuotaOf(t, f.pool, day1.ID), "Day 1 deducted")
+	assert.Equal(t, int32(4), testsupport.QuotaOf(t, f.pool, day2.ID), "Day 2 deducted")
+
+	stored, err := f.repo.GetOrderByNumber(ctx, resp.OrderNumber)
+	require.NoError(t, err)
+	items, err := f.repo.ListOrderItemsByOrderID(ctx, stored.ID)
+	require.NoError(t, err)
+	require.Len(t, items, 1, "one order_items row per selected line, not per constituent")
+	assert.True(t, items[0].Ref.IsPackage())
+	assert.Equal(t, pkg.ID, items[0].Ref.PackageID.UUID)
+	assert.Equal(t, int32(1), items[0].Quantity)
+	assert.Equal(t, "50000.00", items[0].Price.StringFixed(2))
+}
+
+// T046: attendee counts grouped by (ticket_type_id, package_id) must equal the
+// server's expansion — one too few and one too many both rejected.
+func TestCheckoutBundleRejectsWrongAttendeeCounts(t *testing.T) {
+	f := newCheckoutFixture(t)
+	_, day1, day2, pkg := f.seedBundleEvent(t, 5, 5)
+	ctx := context.Background()
+
+	valid := order.CheckoutRequest{
+		BuyerName:  "Budi",
+		BuyerEmail: "budi@example.com",
+		BuyerPhone: "+62812",
+		Items: []order.CheckoutItem{
+			{PackageID: &pkg.ID, Quantity: 1},
+		},
+		Attendees: []order.CheckoutAttendee{
+			{TicketTypeID: day1.ID, PackageID: &pkg.ID, Name: "A", Email: "a@example.com"},
+			{TicketTypeID: day2.ID, PackageID: &pkg.ID, Name: "B", Email: "b@example.com"},
+		},
+	}
+
+	assertBundleMismatch := func(t *testing.T, req order.CheckoutRequest) {
+		t.Helper()
+		_, err := f.svc.Checkout(ctx, req)
+		var appErr *apperr.Error
+		require.True(t, errors.As(err, &appErr), "expected an *apperr.Error, got %v", err)
+		assert.Equal(t, apperr.CodeAttendeeCountMismatch, appErr.Code)
+		assert.Equal(t, int32(5), testsupport.QuotaOf(t, f.pool, day1.ID), "no quota consumed")
+		assert.Equal(t, int32(5), testsupport.QuotaOf(t, f.pool, day2.ID), "no quota consumed")
+		assert.Zero(t, f.gateway.callCount(), "no gateway call for a rejected bundle")
+	}
+
+	t.Run("one too few", func(t *testing.T) {
+		req := valid
+		req.Attendees = req.Attendees[:1]
+		assertBundleMismatch(t, req)
+	})
+
+	t.Run("one too many", func(t *testing.T) {
+		req := valid
+		req.Attendees = append(req.Attendees,
+			order.CheckoutAttendee{TicketTypeID: day1.ID, PackageID: &pkg.ID, Name: "C", Email: "c@example.com"})
+		assertBundleMismatch(t, req)
+	})
+
+	t.Run("wrong constituent", func(t *testing.T) {
+		req := valid
+		req.Attendees[1].TicketTypeID = day1.ID // two for Day 1, none for Day 2
+		assertBundleMismatch(t, req)
+	})
+}
+
+// T047: a cart whose bundle is available but whose standalone ticket is not
+// leaves no quota consumed anywhere — TX1 is all or nothing.
+func TestCheckoutBundleAvailableButStandaloneUnavailableConsumesNothing(t *testing.T) {
+	f := newCheckoutFixture(t)
+	_, day1, day2, pkg := f.seedBundleEvent(t, 5, 5)
+	ctx := context.Background()
+
+	closed := testsupport.SeedTicketTypeWindow(t, f.pool, day1.EventID, "Closed Early", 10,
+		time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+
+	req := order.CheckoutRequest{
+		BuyerName:  "Budi",
+		BuyerEmail: "budi@example.com",
+		BuyerPhone: "+62812",
+		Items: []order.CheckoutItem{
+			{PackageID: &pkg.ID, Quantity: 1},
+			{TicketTypeID: &closed.ID, Quantity: 1},
+		},
+		Attendees: []order.CheckoutAttendee{
+			{TicketTypeID: day1.ID, PackageID: &pkg.ID, Name: "A", Email: "a@example.com"},
+			{TicketTypeID: day2.ID, PackageID: &pkg.ID, Name: "B", Email: "b@example.com"},
+			{TicketTypeID: closed.ID, Name: "C", Email: "c@example.com"},
+		},
+	}
+
+	_, err := f.svc.Checkout(ctx, req)
+
+	require.Error(t, err)
+	assert.Equal(t, int32(5), testsupport.QuotaOf(t, f.pool, day1.ID),
+		"bundle constituent must not be consumed by a rejected cart")
+	assert.Equal(t, int32(5), testsupport.QuotaOf(t, f.pool, day2.ID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, closed.ID))
+	assert.Zero(t, f.gateway.callCount(), "no gateway call for a rejected cart")
 }

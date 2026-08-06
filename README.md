@@ -179,11 +179,13 @@ apply.
 - **`ticket_types.quota` is the REMAINING quota**, not an original allocation.
   Checkout decrements it; cancel, expire, deny, and failure restore it. There is
   no stored total, and `sold` is always derived from `SUM(order_items.quantity)`.
-- **Checkout is TX1 → gateway → TX2.** Order, items, attendees, and the quota
-  deduction commit together; the provider call happens outside any transaction
-  (holding a quota row lock across a network round trip would serialize every
-  concurrent buyer), and a failed call is compensated by cancelling the order and
-  restoring its quota.
+- **Booking and payment are separate calls since spec 008.** `POST /ticket/book`
+  commits order, items, empty attendee slots, and the quota deduction together
+  with a 1-hour hold; `POST /ticket/checkout/:order_id` saves the visitor forms
+  and only then calls the provider, outside any transaction (holding a quota row
+  lock across a network round trip would serialize every concurrent buyer). A
+  failed provider call keeps the hold and the saved forms — the guest retries
+  from the same order.
 - **The webhook is idempotent.** An already-`PAID` order short-circuits, and every
   status change is guarded on the order still being `PENDING`, so a replayed
   notification cannot restore quota twice.
@@ -193,7 +195,7 @@ apply.
   is what lets them race without restoring quota twice or issuing two sets of
   tickets.
 - **The guest never leaves the site to pay.** Checkout opens a QRIS charge and
-  routes to `/orders/{order_number}`, which renders the QR from the stored payload
+  routes to `/events/{slug}/orders/{order_number}`, which renders the QR from the stored payload
   on demand, counts down to the server's deadline, and polls until the status is
   final.
 - **No object storage exists.** `tickets.qr_code_url` stays NULL and QR images are

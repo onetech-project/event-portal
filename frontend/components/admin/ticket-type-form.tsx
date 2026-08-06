@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
 import { StatusAlert } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ApiError } from "@/lib/api-client";
 import { toApiDateTime, toDateTimeLocal } from "@/lib/format";
 import { useCreateTicketType, useUpdateTicketType } from "@/lib/queries";
@@ -47,6 +48,7 @@ export function TicketTypeForm({
     resolver: zodResolver(ticketTypeFormSchema),
     defaultValues: {
       name: ticketType?.name ?? "",
+      description: ticketType?.description ?? "",
       price: ticketType?.price ?? "",
       quota: ticketType?.quota ?? 0,
       salesStart: toDateTimeLocal(ticketType?.sales_start),
@@ -59,6 +61,9 @@ export function TicketTypeForm({
       // event_id is immutable on update and ignored by the server there.
       event_id: eventId,
       name: values.name,
+      // Sent even when blank so clearing the field clears the stored remark; the
+      // server normalises whitespace-only input back to null.
+      description: values.description ?? "",
       price: values.price,
       quota: values.quota,
       sales_start: toApiDateTime(values.salesStart),
@@ -97,6 +102,16 @@ export function TicketTypeForm({
           <Field label="Price (IDR)" error={errors.price?.message}>
             <Input inputMode="decimal" {...register("price")} />
           </Field>
+
+          <Field
+            label="Remark"
+            error={errors.description?.message}
+            hint="Shown on the booking card instead of the standard non-refundable notice. Leave blank to keep that wording."
+          >
+            <Textarea rows={2} {...register("description")} />
+          </Field>
+
+          <div />
 
           <Field
             label="Sisa Kuota / Remaining Quota"

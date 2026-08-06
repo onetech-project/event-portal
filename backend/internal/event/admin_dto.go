@@ -35,6 +35,7 @@ type EventAdminView struct {
 	EndDate     time.Time  `json:"end_date"`
 	BannerURL   *string    `json:"banner_url"`
 	Status      string     `json:"status"`
+	Scale       *int64     `json:"scale"`
 	CreatedAt   *time.Time `json:"created_at"`
 	UpdatedAt   *time.Time `json:"updated_at"`
 }
@@ -55,14 +56,16 @@ type EventAdminDetail struct {
 // Sold is derived (SUM(order_items.quantity)) and read-only; it is supplied for
 // context and ignored if a client sends it back.
 type TicketTypeAdminView struct {
-	ID         uuid.UUID   `json:"id"`
-	EventID    uuid.UUID   `json:"event_id"`
-	Name       string      `json:"name"`
-	Price      money.Money `json:"price"`
-	Quota      int32       `json:"quota"`
-	Sold       int         `json:"sold"`
-	SalesStart time.Time   `json:"sales_start"`
-	SalesEnd   time.Time   `json:"sales_end"`
+	ID      uuid.UUID `json:"id"`
+	EventID uuid.UUID `json:"event_id"`
+	Name    string    `json:"name"`
+	// Description replaces the booking card's standard non-refundable notice.
+	Description *string     `json:"description"`
+	Price       money.Money `json:"price"`
+	Quota       int32       `json:"quota"`
+	Sold        int         `json:"sold"`
+	SalesStart  time.Time   `json:"sales_start"`
+	SalesEnd    time.Time   `json:"sales_end"`
 }
 
 // EventRequest is the create/update body for an event. Both verbs take the same
@@ -80,6 +83,9 @@ type EventRequest struct {
 	EndDate     time.Time `json:"end_date"`
 	BannerURL   *string   `json:"banner_url"`
 	Status      string    `json:"status"`
+	// Scale is the expected visitor count for the detail page's info bar
+	// ("30.000+ Visitors", Figma 4-5). Optional; null clears it.
+	Scale *int64 `json:"scale"`
 }
 
 // Validate checks everything decidable without the database. Slug uniqueness is
@@ -123,12 +129,15 @@ func (r EventRequest) Validate() error {
 // Quota is the absolute remaining quota: the server never re-subtracts past sales
 // from the submitted value.
 type TicketTypeRequest struct {
-	EventID    uuid.UUID   `json:"event_id"`
-	Name       string      `json:"name"`
-	Price      money.Money `json:"price"`
-	Quota      int32       `json:"quota"`
-	SalesStart time.Time   `json:"sales_start"`
-	SalesEnd   time.Time   `json:"sales_end"`
+	EventID uuid.UUID `json:"event_id"`
+	Name    string    `json:"name"`
+	// Description replaces the booking card's standard non-refundable notice for
+	// this ticket. Optional: blank keeps the standard wording.
+	Description *string     `json:"description"`
+	Price       money.Money `json:"price"`
+	Quota       int32       `json:"quota"`
+	SalesStart  time.Time   `json:"sales_start"`
+	SalesEnd    time.Time   `json:"sales_end"`
 }
 
 // Validate checks the fields that do not require a database lookup. Whether
@@ -153,4 +162,133 @@ func (r TicketTypeRequest) Validate(requireEventID bool) error {
 		return apperr.BadRequest(apperr.CodeInvalidDateRange, "sales_end must not be before sales_start.")
 	}
 	return nil
+}
+
+// Package statuses, matching the CHECK constraint on packages.status.
+const (
+	PackageStatusActive   = "ACTIVE"
+	PackageStatusInactive = "INACTIVE"
+)
+
+// PackageComponentRequest is one constituent line of a package create/update
+// body. QuantityPerUnit is how many of the ticket one package unit consumes.
+type PackageComponentRequest struct {
+	TicketTypeID    uuid.UUID `json:"ticket_type_id"`
+	QuantityPerUnit int32     `json:"quantity_per_unit"`
+}
+
+// PackageRequest is the create/update body for a package.
+//
+// EventID is required on create and immutable on update, where it is ignored.
+// Price is the package's all-in price and is deliberately NOT validated against
+// the sum of its constituents. There is no quota field because a package has
+// none — a request that carries any quota-like field is rejected, not ignored
+// (FR-036).
+type PackageRequest struct {
+	EventID     uuid.UUID                 `json:"event_id"`
+	Name        string                    `json:"name"`
+	Description *string                   `json:"description"`
+	Price       money.Money               `json:"price"`
+	SalesStart  time.Time                 `json:"sales_start"`
+	SalesEnd    time.Time                 `json:"sales_end"`
+	Status      string                    `json:"status"`
+	Components  []PackageComponentRequest `json:"components"`
+}
+
+// quotaLikeKeys are request keys that would smuggle inventory onto a package.
+// FR-036 says reject rather than silently ignore, because ignoring a quota field
+// trains a client to believe packages hold stock.
+var quotaLikeKeys = map[string]bool{
+	"quota": true, "stock": true, "inventory": true, "remaining": true, "capacity": true,
+}
+
+// Validate checks everything decidable without the database, and rejects any
+// quota-like field that slipped through decoding.
+func (r PackageRequest) Validate(requireEventID bool) error {
+	if requireEventID && r.EventID == uuid.Nil {
+		return apperr.BadRequest(apperr.CodeValidation, "event_id is required.")
+	}
+	if strings.TrimSpace(r.Name) == "" {
+		return apperr.BadRequest(apperr.CodeValidation, "name is required.")
+	}
+	if r.Price.Decimal().IsNegative() {
+		return apperr.BadRequest(apperr.CodeValidation, "price must not be negative.")
+	}
+	if r.SalesStart.IsZero() || r.SalesEnd.IsZero() {
+		return apperr.BadRequest(apperr.CodeValidation, "sales_start and sales_end are required.")
+	}
+	if r.SalesEnd.Before(r.SalesStart) {
+		return apperr.BadRequest(apperr.CodeInvalidDateRange, "sales_end must not be before sales_start.")
+	}
+	switch r.Status {
+	case PackageStatusActive, PackageStatusInactive:
+	default:
+		return apperr.BadRequest(apperr.CodeValidation,
+			fmt.Sprintf("status must be one of %s or %s.", PackageStatusActive, PackageStatusInactive))
+	}
+	if len(r.Components) == 0 {
+		return apperr.BadRequest(apperr.CodeValidation, "components must not be empty: a bundle needs at least one constituent.")
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(r.Components))
+	for i, component := range r.Components {
+		if component.TicketTypeID == uuid.Nil {
+			return apperr.BadRequest(apperr.CodeValidation,
+				fmt.Sprintf("components[%d].ticket_type_id is required.", i))
+		}
+		if component.QuantityPerUnit < 1 {
+			return apperr.BadRequest(apperr.CodeValidation,
+				fmt.Sprintf("components[%d].quantity_per_unit must be at least 1.", i))
+		}
+		if _, dup := seen[component.TicketTypeID]; dup {
+			return apperr.BadRequest(apperr.CodeValidation,
+				fmt.Sprintf("Ticket type %s appears more than once in components; combine repeats into quantity_per_unit.", component.TicketTypeID))
+		}
+		seen[component.TicketTypeID] = struct{}{}
+	}
+	return nil
+}
+
+// PackageAdminDTO is the administrator's view of a package. It too has no quota
+// field — the admin surface must never present or accept one (FR-036).
+type PackageAdminDTO struct {
+	ID             string                `json:"id"`
+	EventID        string                `json:"event_id"`
+	Name           string                `json:"name"`
+	Description    *string               `json:"description"`
+	Price          money.Money           `json:"price"`
+	SalesStart     time.Time             `json:"sales_start"`
+	SalesEnd       time.Time             `json:"sales_end"`
+	Status         string                `json:"status"`
+	Components     []PackageComponentDTO `json:"components"`
+	AvailableUnits int32                 `json:"available_units"`
+	Sold           int32                 `json:"sold"`
+	CreatedAt      *time.Time            `json:"created_at"`
+	UpdatedAt      *time.Time            `json:"updated_at"`
+}
+
+// PackageAvailabilityView is the diagnostic response for a single package
+// (GET /admin/packages/:id/availability): why it is or is not offered.
+type PackageAvailabilityView struct {
+	PackageID          string                         `json:"package_id"`
+	AvailableUnits     int32                          `json:"available_units"`
+	Purchasable        bool                           `json:"purchasable"`
+	LimitingTicketType *PackageLimitingTicket         `json:"limiting_ticket_type"`
+	Components         []PackageAvailabilityComponent `json:"components"`
+}
+
+// PackageLimitingTicket names the scarcest constituent.
+type PackageLimitingTicket struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	QuotaRemaining int32  `json:"quota_remaining"`
+}
+
+// PackageAvailabilityComponent shows one constituent's contribution.
+type PackageAvailabilityComponent struct {
+	TicketTypeID    string `json:"ticket_type_id"`
+	Name            string `json:"name"`
+	QuotaRemaining  int32  `json:"quota_remaining"`
+	QuantityPerUnit int32  `json:"quantity_per_unit"`
+	UnitsSupported  int32  `json:"units_supported"`
 }

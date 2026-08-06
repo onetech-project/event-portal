@@ -61,7 +61,7 @@ func TestWebhookEndpointReturns401ForAnInvalidSignature(t *testing.T) {
 
 	var body apperr.Body
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, apperr.CodeInvalidSignature, body.ErrorCode)
+	assert.Equal(t, apperr.Numeric(rec.Code, apperr.CodeInvalidSignature), body.Code)
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 }
 

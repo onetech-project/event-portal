@@ -17,7 +17,7 @@ const STATUSES = ["DRAFT", "PUBLISHED", "COMPLETED"] as const;
 /**
  * The event status picker, shared by the create and edit forms.
  *
- * Radix's Select holds its own value rather than exposing a native input, so it
+ * BaseUI's Select holds its own value rather than exposing a native input, so it
  * goes through a Controller instead of register().
  */
 export function EventStatusField({

@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
@@ -52,7 +51,7 @@ func TestExceedingTheBurstReturns429(t *testing.T) {
 	rec := requestFrom(e, "203.0.113.20")
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, apperr.CodeRateLimited, decodeBody(t, rec).ErrorCode)
+	assert.Equal(t, 429001, decodeBody(t, rec).Code)
 }
 
 // One abusive client must not lock everyone else out.
@@ -75,6 +74,6 @@ func TestTheRateLimitErrorUsesTheStandardEnvelope(t *testing.T) {
 	rec := requestFrom(e, "203.0.113.40")
 
 	body := decodeBody(t, rec)
-	assert.Equal(t, apperr.CodeRateLimited, body.ErrorCode)
+	assert.Equal(t, 429001, body.Code)
 	assert.NotEmpty(t, body.Message)
 }

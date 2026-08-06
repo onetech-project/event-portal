@@ -84,10 +84,10 @@ func TestCreateOrderItemsAndAttendeesShareTheOrdersTransaction(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := repo.CreateOrderItem(ctx, tx, created.ID, tt.ID, 2, tt.Price); err != nil {
+		if err := repo.CreateOrderItem(ctx, tx, created.ID, order.TicketLine(tt.ID), 2, tt.Price); err != nil {
 			return err
 		}
-		if _, err := repo.CreateAttendee(ctx, tx, created.ID, tt.ID, "A", "a@example.com"); err != nil {
+		if _, err := repo.CreateAttendee(ctx, tx, created.ID, order.AttendeeRef{TicketTypeID: tt.ID}, "A", "a@example.com"); err != nil {
 			return err
 		}
 		return assert.AnError // abort the whole checkout
@@ -291,7 +291,7 @@ func TestListOrderItemsAndAttendees(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.Equal(t, int32(2), items[0].Quantity)
-	assert.Equal(t, tt.ID, items[0].TicketTypeID)
+	assert.Equal(t, tt.ID, items[0].Ref.TicketTypeID.UUID)
 
 	attendees, err := repo.ListAttendeesByOrderID(ctx, ord.ID)
 	require.NoError(t, err)
@@ -452,4 +452,43 @@ func TestSoldCountByTicketTypesHandlesAnEmptyRequest(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, counts)
+}
+
+// T050: ListQuotaHoldsByOrderID expands package lines through the junction and
+// returns the exact inverse of what checkout deducted — a package line of
+// quantity q over components c1..cN holds q × ci.quantity of each ci.
+func TestListQuotaHoldsByOrderIDExpandsPackageLines(t *testing.T) {
+	repo, pool := newRepo(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "quota-holds", "PUBLISHED")
+	ttA := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 10)
+	ttB := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 10)
+	ttC := testsupport.SeedTicketType(t, pool, ev.ID, "Standalone", "15000.00", 10)
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, ttA.ID, ev.ID, 1)
+	testsupport.SeedPackageTicket(t, pool, pkg.ID, ttB.ID, ev.ID, 2)
+
+	ord := testsupport.SeedOrder(t, pool, "ORD-HOLDS", "PENDING")
+	// 2 package units → 2 × ttA, 2 × 2 = 4 × ttB.
+	testsupport.SeedOrderItemPackage(t, pool, ord.ID, pkg.ID, 2, decimal.NewFromInt(100000))
+	// Standalone 3 × ttC.
+	testsupport.SeedOrderItem(t, pool, ord.ID, ttC.ID, 3)
+
+	var holds []order.QuotaHold
+	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		var e error
+		holds, e = repo.ListQuotaHoldsByOrderID(ctx, tx, ord.ID)
+		return e
+	})
+	require.NoError(t, err)
+
+	got := map[uuid.UUID]int32{}
+	for _, h := range holds {
+		got[h.TicketTypeID] = h.Quantity
+	}
+	assert.Equal(t, int32(2), got[ttA.ID], "package quantity × quantity_per_unit (1)")
+	assert.Equal(t, int32(4), got[ttB.ID], "package quantity × quantity_per_unit (2)")
+	assert.Equal(t, int32(3), got[ttC.ID], "standalone line passes through unchanged")
+	assert.Len(t, holds, 3, "one hold per touched ticket type, package expanded, never one per package")
 }
