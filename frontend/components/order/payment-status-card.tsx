@@ -8,23 +8,26 @@ import type { OrderStatus } from "@/lib/types";
 
 type Props = {
   status: OrderStatus;
-  buyerEmail: string | null;
   eventSlug: string;
 };
 
 /**
  * What the guest sees once their order has settled — or, for a cancelled or
  * expired one, why it cannot be paid and what to do instead.
+ *
+ * Spec 011 FR-012: everything goes to the buyer — the first holder form's
+ * address. The copy says so without naming it, since the guest order read no
+ * longer exposes the buyer email.
  */
-export function PaymentStatusCard({ status, buyerEmail, eventSlug }: Readonly<Props>) {
+export function PaymentStatusCard({ status, eventSlug }: Readonly<Props>) {
   if (status === "PAID") {
     return (
       <Card>
         <CardContent className="space-y-4">
           <StatusAlert tone="success">
-            <span className="font-semibold">Payment successful.</span> Your tickets are
-            on their way to <span className="font-medium">{buyerEmail}</span> as a PDF,
-            with one QR code per attendee.
+            <span className="font-semibold">Payment successful.</span> Your invoice and
+            every e-ticket in this order are on their way to the email address on the
+            first ticket holder form, with one QR code per attendee.
           </StatusAlert>
 
           <p className="text-sm text-muted-foreground">

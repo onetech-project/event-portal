@@ -15,15 +15,42 @@ import (
 	"github.com/manjo/ticketing/backend/pkg/logger"
 )
 
-// OrderDelivery is the slice of an order this domain needs to address an email.
+// OrderDelivery is the slice of an order this domain needs to address and
+// itemize the receipt emails.
+//
+// BuyerName/BuyerEmail are the PRIMARY CONTACT — the topmost holder form's
+// snapshot (spec 011). Delivery goes to each holder's own attendee email;
+// BuyerEmail is only the defensive fallback for a slot with no address.
 type OrderDelivery struct {
 	ID          uuid.UUID
 	OrderNumber string
 	BuyerName   string
 	BuyerEmail  string
 	Status      string
-	// TotalAmount is what the buyer paid, printed on the receipt (Figma 251-2).
+	// TotalAmount is the charged amount, printed on every receipt (Figma 251-2).
 	TotalAmount decimal.Decimal
+	// Subtotal is the pre-fee sum of the lines; nil on pre-fee orders, which
+	// collapses the receipt's breakdown to the total only.
+	Subtotal *decimal.Decimal
+	// Items and Fees itemize the FULL order on every recipient's receipt
+	// (spec 011 FR-012: each holder receives the order receipt, complete and
+	// self-consistent, not a per-holder subset).
+	Items []ReceiptLine
+	Fees  []ReceiptFee
+}
+
+// ReceiptLine is one purchased order line as the receipt prints it.
+type ReceiptLine struct {
+	Name      string
+	Quantity  int32
+	UnitPrice decimal.Decimal
+	Subtotal  decimal.Decimal
+}
+
+// ReceiptFee is one frozen fee line, exactly as booking computed it.
+type ReceiptFee struct {
+	Name   string
+	Amount decimal.Decimal
 }
 
 // OrderProvider is the contract this domain needs from the order domain, declared
@@ -60,63 +87,84 @@ func NewService(orders OrderProvider, tickets TicketProvider, mailer Mailer, log
 	return &Service{orders: orders, tickets: tickets, mailer: mailer, log: log}
 }
 
-// SendTicketEmail delivers an order's tickets to its buyer as one PDF.
+// SendTicketEmail delivers an order's tickets to the BUYER (spec 011 FR-012,
+// constitution v3.0.0): exactly ONE email, addressed to the order's
+// primary-contact snapshot — the first holder form's address, that form being
+// ticket holder 1 and the buyer at once — carrying every ticket in the order as
+// a single PDF plus the full receipt. It returns that address, which the admin
+// resend surfaces as sent_to.
 //
-// This single path serves both the automatic post-payment send and the admin
-// resend, so the two can never drift apart. It is safely re-runnable: the existing
-// ticket_code values are reused verbatim and never regenerated, while each QR image
-// is re-rendered from its code at render time — a guest's original ticket stays
-// valid after any number of resends (specs/003 FR-011).
-func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) error {
+// The other attendees' email addresses are holder identity, not delivery
+// addresses: spec 011 briefly fanned delivery out across them and the
+// 2026-08-06 clarification reversed it. They are still collected and stored, so
+// widening delivery again would be a change here alone.
+//
+// This single path serves the automatic post-payment send and both resends, so
+// they can never drift apart. It is safely re-runnable: the existing
+// ticket_code values are reused verbatim and never regenerated, while each QR
+// image is re-rendered from its code at render time — a guest's original
+// ticket stays valid after any number of resends (specs/003 FR-011).
+func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) (string, error) {
 	order, err := s.orders.OrderForDelivery(ctx, orderID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Only PAID orders have generated tickets. PENDING, CANCELLED, and EXPIRED all
 	// fail here rather than sending an empty or misleading email.
 	if order.Status != "PAID" {
-		return apperr.BadRequest(apperr.CodeOrderNotPaid,
+		return "", apperr.BadRequest(apperr.CodeOrderNotPaid,
 			fmt.Sprintf("Tickets can only be sent for a paid order; this order is %s.", order.Status))
 	}
 
 	tickets, err := s.tickets.TicketDetailsForOrder(ctx, orderID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(tickets) == 0 {
-		return errors.New("notification: order is paid but has no tickets to deliver")
+		return "", errors.New("notification: order is paid but has no tickets to deliver")
 	}
 
+	// The buyer's snapshot address is the recipient. Checkout writes it from the
+	// first canonical slot's form, so it is exactly what the guest typed into
+	// the card carrying the "sent via email" notice. An empty snapshot would
+	// mean an order that never went through checkout — refuse rather than mail
+	// nobody and then mark the order delivered.
+	recipient := strings.TrimSpace(order.BuyerEmail)
+	if recipient == "" {
+		return "", errors.New("notification: order has no buyer email to deliver to")
+	}
+
+	// One PDF holding every ticket in the order.
 	pdf, err := RenderTicketsPDF(order, tickets)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("render tickets for %s: %w", order.OrderNumber, err)
 	}
 
 	if err := s.mailer.Send(Message{
-		To:       order.BuyerEmail,
+		To:       recipient,
 		Subject:  fmt.Sprintf("Your tickets for %s", tickets[0].EventName),
-		HTMLBody: buildEmailBody(order, tickets),
+		HTMLBody: buildEmailBody(order, tickets, recipient),
 		Attachments: []Attachment{{
 			Filename:    fmt.Sprintf("tickets-%s.pdf", order.OrderNumber),
 			ContentType: "application/pdf",
 			Content:     pdf,
 		}},
 	}); err != nil {
-		// Deliberately not marking email_sent: the flag means "the buyer has it".
-		return err
+		// email_sent stays FALSE, so resend remains armed.
+		return "", fmt.Errorf("send to %s: %w", recipient, err)
 	}
 
 	if err := s.orders.MarkEmailSent(ctx, orderID); err != nil {
 		// The email is genuinely out. Failing here would invite a retry that
-		// double-sends to the buyer, so the flag miss is logged instead.
+		// double-sends, so the flag miss is logged instead.
 		s.log.ErrorContext(ctx, "ticket email delivered but email_sent could not be recorded",
 			"order_number", order.OrderNumber, "order_id", orderID.String(), "error", err.Error())
 	}
 
 	s.log.InfoContext(ctx, "ticket email delivered",
 		"order_number", order.OrderNumber, "ticket_count", len(tickets))
-	return nil
+	return recipient, nil
 }
 
 // Receipt palette, mirrored from the frontend brand tokens so the email and the
@@ -127,11 +175,12 @@ const (
 	emailLine    = "#ecabbf"
 )
 
-// buildEmailBody renders the receipt + e-ticket email (Figma 251-2): a header
-// with the PAID badge and invoice number, the buyer and transaction details, one
-// e-ticket card per attendee, the amount paid, and a dark footer. Everything is
-// inline-styled tables — email clients ignore stylesheets.
-func buildEmailBody(order OrderDelivery, tickets []TicketDetail) string {
+// buildEmailBody renders the buyer's receipt + e-ticket email (Figma 251-2): a
+// header with the PAID badge and invoice number, every ticket holder in the
+// order, the transaction details, one e-ticket card per ticket, the full order
+// summary (every line + the frozen fee breakdown), and a dark footer. Everything
+// is inline-styled tables — email clients ignore stylesheets.
+func buildEmailBody(order OrderDelivery, tickets []TicketDetail, recipient string) string {
 	var sb strings.Builder
 	event := tickets[0]
 
@@ -148,14 +197,18 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail) string {
 	fmt.Fprintf(&sb, `<br>Inv: #%s`, html.EscapeString(order.OrderNumber))
 	sb.WriteString(`</td></tr></table></td></tr>`)
 
-	// Buyer + transaction details, two columns.
+	// Ticket holder(s) + transaction details, two columns. One name per distinct
+	// holder in this recipient's group (two holders may share one address —
+	// spec 011 edge case), addressed to the email this copy goes to.
 	sb.WriteString(`<tr><td style="padding:20px 28px;border-bottom:1px dashed #d4d4d8">`)
 	sb.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>`)
 	sb.WriteString(`<td valign="top" style="font-size:13px;color:#3f3f46">`)
-	sb.WriteString(`<div style="font-size:11px;letter-spacing:.5px;color:#a1a1aa;font-weight:bold">BUYER DETAILS</div>`)
-	fmt.Fprintf(&sb, `<div style="font-size:15px;font-weight:bold;padding-top:4px">%s</div>`,
-		html.EscapeString(order.BuyerName))
-	fmt.Fprintf(&sb, `<div>%s</div>`, html.EscapeString(order.BuyerEmail))
+	sb.WriteString(`<div style="font-size:11px;letter-spacing:.5px;color:#a1a1aa;font-weight:bold">TICKET HOLDER</div>`)
+	for _, name := range distinctHolderNames(tickets) {
+		fmt.Fprintf(&sb, `<div style="font-size:15px;font-weight:bold;padding-top:4px">%s</div>`,
+			html.EscapeString(name))
+	}
+	fmt.Fprintf(&sb, `<div>%s</div>`, html.EscapeString(recipient))
 	sb.WriteString(`</td>`)
 	sb.WriteString(`<td valign="top" style="font-size:13px;color:#3f3f46">`)
 	sb.WriteString(`<div style="font-size:11px;letter-spacing:.5px;color:#a1a1aa;font-weight:bold">TRANSACTION</div>`)
@@ -186,9 +239,29 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail) string {
 	sb.WriteString(`<div style="font-size:12px;color:#52525b;padding-top:10px">Your QR codes are in the attached PDF. Each ticket admits one person and can only be used once.</div>`)
 	sb.WriteString(`</td></tr>`)
 
-	// Amount paid.
+	// Order summary: the FULL order in every copy (spec 011 — the receipt each
+	// holder gets is the order receipt, not a per-holder subset). Pre-fee
+	// orders (nil subtotal) collapse to the Total Payment row alone.
 	sb.WriteString(`<tr><td style="padding:16px 28px">`)
-	sb.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e4e4e7"><tr>`)
+	sb.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #e4e4e7">`)
+	if order.Subtotal != nil {
+		for _, line := range order.Items {
+			fmt.Fprintf(&sb, `<tr><td style="font-size:13px;color:#3f3f46;padding-top:10px">%s <span style="color:#a1a1aa">x%d</span></td>`,
+				html.EscapeString(line.Name), line.Quantity)
+			fmt.Fprintf(&sb, `<td align="right" style="font-size:13px;color:#3f3f46;padding-top:10px">%s</td></tr>`,
+				formatIDR(line.Subtotal))
+		}
+		sb.WriteString(`<tr><td style="font-size:13px;font-weight:bold;padding-top:10px">Ticket Total</td>`)
+		fmt.Fprintf(&sb, `<td align="right" style="font-size:13px;font-weight:bold;padding-top:10px">%s</td></tr>`,
+			formatIDR(*order.Subtotal))
+		for _, fee := range order.Fees {
+			fmt.Fprintf(&sb, `<tr><td style="font-size:13px;color:#3f3f46;padding-top:6px">%s</td>`,
+				html.EscapeString(fee.Name))
+			fmt.Fprintf(&sb, `<td align="right" style="font-size:13px;color:#3f3f46;padding-top:6px">%s</td></tr>`,
+				formatIDR(fee.Amount))
+		}
+	}
+	sb.WriteString(`<tr>`)
 	sb.WriteString(`<td style="font-size:14px;font-weight:bold;padding-top:12px">Total Payment</td>`)
 	fmt.Fprintf(&sb, `<td align="right" style="font-size:18px;font-weight:bold;color:%s;padding-top:12px">%s</td>`,
 		emailBrand, formatIDR(order.TotalAmount))
@@ -201,6 +274,23 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail) string {
 
 	sb.WriteString(`</table></div>`)
 	return sb.String()
+}
+
+// distinctHolderNames returns the order's holder names in first-occurrence
+// order — a bundle unit's N identical rows contribute one name, while distinct
+// holders each contribute their own — so the buyer's email lists everyone the
+// passes are for.
+func distinctHolderNames(tickets []TicketDetail) []string {
+	seen := make(map[string]bool, len(tickets))
+	names := make([]string, 0, len(tickets))
+	for _, t := range tickets {
+		if seen[t.AttendeeName] {
+			continue
+		}
+		seen[t.AttendeeName] = true
+		names = append(names, t.AttendeeName)
+	}
+	return names
 }
 
 // formatIDR renders an amount the way the site does: "Rp 550.000". Rupiah has no

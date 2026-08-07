@@ -43,45 +43,6 @@ func NewPublicService(repo *Repository, events EventLookup) *PublicService {
 	return &PublicService{repo: repo, events: events, now: time.Now}
 }
 
-// OrderByNumber assembles the guest's view of one order.
-//
-// An unknown order number and an order that exists but cannot be shown produce
-// the identical 404, so the endpoint reveals nothing by comparison.
-func (s *PublicService) OrderByNumber(ctx context.Context, orderNumber string) (PublicOrderDetail, error) {
-	record, err := s.repo.GetOrderByNumber(ctx, orderNumber)
-	if errors.Is(err, ErrNotFound) {
-		return PublicOrderDetail{}, apperr.NotFound(apperr.CodeOrderNotFound, orderNotFoundMessage)
-	}
-	if err != nil {
-		return PublicOrderDetail{}, err
-	}
-
-	items, err := s.repo.ListOrderItemsByOrderID(ctx, record.ID)
-	if err != nil {
-		return PublicOrderDetail{}, err
-	}
-
-	displays, err := s.lineDisplays(ctx, items)
-	if err != nil {
-		return PublicOrderDetail{}, err
-	}
-
-	now := s.now()
-	detail := PublicOrderDetail{
-		OrderNumber: record.OrderNumber,
-		Status:      record.Status,
-		TotalAmount: money.From(record.TotalAmount),
-		BuyerName:   strv(record.BuyerName),
-		BuyerEmail:  strv(record.BuyerEmail),
-		CreatedAt:   record.CreatedAt,
-		Event:       eventOf(items, displays),
-		Items:       publicItems(items, displays),
-		ServerTime:  now.UTC(),
-		Payment:     s.paymentInstruction(record, now),
-	}
-	return detail, nil
-}
-
 // TicketOrderByNumber assembles the 008 guest order read
 // (GET /ticket/order/:order_id): status, live deadline, agreement stamp,
 // whether payment has started, and the attendee slots with details or nulls.
@@ -159,8 +120,6 @@ func (s *PublicService) TicketOrderByNumber(ctx context.Context, orderNumber str
 		TotalAmount:    money.From(record.TotalAmount),
 		Subtotal:       subtotal,
 		Fees:           fees,
-		BuyerName:      record.BuyerName,
-		BuyerEmail:     record.BuyerEmail,
 		ExpiresAt:      record.PaymentExpiresAt,
 		TermsAgreedAt:  record.TermsAgreedAt,
 		PaymentStarted: record.PaymentQRString != nil && *record.PaymentQRString != "",

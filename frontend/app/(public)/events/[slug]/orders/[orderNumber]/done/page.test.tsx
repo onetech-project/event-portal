@@ -19,8 +19,6 @@ const PAID: TicketOrderDetail = {
   total_amount: "550000.00",
   subtotal: "500000.00",
   fees: [{ name: "PPN (10%)", amount: "50000.00" }],
-  buyer_name: "Siti Rahayu",
-  buyer_email: "siti@example.com",
   terms_agreed_at: "2026-08-01T10:00:30Z",
   expires_at: "2026-08-01T10:15:00Z",
   payment_started: true,
@@ -94,11 +92,30 @@ beforeEach(() => {
   replace.mockClear();
 });
 
-// The mirror of the payment screen's forward: nothing has finished yet, so a
-// guest who lands here early belongs back on the payment screen.
+// The mirror of the earlier screens' forwards: nothing has finished yet, so a
+// guest who lands here early belongs back on the step they actually stopped at
+// — the QR screen once payment has started, the holder forms before that
+// (spec 011 FR-021).
 describe("confirmation — an order still awaiting payment", () => {
-  it("sends a pending order back to the payment screen", async () => {
+  it("sends an order that is already paying back to the QR screen", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope({ ...PAID, status: "PENDING" })));
+
+    renderDone();
+
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith(
+        `/events/${PAID.event.slug}/orders/${PAID.order_id}/checkout`,
+      ),
+    );
+  });
+
+  it("sends an order whose payment never started back to the holder forms", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        envelope({ ...PAID, status: "PENDING", payment_started: false, payment: null }),
+      ),
+    );
 
     renderDone();
 
@@ -216,9 +233,9 @@ describe("confirmation — resending the email", () => {
       expect(call).toBeDefined();
       // The order number travels in the body's order_id field, not the URL.
       expect(String(call?.[1]?.body)).toContain(PAID.order_id);
-      // The buyer's address is on the page, but it must never be what decides
-      // where the mail goes — the server reads that from the order.
-      expect(JSON.stringify(call?.[1] ?? {})).not.toContain("siti@example.com");
+      // No address travels at all — delivery is per holder (spec 011), and the
+      // server reads every recipient from the order itself.
+      expect(JSON.stringify(call?.[1] ?? {})).not.toContain("@");
     });
   });
 

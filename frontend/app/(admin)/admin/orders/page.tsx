@@ -95,6 +95,7 @@ export default function AdminOrdersPage() {
       {resend.isSuccess ? (
         <div className="mb-4">
           <StatusAlert tone="success">
+            {/* One recipient: the order's buyer (spec 011 FR-012). */}
             {resend.data.message} to {resend.data.sent_to}.
           </StatusAlert>
         </div>

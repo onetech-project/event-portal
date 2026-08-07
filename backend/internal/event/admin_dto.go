@@ -164,12 +164,6 @@ func (r TicketTypeRequest) Validate(requireEventID bool) error {
 	return nil
 }
 
-// Package statuses, matching the CHECK constraint on packages.status.
-const (
-	PackageStatusActive   = "ACTIVE"
-	PackageStatusInactive = "INACTIVE"
-)
-
 // PackageComponentRequest is one constituent line of a package create/update
 // body. QuantityPerUnit is how many of the ticket one package unit consumes.
 type PackageComponentRequest struct {
@@ -185,14 +179,18 @@ type PackageComponentRequest struct {
 // none — a request that carries any quota-like field is rejected, not ignored
 // (FR-036).
 type PackageRequest struct {
-	EventID     uuid.UUID                 `json:"event_id"`
-	Name        string                    `json:"name"`
-	Description *string                   `json:"description"`
-	Price       money.Money               `json:"price"`
-	SalesStart  time.Time                 `json:"sales_start"`
-	SalesEnd    time.Time                 `json:"sales_end"`
-	Status      string                    `json:"status"`
-	Components  []PackageComponentRequest `json:"components"`
+	EventID     uuid.UUID   `json:"event_id"`
+	Name        string      `json:"name"`
+	Description *string     `json:"description"`
+	Price       money.Money `json:"price"`
+	SalesStart  time.Time   `json:"sales_start"`
+	SalesEnd    time.Time   `json:"sales_end"`
+	// Replaced the ACTIVE|INACTIVE string in migration 0013 (spec 011 FR-029).
+	// A package flag has two states and no master list behind it, so a boolean
+	// carries everything the strings did — unlike the order status, which keeps
+	// its name on the wire because those names must round-trip.
+	IsActive   bool                      `json:"is_active"`
+	Components []PackageComponentRequest `json:"components"`
 }
 
 // quotaLikeKeys are request keys that would smuggle inventory onto a package.
@@ -220,12 +218,8 @@ func (r PackageRequest) Validate(requireEventID bool) error {
 	if r.SalesEnd.Before(r.SalesStart) {
 		return apperr.BadRequest(apperr.CodeInvalidDateRange, "sales_end must not be before sales_start.")
 	}
-	switch r.Status {
-	case PackageStatusActive, PackageStatusInactive:
-	default:
-		return apperr.BadRequest(apperr.CodeValidation,
-			fmt.Sprintf("status must be one of %s or %s.", PackageStatusActive, PackageStatusInactive))
-	}
+	// No validation for is_active: a bool has no invalid value. The two-value
+	// switch this replaced existed only because the column was a string.
 	if len(r.Components) == 0 {
 		return apperr.BadRequest(apperr.CodeValidation, "components must not be empty: a bundle needs at least one constituent.")
 	}
@@ -259,7 +253,7 @@ type PackageAdminDTO struct {
 	Price          money.Money           `json:"price"`
 	SalesStart     time.Time             `json:"sales_start"`
 	SalesEnd       time.Time             `json:"sales_end"`
-	Status         string                `json:"status"`
+	IsActive       bool                  `json:"is_active"`
 	Components     []PackageComponentDTO `json:"components"`
 	AvailableUnits int32                 `json:"available_units"`
 	Sold           int32                 `json:"sold"`

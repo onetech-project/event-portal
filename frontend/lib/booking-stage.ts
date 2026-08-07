@@ -19,13 +19,15 @@ export function bookingStageFromPathname(pathname: string): BookingStep {
 
   const rest = match[1] ?? "";
 
-  // Order matters: the order path is a prefix of the done path, so testing for
-  // the bare order route first would leave the fourth stage unreachable.
+  // Order matters: the bare order path is a prefix of both nested ones, so
+  // testing for it first would leave the last two stages unreachable.
   if (/^\/orders\/[^/]+\/done$/.test(rest)) return "Done";
-  // The shared order page covers Registration (forms) and Payment (QR) in
-  // turn; the rail shows Payment for both — the page's own content makes the
-  // phase obvious, and the URL cannot tell them apart (Option B).
-  if (/^\/orders\/[^/]+$/.test(rest)) return "Payment";
+  // Spec 011 FR-020: the QR screen has its own address, so Registration and
+  // Payment are finally distinguishable. Before that both phases lived at the
+  // bare order path and the rail had to call them all Payment — which read as
+  // "Registration finished" while the guest was still filling the forms.
+  if (/^\/orders\/[^/]+\/checkout$/.test(rest)) return "Payment";
+  if (/^\/orders\/[^/]+$/.test(rest)) return "Registration";
 
   // "" is the detail page, "/tickets" the selection — both are Booking.
   return "Booking";

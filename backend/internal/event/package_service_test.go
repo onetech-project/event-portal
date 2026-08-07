@@ -35,7 +35,7 @@ func validPackageBody(eventID uuid.UUID, components ...map[string]any) map[strin
 		"price":       "50000.00",
 		"sales_start": pkgWindowStart.Format(time.RFC3339),
 		"sales_end":   pkgWindowEnd.Format(time.RFC3339),
-		"status":      "ACTIVE",
+		"is_active":   true,
 		"components":  components,
 	}
 }
@@ -125,7 +125,7 @@ func TestCompositionEditLockedWhilePendingOrderExists(t *testing.T) {
 	day1 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 10)
 	day2 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "30000.00", 10)
 	day3 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 3", "30000.00", 10)
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day1.ID, ev.ID, 1)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day2.ID, ev.ID, 1)
 
@@ -150,7 +150,7 @@ func TestCompositionEditLockedWhilePendingOrderExists(t *testing.T) {
 
 	// Once the order resolves the lock lifts: PAID orders never drift because
 	// their hold is permanent.
-	_, err = pool.Exec(ctx, "UPDATE orders SET status = 'PAID' WHERE id = $1", ord.ID)
+	_, err = pool.Exec(ctx, "UPDATE orders SET status_id = (SELECT id FROM order_statuses WHERE name = 'PAID') WHERE id = $1", ord.ID)
 	require.NoError(t, err)
 	_, err = svc.UpdatePackage(ctx, pkg.ID, marshalBody(t, changed))
 	require.NoError(t, err)
@@ -165,7 +165,7 @@ func TestDeleteGuardsReturnClean400s(t *testing.T) {
 	t.Run("ordered package", func(t *testing.T) {
 		ev := testsupport.SeedEvent(t, pool, "del-pkg", "PUBLISHED")
 		tt := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 10)
-		pkg := testsupport.SeedPackage(t, pool, ev.ID, "Sold bundle", "50000.00", "ACTIVE")
+		pkg := testsupport.SeedPackage(t, pool, ev.ID, "Sold bundle", "50000.00", true)
 		testsupport.SeedPackageTicket(t, pool, pkg.ID, tt.ID, ev.ID, 1)
 		ord := testsupport.SeedOrder(t, pool, "ORD-DELPKG", "PENDING")
 		testsupport.SeedOrderItemPackage(t, pool, ord.ID, pkg.ID, 1, decimal.NewFromInt(50000))
@@ -182,7 +182,7 @@ func TestDeleteGuardsReturnClean400s(t *testing.T) {
 	t.Run("ticket type used by a package", func(t *testing.T) {
 		ev := testsupport.SeedEvent(t, pool, "del-tt", "PUBLISHED")
 		tt := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 10)
-		pkg := testsupport.SeedPackage(t, pool, ev.ID, "Depends on Day 1", "30000.00", "ACTIVE")
+		pkg := testsupport.SeedPackage(t, pool, ev.ID, "Depends on Day 1", "30000.00", true)
 		testsupport.SeedPackageTicket(t, pool, pkg.ID, tt.ID, ev.ID, 1)
 
 		err := svc.DeleteTicketType(ctx, tt.ID)
@@ -195,7 +195,7 @@ func TestDeleteGuardsReturnClean400s(t *testing.T) {
 
 	t.Run("event with packages", func(t *testing.T) {
 		ev := testsupport.SeedEvent(t, pool, "del-ev", "PUBLISHED")
-		testsupport.SeedPackage(t, pool, ev.ID, "Only bundle", "10000.00", "ACTIVE")
+		testsupport.SeedPackage(t, pool, ev.ID, "Only bundle", "10000.00", true)
 
 		err := svc.DeleteEvent(ctx, ev.ID)
 

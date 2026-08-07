@@ -103,7 +103,11 @@ export const packageFormSchema = z
       .refine((value) => Number(value) >= 0, "Price must not be negative."),
     salesStart: trimmedRequired("Sales start"),
     salesEnd: trimmedRequired("Sales end"),
-    status: z.enum(["ACTIVE", "INACTIVE"]),
+    // A package's availability is a two-state flag, not a word (spec 011
+    // FR-029). Unlike the order status — whose names come from a master list
+    // and must round-trip — this one has no list behind it, so a boolean says
+    // everything the ACTIVE/INACTIVE strings did.
+    isActive: z.boolean(),
     components: z.array(z.guid("Select a valid ticket type.")),
   })
   .superRefine((value, ctx) => {

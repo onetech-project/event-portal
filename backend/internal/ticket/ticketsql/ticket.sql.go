@@ -105,7 +105,7 @@ func (q *Queries) GetTicketStatusByCode(ctx context.Context, ticketCode string) 
 }
 
 const listTicketDetailsByOrderID = `-- name: ListTicketDetailsByOrderID :many
-SELECT t.ticket_code, t.status, a.name AS attendee_name,
+SELECT t.ticket_code, t.status, a.name AS attendee_name, a.email AS attendee_email,
        tt.name AS ticket_type_name, e.name AS event_name,
        e.venue, e.start_date
 FROM tickets t
@@ -120,6 +120,7 @@ type ListTicketDetailsByOrderIDRow struct {
 	TicketCode     string
 	Status         string
 	AttendeeName   *string
+	AttendeeEmail  *string
 	TicketTypeName string
 	EventName      string
 	Venue          string
@@ -127,6 +128,8 @@ type ListTicketDetailsByOrderIDRow struct {
 }
 
 // Everything the ticket PDF prints, for the initial delivery and every resend.
+// attendee_email is the per-holder delivery address (spec 011): notification
+// groups an order's tickets by it and sends each holder their own PDF.
 func (q *Queries) ListTicketDetailsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListTicketDetailsByOrderIDRow, error) {
 	rows, err := q.db.Query(ctx, listTicketDetailsByOrderID, orderID)
 	if err != nil {
@@ -140,6 +143,7 @@ func (q *Queries) ListTicketDetailsByOrderID(ctx context.Context, orderID uuid.U
 			&i.TicketCode,
 			&i.Status,
 			&i.AttendeeName,
+			&i.AttendeeEmail,
 			&i.TicketTypeName,
 			&i.EventName,
 			&i.Venue,

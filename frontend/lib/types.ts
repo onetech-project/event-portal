@@ -96,8 +96,12 @@ export type SelectionLine = {
 /**
  * One row of GET /ticket/genders — the gender master list the registration
  * forms build their options from. `name` is the canonical stored value.
+ *
+ * `id` narrowed from a uuid string to a number in migration 0013. Nothing reads
+ * it as data — the form's select binds to `name`, which is also what checkout
+ * submits — so it survives only as a React key.
  */
-export type GenderOption = { id: string; name: string };
+export type GenderOption = { id: number; name: string };
 
 /** The current Terms & Conditions document shown by the booking dialog. */
 export type EventTerms = {
@@ -186,8 +190,6 @@ export type TicketOrderDetail = {
   subtotal: string | null;
   /** The frozen breakdown between subtotal and total (Figma 32-1366). */
   fees: PublicOrderFee[];
-  buyer_name: string | null;
-  buyer_email: string | null;
   expires_at: string | null;
   terms_agreed_at: string | null;
   payment_started: boolean;
@@ -291,7 +293,13 @@ export type PackageAdminView = {
   price: string;
   sales_start: string;
   sales_end: string;
-  status: "ACTIVE" | "INACTIVE";
+  /**
+   * Availability as a two-state flag (spec 011 FR-029), replacing the
+   * ACTIVE|INACTIVE string. The order status deliberately went the other way and
+   * keeps its name on the wire — its names come from a master list that has to
+   * round-trip, which a package's flag does not.
+   */
+  is_active: boolean;
   components: PackageComponentSummary[];
   /** Derived, read-only. Whole sets the constituents can still cover. */
   available_units: number;
@@ -333,6 +341,7 @@ export type MarkUsedResponse = {
 
 export type ResendResponse = {
   message: string;
+  /** The buyer's address — the order's sole delivery recipient (spec 011 FR-012). */
   sent_to: string;
 };
 

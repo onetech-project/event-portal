@@ -22,51 +22,98 @@ func newRepo(t *testing.T) (*order.Repository, *testsupport.Pool) {
 	return order.NewRepository(pool), pool
 }
 
-func TestCreateOrderPersistsAPendingOrderWithoutAPaymentURL(t *testing.T) {
+func TestCreateBookedOrderPersistsAPendingOrderWithoutBuyerOrPayment(t *testing.T) {
 	repo, pool := newRepo(t)
 	ctx := context.Background()
 
 	var created order.OrderRecord
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		var err error
-		created, err = repo.CreateOrder(ctx, tx, order.CreateOrderParams{
-			OrderNumber: "ORD-20260731-ABCDEF",
-			BuyerName:   "Budi",
-			BuyerEmail:  "budi@example.com",
-			BuyerPhone:  "+628123456789",
-			TotalAmount: decimal.RequireFromString("300000.00"),
-		})
+		created, err = repo.CreateBookedOrder(ctx, tx, "ORD-20260731-ABCDEF",
+			decimal.RequireFromString("300000.00"), decimal.RequireFromString("300000.00"),
+			time.Now().Add(time.Hour))
 		return err
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, "PENDING", created.Status)
+	assert.Nil(t, created.BuyerName, "buyer identity arrives only at checkout (Option B)")
 	assert.Nil(t, created.PaymentURL, "the payment URL is only stamped after the gateway call")
 	assert.Nil(t, created.PaymentProvider)
 	assert.Equal(t, "300000.00", created.TotalAmount.StringFixed(2))
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, pool, created.ID))
 }
 
-func TestCreateOrderRejectsADuplicateOrderNumber(t *testing.T) {
+// Migration 0013 moved orders.status to a status_id reference while keeping the
+// NAME as the only value anything above storage sees (spec 011 FR-026). This
+// walks the whole loop — create, read by id, read by number, transition, read
+// again — asserting a NAME every time, so a future change that lets the numeric
+// id surface on a record or a DTO fails here rather than in a client.
+func TestOrderStatusIsExchangedByNameThroughEveryReadPath(t *testing.T) {
+	repo, pool := newRepo(t)
+	ctx := context.Background()
+
+	var created order.OrderRecord
+	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		created, err = repo.CreateBookedOrder(ctx, tx, "ORD-STATUS-NAME",
+			decimal.RequireFromString("100000.00"), decimal.RequireFromString("100000.00"),
+			time.Now().Add(time.Hour))
+		return err
+	})
+	require.NoError(t, err)
+	require.Equal(t, "PENDING", created.Status, "the insert returns the name, not the id")
+
+	byID, err := repo.GetOrderByID(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", byID.Status)
+
+	byNumber, err := repo.GetOrderByNumber(ctx, "ORD-STATUS-NAME")
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", byNumber.Status)
+
+	// The transition takes a name too — the caller never learns an id exists.
+	var moved bool
+	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		moved, err = repo.UpdateOrderStatusIfPending(ctx, tx, created.ID, "PAID")
+		return err
+	})
+	require.NoError(t, err)
+	require.True(t, moved, "a PENDING order transitions on the first attempt")
+
+	after, err := repo.GetOrderByID(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PAID", after.Status)
+
+	// And the guard still holds: a second transition finds nothing PENDING,
+	// which is what makes a replayed webhook a no-op.
+	var again bool
+	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		again, err = repo.UpdateOrderStatusIfPending(ctx, tx, created.ID, "CANCELLED")
+		return err
+	})
+	require.NoError(t, err)
+	assert.False(t, again, "the PENDING guard survived the move to a reference")
+	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, pool, created.ID))
+}
+
+func TestCreateBookedOrderRejectsADuplicateOrderNumber(t *testing.T) {
 	repo, pool := newRepo(t)
 	ctx := context.Background()
 	testsupport.SeedOrder(t, pool, "ORD-DUP", "PENDING")
 
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
-		_, err := repo.CreateOrder(ctx, tx, order.CreateOrderParams{
-			OrderNumber: "ORD-DUP",
-			BuyerName:   "Budi",
-			BuyerEmail:  "budi@example.com",
-			BuyerPhone:  "+62812",
-			TotalAmount: decimal.NewFromInt(1),
-		})
+		_, err := repo.CreateBookedOrder(ctx, tx, "ORD-DUP",
+			decimal.NewFromInt(1), decimal.NewFromInt(1), time.Now().Add(time.Hour))
 		return err
 	})
 
 	assert.ErrorIs(t, err, order.ErrOrderNumberTaken)
 }
 
-func TestCreateOrderItemsAndAttendeesShareTheOrdersTransaction(t *testing.T) {
+func TestBookedOrderItemsAndSlotsShareTheOrdersTransaction(t *testing.T) {
 	repo, pool := newRepo(t)
 	ctx := context.Background()
 
@@ -74,23 +121,18 @@ func TestCreateOrderItemsAndAttendeesShareTheOrdersTransaction(t *testing.T) {
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
 
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
-		created, err := repo.CreateOrder(ctx, tx, order.CreateOrderParams{
-			OrderNumber: "ORD-ROLLBACK",
-			BuyerName:   "Budi",
-			BuyerEmail:  "budi@example.com",
-			BuyerPhone:  "+62812",
-			TotalAmount: decimal.NewFromInt(300000),
-		})
+		created, err := repo.CreateBookedOrder(ctx, tx, "ORD-ROLLBACK",
+			decimal.NewFromInt(300000), decimal.NewFromInt(300000), time.Now().Add(time.Hour))
 		if err != nil {
 			return err
 		}
 		if err := repo.CreateOrderItem(ctx, tx, created.ID, order.TicketLine(tt.ID), 2, tt.Price); err != nil {
 			return err
 		}
-		if _, err := repo.CreateAttendee(ctx, tx, created.ID, order.AttendeeRef{TicketTypeID: tt.ID}, "A", "a@example.com"); err != nil {
+		if _, err := repo.CreateAttendeeSlot(ctx, tx, created.ID, order.AttendeeRef{TicketTypeID: tt.ID}); err != nil {
 			return err
 		}
-		return assert.AnError // abort the whole checkout
+		return assert.AnError // abort the whole booking
 	})
 
 	require.Error(t, err)
@@ -465,7 +507,7 @@ func TestListQuotaHoldsByOrderIDExpandsPackageLines(t *testing.T) {
 	ttA := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 10)
 	ttB := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 10)
 	ttC := testsupport.SeedTicketType(t, pool, ev.ID, "Standalone", "15000.00", 10)
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, ttA.ID, ev.ID, 1)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, ttB.ID, ev.ID, 2)
 

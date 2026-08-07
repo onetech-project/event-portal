@@ -32,6 +32,9 @@ const LINKS = [
  */
 export function SiteNav() {
   const pathname = usePathname();
+  const isEvents = pathname.startsWith("/events");
+
+  if (isEvents) return null;
 
   return (
     <nav aria-label="Main" className="flex items-center gap-1">

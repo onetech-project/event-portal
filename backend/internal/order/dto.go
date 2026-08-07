@@ -6,6 +6,7 @@ package order
 import (
 	"fmt"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,32 +23,6 @@ type CheckoutItem struct {
 	TicketTypeID *uuid.UUID `json:"ticket_type_id"`
 	PackageID    *uuid.UUID `json:"package_id"`
 	Quantity     int32      `json:"quantity"`
-}
-
-// CheckoutAttendee is one person the buyer is purchasing a ticket for. One ticket
-// is generated per attendee once the order is paid.
-//
-// PackageID is non-nil only for attendees originating from a bundle purchase.
-// TicketTypeID is always present: even bundle-derived attendees are bound to one
-// specific ticket type, which is what keeps one pass per attendee true for
-// packages.
-type CheckoutAttendee struct {
-	TicketTypeID uuid.UUID  `json:"ticket_type_id"`
-	PackageID    *uuid.UUID `json:"package_id,omitempty"`
-	Name         string     `json:"name"`
-	Email        string     `json:"email"`
-}
-
-// CheckoutRequest is the guest checkout body (POST /api/v1/checkout).
-//
-// No total is accepted from the client: the server recomputes it from current
-// ticket-type prices (contracts/api.md, FR-006).
-type CheckoutRequest struct {
-	BuyerName  string             `json:"buyer_name"`
-	BuyerEmail string             `json:"buyer_email"`
-	BuyerPhone string             `json:"buyer_phone"`
-	Items      []CheckoutItem     `json:"items"`
-	Attendees  []CheckoutAttendee `json:"attendees"`
 }
 
 // BookRequest is the booking body (POST /ticket/book, spec 008): items only.
@@ -81,18 +56,6 @@ type BookResponse struct {
 type AgreementRequest struct {
 	Agreed       bool      `json:"agreed"`
 	EventTermsID uuid.UUID `json:"event_terms_id"`
-}
-
-// OrderResponse is the 201 body returned once the payment session exists.
-//
-// PaymentURL is retained for compatibility and audit only: the guest is no
-// longer sent anywhere, they are routed in-app to the order page, which renders
-// the QR itself (spec FR-009).
-type OrderResponse struct {
-	OrderNumber string      `json:"order_number"`
-	Status      string      `json:"status"`
-	TotalAmount money.Money `json:"total_amount"`
-	PaymentURL  string      `json:"payment_url"`
 }
 
 // PublicOrderEvent names the event an order belongs to. The slug is what lets an
@@ -147,30 +110,6 @@ type PaymentInstruction struct {
 	QRImagePath string `json:"qr_image_path"`
 }
 
-// PublicOrderDetail is the guest's own view of an order
-// (GET /api/v1/orders/:orderNumber).
-//
-// It is unauthenticated and keyed only by order number, so what it omits matters
-// as much as what it carries: no ticket codes, no attendee list, no provider
-// transaction id, nothing about any other order (spec FR-022).
-type PublicOrderDetail struct {
-	OrderNumber string            `json:"order_number"`
-	Status      string            `json:"status"`
-	TotalAmount money.Money       `json:"total_amount"`
-	BuyerName   string            `json:"buyer_name"`
-	BuyerEmail  string            `json:"buyer_email"`
-	CreatedAt   *time.Time        `json:"created_at"`
-	Event       PublicOrderEvent  `json:"event"`
-	Items       []PublicOrderItem `json:"items"`
-	// ServerTime is this response's clock reading. The client offsets its own
-	// clock by the difference before counting down (spec FR-012, SC-005).
-	ServerTime time.Time `json:"server_time"`
-	// Payment is nil unless the order is genuinely payable: PENDING, with an
-	// instruction recorded, and not past its deadline. A client must render a QR
-	// only when this is present (spec FR-014).
-	Payment *PaymentInstruction `json:"payment"`
-}
-
 // CheckoutVisitor is one filled visitor form, addressed to the slot it fills
 // (id from GET /ticket/order/:order_id).
 type CheckoutVisitor struct {
@@ -184,55 +123,49 @@ type CheckoutVisitor struct {
 }
 
 // CheckoutFormsRequest is the Option B checkout body
-// (POST /ticket/checkout/:order_id): buyer + visitor forms arrive with the
-// same call that starts payment — nothing was persisted before it.
+// (POST /ticket/checkout/:order_id): the holder forms arrive with the same
+// call that starts payment — nothing was persisted before it. There is no
+// separate buyer block (spec 011): the topmost holder form doubles as the
+// order's primary contact, derived server-side from canonical slot order.
+// Unknown fields sent by stale clients (buyer_*) are ignored by binding.
 type CheckoutFormsRequest struct {
-	BuyerName  string `json:"buyer_name"`
-	BuyerEmail string `json:"buyer_email"`
-	BuyerPhone string `json:"buyer_phone"`
-	// BuyerDob is date-only, YYYY-MM-DD — the buyer form collects the same
-	// personal fields as a visitor card (Figma 12-4456).
-	BuyerDob    string            `json:"buyer_dob"`
-	BuyerGender string            `json:"buyer_gender"`
-	Attendees   []CheckoutVisitor `json:"attendees"`
+	Attendees []CheckoutVisitor `json:"attendees"`
 }
 
 // GenderOption is one row of GET /ticket/genders — the gender master list the
 // forms build their options from (clarified 2026-08-05).
 type GenderOption struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
+	// Narrowed from a uuid string to a small integer by migration 0013
+	// (spec 011 FR-025). Safe because no client reads it: checkout submits the
+	// gender NAME, and the form's select is bound to the name too — verified
+	// across the frontend, not assumed (contracts/schema-revision.md §4).
+	ID   int16  `json:"id"`
+	Name string `json:"name"`
 }
 
 // visitorDobFormat is the wire format for dates of birth.
 const visitorDobFormat = "2006-01-02"
 
+// visitorPhonePattern is the spec 011 phone rule (clarified 2026-08-07):
+// 10-15 digits and nothing else. Length is the whole rule — no country code is
+// required or implied, so `628123456789` and `08123456789` are both accepted
+// and each is stored in the form the guest chose. The message below is shared
+// verbatim with the client-side validator so the same failure reads identically
+// whichever side catches it.
+var visitorPhonePattern = regexp.MustCompile(`^[0-9]{10,15}$`)
+
+const visitorPhoneMessage = "Enter a phone number of 10-15 digits."
+
 // Validate rejects malformed forms with a 400001 whose data is a field→message
 // map (contracts/api.md call 8), so the client can mark the exact inputs.
 //
-// validGenders is the active gender master list (clarified 2026-08-05), passed
-// in by the service so every problem lands in ONE field map — a guest never
-// fixes the email only to be told about the gender on the next attempt.
-func (r CheckoutFormsRequest) Validate(validGenders map[string]bool) error {
+// validGenders maps each active gender master NAME to its row id (spec 011:
+// the name is the wire value, gender_id is what checkout stores). Passed in by
+// the service so every problem lands in ONE field map — a guest never fixes
+// the email only to be told about the gender on the next attempt.
+func (r CheckoutFormsRequest) Validate(validGenders map[string]int16) error {
 	fields := map[string]string{}
 
-	if strings.TrimSpace(r.BuyerName) == "" {
-		fields["buyer_name"] = "Buyer name is required."
-	}
-	if !emailShaped(r.BuyerEmail) {
-		fields["buyer_email"] = "A valid email address is required."
-	}
-	if strings.TrimSpace(r.BuyerPhone) == "" {
-		fields["buyer_phone"] = "Buyer phone is required."
-	}
-	if dob, err := time.Parse(visitorDobFormat, r.BuyerDob); err != nil {
-		fields["buyer_dob"] = "Date of birth must be YYYY-MM-DD."
-	} else if dob.After(time.Now()) {
-		fields["buyer_dob"] = "Date of birth cannot be in the future."
-	}
-	if !validGenders[r.BuyerGender] {
-		fields["buyer_gender"] = "Select a valid gender."
-	}
 	if len(r.Attendees) == 0 {
 		fields["attendees"] = "Visitor details are required for every ticket."
 	}
@@ -252,15 +185,15 @@ func (r CheckoutFormsRequest) Validate(validGenders map[string]bool) error {
 		if !emailShaped(v.Email) {
 			fields[key("email")] = "A valid email address is required."
 		}
-		if strings.TrimSpace(v.Phone) == "" {
-			fields[key("phone")] = "Visitor phone is required."
+		if !visitorPhonePattern.MatchString(strings.TrimSpace(v.Phone)) {
+			fields[key("phone")] = visitorPhoneMessage
 		}
 		if dob, err := time.Parse(visitorDobFormat, v.Dob); err != nil {
 			fields[key("dob")] = "Date of birth must be YYYY-MM-DD."
 		} else if dob.After(time.Now()) {
 			fields[key("dob")] = "Date of birth cannot be in the future."
 		}
-		if !validGenders[v.Gender] {
+		if _, ok := validGenders[v.Gender]; !ok {
 			fields[key("gender")] = "Select a valid gender."
 		}
 	}
@@ -298,9 +231,9 @@ type TicketOrderSlot struct {
 	PackageName    *string    `json:"package_name"`
 	PackageID      *uuid.UUID `json:"package_id"`
 	PackageUnit    *int       `json:"package_unit"`
-	Name           *string   `json:"name"`
-	Email          *string   `json:"email"`
-	Phone          *string   `json:"phone"`
+	Name           *string    `json:"name"`
+	Email          *string    `json:"email"`
+	Phone          *string    `json:"phone"`
 	// Dob is date-only (YYYY-MM-DD), matching the checkout request format.
 	Dob    *string `json:"dob"`
 	Gender *string `json:"gender"`
@@ -323,9 +256,6 @@ type TicketOrderDetail struct {
 	// are the frozen breakdown between it and TotalAmount (Figma 32-1366).
 	Subtotal *money.Money     `json:"subtotal"`
 	Fees     []PublicOrderFee `json:"fees"`
-	// Buyer identity is null until checkout saves the forms (Option B).
-	BuyerName  *string `json:"buyer_name"`
-	BuyerEmail *string `json:"buyer_email"`
 	// ExpiresAt is the live deadline: the 1-hour hold before payment starts, the
 	// 14-minute payment window after.
 	ExpiresAt     *time.Time `json:"expires_at"`
@@ -361,19 +291,6 @@ type AttendeeSummary struct {
 	OrderNumber    string `json:"order_number"`
 }
 
-// TotalQuantity sums every line's quantity. For ticket lines this is the number
-// of tickets bought; for a package line it counts package units, not the attendee
-// slots the package expands into (those depend on the composition and are
-// validated server-side). It exists for reporting, not as the attendee count.
-func (r CheckoutRequest) TotalQuantity() int32 {
-	var total int32
-	for _, item := range r.Items {
-		total += item.Quantity
-	}
-	return total
-}
-
-// Validate checks everything that can be decided without touching the database.
 // validateItemLines checks the selected lines shared by booking and checkout:
 // per-line quantities, and one line per ticket type or package — a repeated
 // reference would make the attendee-to-line mapping ambiguous. Returns the
@@ -416,80 +333,6 @@ func validateItemLines(items []CheckoutItem) (map[string]int32, error) {
 	return wanted, nil
 }
 
-// Cheap rejections happen here so an invalid request never opens a transaction or
-// takes a quota row lock.
-func (r CheckoutRequest) Validate() error {
-	if strings.TrimSpace(r.BuyerName) == "" {
-		return apperr.BadRequest(apperr.CodeValidation, "buyer_name is required.")
-	}
-	if err := validateEmail(r.BuyerEmail, "buyer_email"); err != nil {
-		return err
-	}
-	if strings.TrimSpace(r.BuyerPhone) == "" {
-		return apperr.BadRequest(apperr.CodeValidation, "buyer_phone is required.")
-	}
-	wanted, err := validateItemLines(r.Items)
-	if err != nil {
-		return err
-	}
-
-	for i, attendee := range r.Attendees {
-		if strings.TrimSpace(attendee.Name) == "" {
-			return apperr.BadRequest(apperr.CodeValidation,
-				fmt.Sprintf("attendees[%d].name is required.", i))
-		}
-		if err := validateEmail(attendee.Email, fmt.Sprintf("attendees[%d].email", i)); err != nil {
-			return err
-		}
-		if attendee.TicketTypeID == uuid.Nil {
-			return apperr.BadRequest(apperr.CodeValidation,
-				fmt.Sprintf("attendees[%d].ticket_type_id is required.", i))
-		}
-	}
-
-	// Ticket lines are fully decidable here: every attendee without a package
-	// origin must land on an ordered ticket type, in exactly the ordered count.
-	// Package attendee slots depend on the composition, which only the server can
-	// see after reading the database, so their exact counts are validated in
-	// service.go against the expansion (see validateAttendees).
-	gotTicket := make(map[string]int32)
-	for _, attendee := range r.Attendees {
-		if attendee.PackageID != nil {
-			continue
-		}
-		gotTicket["tt:"+attendee.TicketTypeID.String()]++
-	}
-	for ref, quantity := range wanted {
-		if strings.HasPrefix(ref, "pkg:") {
-			continue
-		}
-		if gotTicket[ref] != quantity {
-			return apperr.BadRequest(apperr.CodeAttendeeCountMismatch,
-				fmt.Sprintf("Reference %s ordered %d ticket(s) but %d attendee entr(ies) were provided.",
-					ref, quantity, gotTicket[ref]))
-		}
-	}
-	for ref := range gotTicket {
-		if _, ordered := wanted[ref]; !ordered {
-			return apperr.BadRequest(apperr.CodeAttendeeCountMismatch,
-				fmt.Sprintf("An attendee references %s, which is not in the order.", ref))
-		}
-	}
-	// Every package attendee must reference an ordered package. The per-ticket-type
-	// breakdown of those slots is checked server-side after expansion.
-	for _, attendee := range r.Attendees {
-		if attendee.PackageID == nil {
-			continue
-		}
-		if _, ordered := wanted["pkg:"+attendee.PackageID.String()]; !ordered {
-			return apperr.BadRequest(apperr.CodeAttendeeCountMismatch,
-				fmt.Sprintf("An attendee references package %s, which is not in the order.", attendee.PackageID))
-		}
-	}
-
-	return nil
-}
-
 // emailShaped reports whether a value parses as an email address, for callers
 // building field maps rather than one-error-at-a-time responses.
 func emailShaped(value string) bool {
@@ -501,17 +344,6 @@ func emailShaped(value string) bool {
 	return err == nil
 }
 
-func validateEmail(value, field string) error {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return apperr.BadRequest(apperr.CodeValidation, field+" is required.")
-	}
-	if _, err := mail.ParseAddress(trimmed); err != nil {
-		return apperr.BadRequest(apperr.CodeValidation, field+" is not a valid email address.")
-	}
-	return nil
-}
-
 // FeeAdminView is one fee master row on the admin panel
 // (GET /api/v1/admin/fees).
 type FeeAdminView struct {
@@ -520,12 +352,12 @@ type FeeAdminView struct {
 	// order's frozen line ("PPN (11%)") itself.
 	Name string `json:"name"`
 	// FeeType is PERCENT (value% of the subtotal) or FIXED (flat rupiah).
-	FeeType  string      `json:"fee_type"`
-	Value    money.Money `json:"value"`
-	Position int32       `json:"position"`
-	IsActive bool        `json:"is_active"`
-	CreatedAt *time.Time `json:"created_at"`
-	UpdatedAt *time.Time `json:"updated_at"`
+	FeeType   string      `json:"fee_type"`
+	Value     money.Money `json:"value"`
+	Position  int32       `json:"position"`
+	IsActive  bool        `json:"is_active"`
+	CreatedAt *time.Time  `json:"created_at"`
+	UpdatedAt *time.Time  `json:"updated_at"`
 }
 
 // FeeRequest is the admin create/update body for a fee master row.

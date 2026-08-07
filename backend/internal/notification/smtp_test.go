@@ -65,8 +65,8 @@ func TestComposeAttachesThePDF(t *testing.T) {
 	assert.Contains(t, raw, "tickets-ORD-20260731-ABCDEF.pdf")
 }
 
-// Exactly one email per paid order, carrying all of its tickets in one PDF
-// (constitution, Critical Data Flow Rules).
+// Constitution v3.0.0: exactly one message to the buyer, carrying every ticket
+// in the order as a single PDF attachment.
 func TestComposeCarriesEveryTicketInASingleAttachment(t *testing.T) {
 	raw := composed(t, notification.Message{
 		To:       "budi@example.com",

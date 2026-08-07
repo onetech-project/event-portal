@@ -4,8 +4,8 @@
 package testsupport
 
 import (
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"testing"
@@ -138,8 +138,9 @@ func SeedOrder(t *testing.T, pool *pgxpool.Pool, orderNumber, status string) Ord
 	var id uuid.UUID
 	email := "buyer@example.com"
 	err := pool.QueryRow(context.Background(), `
-		INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_amount, status)
-		VALUES ($1, 'Test Buyer', $2, '+628123456789', 250000, $3)
+		INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_amount, status_id)
+		VALUES ($1, 'Test Buyer', $2, '+628123456789', 250000,
+		        (SELECT id FROM order_statuses WHERE name = $3))
 		RETURNING id`, orderNumber, email, status).Scan(&id)
 	require.NoError(t, err)
 
@@ -208,22 +209,24 @@ func OrderStatusOf(t *testing.T, pool *pgxpool.Pool, orderID uuid.UUID) string {
 
 	var status string
 	err := pool.QueryRow(context.Background(),
-		`SELECT status FROM orders WHERE id = $1`, orderID).Scan(&status)
+		`SELECT os.name FROM orders o
+		 JOIN order_statuses os ON os.id = o.status_id
+		 WHERE o.id = $1`, orderID).Scan(&status)
 	require.NoError(t, err)
 	return status
 }
 
 // Package describes a seeded packages row.
 type Package struct {
-	ID      uuid.UUID
-	EventID uuid.UUID
-	Name    string
-	Price   decimal.Decimal
-	Status  string
+	ID       uuid.UUID
+	EventID  uuid.UUID
+	Name     string
+	Price    decimal.Decimal
+	IsActive bool
 }
 
 // SeedPackage inserts a package with an open sales window and returns it.
-func SeedPackage(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, price string, status string) Package {
+func SeedPackage(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, price string, isActive bool) Package {
 	t.Helper()
 
 	amount, err := decimal.NewFromString(price)
@@ -231,12 +234,12 @@ func SeedPackage(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name strin
 
 	var id uuid.UUID
 	err = pool.QueryRow(context.Background(), `
-		INSERT INTO packages (event_id, name, price, sales_start, sales_end, status)
+		INSERT INTO packages (event_id, name, price, sales_start, sales_end, is_active)
 		VALUES ($1, $2, $3, now() - interval '1 day', now() + interval '29 days', $4)
-		RETURNING id`, eventID, name, amount, status).Scan(&id)
+		RETURNING id`, eventID, name, amount, isActive).Scan(&id)
 	require.NoError(t, err)
 
-	return Package{ID: id, EventID: eventID, Name: name, Price: amount, Status: status}
+	return Package{ID: id, EventID: eventID, Name: name, Price: amount, IsActive: isActive}
 }
 
 // SeedPackageTicket inserts a package_tickets junction row linking a package to

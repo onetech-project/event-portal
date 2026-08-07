@@ -248,7 +248,7 @@ func TestPackageAvailabilityEqualsMinQuotaPerUnitAcrossConstituents(t *testing.T
 	ev := testsupport.SeedEvent(t, pool, "avail-event", "PUBLISHED")
 	day1 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 5)
 	day2 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 2)
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2 Bundle", "50000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2 Bundle", "50000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day1.ID, ev.ID, 1)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day2.ID, ev.ID, 1)
 
@@ -272,7 +272,7 @@ func TestPackageAvailabilityUsesWholeSetsOnly(t *testing.T) {
 
 	ev := testsupport.SeedEvent(t, pool, "whole-sets", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "General", "15000.00", 5)
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Pair Pack", "25000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Pair Pack", "25000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, tt.ID, ev.ID, 2)
 
 	packages, err := repo.ListPackagesWithAvailabilityByEventID(ctx, ev.ID)
@@ -292,7 +292,7 @@ func TestComponentlessPackageReturnsZeroUnitsNotAbsent(t *testing.T) {
 
 	ev := testsupport.SeedEvent(t, pool, "no-components", "PUBLISHED")
 	_ = testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "10000.00", 10)
-	_ = testsupport.SeedPackage(t, pool, ev.ID, "Empty Bundle", "5000.00", "ACTIVE")
+	_ = testsupport.SeedPackage(t, pool, ev.ID, "Empty Bundle", "5000.00", true)
 	// No SeedPackageTicket — zero components.
 
 	packages, err := repo.ListPackagesWithAvailabilityByEventID(ctx, ev.ID)
@@ -325,7 +325,7 @@ func TestPackageComponentFromAnotherEventFailsAtTheDatabase(t *testing.T) {
 			Price:      decimal.NewFromInt(50000),
 			SalesStart: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			SalesEnd:   time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
-			Status:     "ACTIVE",
+			IsActive:   true,
 		})
 		if err != nil {
 			return err

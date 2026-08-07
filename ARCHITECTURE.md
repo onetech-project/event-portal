@@ -163,11 +163,12 @@ sequenceDiagram
     FE->>API: POST /api/v1/ticket/terms-condition/:order_id
     FE->>G: Route in-app to /events/:slug/orders/:order_id
 
-    G->>FE: Fill buyer + visitor forms, Continue to Payment
+    G->>FE: Fill one holder form per ticket / bundle unit,<br/>Continue to Payment (no buyer form — spec 011)
     FE->>API: POST /api/v1/ticket/checkout/:order_id
     API->>OS: CheckoutOrder(orderID, forms)
-    OS->>DB: TX-D — save buyer + attendee details
-    OS->>MT: CreateTransaction — outside any TX, no lock held
+    Note right of OS: The TOPMOST form's holder (first slot in<br/>canonical order) is the primary contact
+    OS->>DB: TX-D — fill attendee slots (gender_id FK) +<br/>snapshot the primary contact into orders.buyer_*
+    OS->>MT: CreateTransaction — outside any TX, no lock held;<br/>customer = the primary contact
 
     alt Provider call fails
         OS-->>FE: 502001 PAYMENT_INITIATION_FAILED
@@ -183,8 +184,11 @@ sequenceDiagram
 
 A webhook, the guest's refresh button, and the expiry sweeper can all reach the
 same order at once. They converge on one guarded transition — `UPDATE orders SET
-status … WHERE status = 'PENDING'` — which is what makes quota restoration and
-ticket generation happen exactly once no matter who wins.
+status_id … WHERE status_id = <PENDING>` — which is what makes quota restoration
+and ticket generation happen exactly once no matter who wins. (Migration 0013
+made the column a reference to the `order_statuses` master list; callers still
+pass and read the status NAME, which the SQL resolves. Still one atomic
+statement, so the guarantee is unchanged.)
 
 ```mermaid
 sequenceDiagram
@@ -220,14 +224,15 @@ sequenceDiagram
         alt Order is already PAID
             PS-->>MT: 200 OK — idempotent no-op, no second email
         else Still PENDING
-            PS->>DB: TX — UPDATE orders SET status WHERE status = 'PENDING'
+            PS->>DB: TX — UPDATE orders SET status_id WHERE status_id = PENDING
             PS-->>MT: 200 OK — returned before fulfillment runs
             PS->>TS: IssueTicketsForOrder — goroutine
             TS->>DB: INSERT tickets, one per attendee, idempotent
             PS->>NS: SendTicketEmail — goroutine
-            NS->>NS: Render PDF and QR from ticket_code, nothing stored on disk
-            NS->>DB: UPDATE orders SET email_sent = true
-            Note right of NS: Delivery failure leaves the tickets valid<br/>and email_sent false — an admin resends
+            NS->>NS: One email to orders.buyer_email (spec 011 FR-012):<br/>every ticket in the order as one PDF + the receipt.<br/>Holder emails are identity, never delivery targets
+            NS->>NS: Render PDF and QRs from ticket_code, nothing stored on disk
+            NS->>DB: UPDATE orders SET email_sent = true —<br/>only after that send succeeded
+            Note right of NS: A failed send leaves the tickets valid and<br/>email_sent false — resend repeats the same<br/>single delivery to the buyer
         end
     and Nobody pays
         SW->>DB: DueForExpiry(now) — PENDING orders past their deadline

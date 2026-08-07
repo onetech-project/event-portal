@@ -22,16 +22,9 @@ func checkoutFormsBody(slotIDs []uuid.UUID) string {
 	visitors := make([]string, 0, len(slotIDs))
 	for _, id := range slotIDs {
 		visitors = append(visitors, fmt.Sprintf(
-			`{"id":"%s","name":"Visitor","email":"v@example.com","phone":"+62812345678","dob":"2000-01-31","gender":"FEMALE"}`, id))
+			`{"id":"%s","name":"Visitor","email":"v@example.com","phone":"081234567890","dob":"2000-01-31","gender":"FEMALE"}`, id))
 	}
-	return fmt.Sprintf(`{
-		"buyer_name":"Siti Rahayu",
-		"buyer_email":"siti@example.com",
-		"buyer_phone":"+628123456789",
-		"buyer_dob":"1995-05-05",
-		"buyer_gender":"FEMALE",
-		"attendees":[%s]
-	}`, strings.Join(visitors, ","))
+	return fmt.Sprintf(`{"attendees":[%s]}`, strings.Join(visitors, ","))
 }
 
 func TestCheckoutEndpointReturnsTheQRContractShape(t *testing.T) {
@@ -71,7 +64,7 @@ func TestCheckoutEndpointReturns400001FieldMap(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	bad := strings.Replace(checkoutFormsBody(slotIDs), "siti@example.com", "nope", 1)
+	bad := strings.Replace(checkoutFormsBody(slotIDs), "v@example.com", "nope", 1)
 	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, bad)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -80,7 +73,25 @@ func TestCheckoutEndpointReturns400001FieldMap(t *testing.T) {
 	assert.Equal(t, 400001, body.Code)
 	fields, ok := body.Data.(map[string]any)
 	require.True(t, ok)
-	assert.Contains(t, fields, "buyer_email")
+	assert.Contains(t, fields, "attendees[0].email")
+}
+
+// Spec 011: a stale client may still send the removed buyer_* block; binding
+// ignores unknown fields, so the request is accepted as if it were clean.
+func TestCheckoutEndpointIgnoresStaleBuyerFields(t *testing.T) {
+	e, f := newCheckoutAPI(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	stale := `{
+		"buyer_name":"Siti Rahayu",
+		"buyer_email":"siti@example.com",
+		"buyer_phone":"+628123456789",
+		"buyer_dob":"1995-05-05",
+		"buyer_gender":"FEMALE",` + strings.TrimPrefix(checkoutFormsBody(slotIDs), "{")
+
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, stale)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 func TestQRImageServesAtTheTicketOrderPath(t *testing.T) {

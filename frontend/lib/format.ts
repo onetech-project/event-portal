@@ -95,6 +95,15 @@ export function formatDateTime(timestamp: string | null | undefined): string {
   return dateTimeFormatter.format(date);
 }
 
+export function formatDate(timestamp: string | null | undefined): string {
+  if (!timestamp) return "—";
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+
+  return new Intl.DateTimeFormat("id-ID", { dateStyle: "medium" }).format(date);
+}
+
 /**
  * Converts a `<input type="datetime-local">` value to an absolute RFC3339
  * instant. The input has no timezone, so it is interpreted in the admin's local

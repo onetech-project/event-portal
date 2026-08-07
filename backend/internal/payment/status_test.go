@@ -43,9 +43,10 @@ func TestProviderStatusMapping(t *testing.T) {
 	}
 }
 
-// orders.status is CHECK-constrained and SCHEMA.md is locked, so deny and failure
-// both fold into CANCELLED. The raw provider status is what keeps them apart, and
-// that is preserved in the payments table, not here.
+// An order's status must be one of the four rows in the order-status master list
+// (a CHECK until migration 0009, a foreign key since, and a reference by id since
+// 0013), so deny and failure both fold into CANCELLED. The raw provider status is
+// what keeps them apart, and that is preserved in the payments table, not here.
 func TestDenyAndFailureBothFoldIntoCancelled(t *testing.T) {
 	deny := payment.MapProviderStatus("deny", "")
 	failure := payment.MapProviderStatus("failure", "")

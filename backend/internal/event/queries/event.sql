@@ -152,14 +152,14 @@ WITH component_stats AS (
 )
 SELECT
     p.id, p.event_id, p.name, p.description, p.price,
-    p.sales_start, p.sales_end, p.status, p.created_at, p.updated_at,
+    p.sales_start, p.sales_end, p.is_active, p.created_at, p.updated_at,
     COALESCE(cs.available_units, 0)::int AS available_units,
     cs.limiting_ticket_type_id,
     (
         COALESCE(cs.available_units, 0) > 0
         AND COALESCE(cs.component_count, 0) > 0
         AND COALESCE(cs.all_components_on_sale, FALSE)
-        AND p.status = 'ACTIVE'
+        AND p.is_active
         AND p.sales_start <= now()
         AND p.sales_end   >= now()
     ) AS purchasable
@@ -203,19 +203,19 @@ ORDER BY pt.package_id, tt.name;
 SELECT p.id
 FROM packages p
 JOIN events e ON e.id = p.event_id
-WHERE e.slug = sqlc.arg(slug) AND e.status = 'PUBLISHED' AND p.status = 'ACTIVE';
+WHERE e.slug = sqlc.arg(slug) AND e.status = 'PUBLISHED' AND p.is_active;
 
 -- name: GetPackageByID :one
-SELECT id, event_id, name, description, price, sales_start, sales_end, status,
+SELECT id, event_id, name, description, price, sales_start, sales_end, is_active,
        created_at, updated_at
 FROM packages
 WHERE id = $1;
 
 -- name: CreatePackage :one
 -- No quota column is written because none exists.
-INSERT INTO packages (event_id, name, description, price, sales_start, sales_end, status)
+INSERT INTO packages (event_id, name, description, price, sales_start, sales_end, is_active)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+RETURNING id, event_id, name, description, price, sales_start, sales_end, is_active,
           created_at, updated_at;
 
 -- name: UpdatePackage :one
@@ -223,9 +223,9 @@ RETURNING id, event_id, name, description, price, sales_start, sales_end, status
 -- composition is bound to that event by the composite foreign keys.
 UPDATE packages
 SET name = $2, description = $3, price = $4, sales_start = $5, sales_end = $6,
-    status = $7, updated_at = now()
+    is_active = $7, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+RETURNING id, event_id, name, description, price, sales_start, sales_end, is_active,
           created_at, updated_at;
 
 -- name: DeletePackage :execrows
@@ -265,7 +265,7 @@ SELECT COUNT(*)::bigint AS total FROM packages WHERE event_id = $1;
 -- Server-side truth for a package at checkout: authoritative price, window, status
 -- and owning event. Composition is read separately via
 -- ListPackageComponentsByPackageIDs so both callers share one query.
-SELECT id, event_id, name, price, sales_start, sales_end, status
+SELECT id, event_id, name, price, sales_start, sales_end, is_active
 FROM packages
 WHERE id = $1;
 

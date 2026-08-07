@@ -3,7 +3,7 @@
 import { CalendarDays, Lock, MapPin, ReceiptText } from "lucide-react";
 
 import { TicketNotch } from "@/components/booking/ticket-notch";
-import { formatCurrency, formatDateRange } from "@/lib/format";
+import { formatCurrency, formatDate, formatDateRange } from "@/lib/format";
 import type { TicketOrderDetail } from "@/lib/types";
 
 /**
@@ -24,30 +24,48 @@ export function OrderSummaryPanel({
   order,
   beforeTotal,
   afterTotal,
+  showFeeBreakdown = true,
 }: {
   order: TicketOrderDetail;
   beforeTotal?: React.ReactNode;
   afterTotal?: React.ReactNode;
+  /**
+   * Itemize Ticket Total + the per-fee rows above the grand total. The
+   * registration phase passes false: while the forms are being filled the
+   * summary carries the grand total alone (constitution v2.1.0 fee
+   * presentation, spec 011 FR-016).
+   */
+  showFeeBreakdown?: boolean;
 }) {
   return (
     <div className="rounded-xl border bg-card">
-      {/* Icon chip + title only — no booking id line (Figma 206-3145). */}
+      {/* Icon chip + title (Figma 206-3145). NOTE: spec 011 FR-013 also calls
+          for the Booking ID here and FR-014 for a per-unit price on each
+          ticket line; both were removed by hand to match the design. Restore
+          them here, or amend the spec — right now the two disagree. */}
       <header className="flex items-center gap-3 px-4 py-4">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
           <ReceiptText aria-hidden className="size-4" />
         </span>
-        <h2 className="text-2xl font-bold">Order Summary</h2>
+        <div>
+          <h2 className="text-2xl font-bold">Order Summary</h2>
+        </div>
       </header>
 
       <div className="space-y-4 px-4.5">
         {/* Event box (Figma 12-4456): venue, address, dates, gate-open time
             from the extended GET /ticket/order/:order_id event object. */}
         <div className="rounded-lg bg-slate-50 p-3">
-          <p className="text-xs font-semibold uppercase text-muted-foreground">Event</p>
+          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
+            Event
+          </p>
           <p className="pt-1 font-semibold">{order.event.name}</p>
           <div className="mt-2 space-y-2 text-sm">
             <div className="flex items-start gap-2">
-              <MapPin aria-hidden className="mt-0.5 size-4 shrink-0 text-brand" />
+              <MapPin
+                aria-hidden
+                className="mt-0.5 size-4 shrink-0 text-brand"
+              />
               <span>
                 <span className="block font-medium">{order.event.venue}</span>
                 <span className="block text-xs text-muted-foreground">
@@ -56,10 +74,16 @@ export function OrderSummaryPanel({
               </span>
             </div>
             <div className="flex items-start gap-2">
-              <CalendarDays aria-hidden className="mt-0.5 size-4 shrink-0 text-brand" />
+              <CalendarDays
+                aria-hidden
+                className="mt-0.5 size-4 shrink-0 text-brand"
+              />
               <span>
                 <span className="block font-medium">
-                  {formatDateRange(order.event.start_date, order.event.end_date)}
+                  {formatDateRange(
+                    order.event.start_date,
+                    order.event.end_date,
+                  )}
                 </span>
                 <span className="block text-xs text-muted-foreground">
                   Gate opens at {gateTime(order.event.start_date)}
@@ -70,15 +94,26 @@ export function OrderSummaryPanel({
         </div>
 
         <div>
-          <p className="text-xs font-semibold uppercase text-muted-foreground">Tickets</p>
-          <ul className="mt-2 space-y-3 text-sm">
+          <p className="text-[10px] font-semibold uppercase text-muted-foreground tracking-widest">
+            Tickets
+          </p>
+          <ul className="flex flex-col gap-3 text-sm">
             {order.items.map((item, index) => (
               <li key={index} className="flex items-start justify-between gap-3">
-                <span className="font-semibold">
-                  {item.kind === "package" ? item.package_name : item.ticket_type_name}
+                <span className="flex flex-col font-semibold">
+                  <p>
+                    {item.kind === "package"
+                      ? item.package_name
+                      : item.ticket_type_name}
+                  </p>
+                  <p className="text-muted-foreground text-xs font-normal">
+                    {formatDate(order.event.start_date)}
+                  </p>
                 </span>
                 <span className="flex shrink-0 flex-col items-end gap-1">
-                  <span className="font-semibold">{formatCurrency(item.subtotal)}</span>
+                  <span className="font-semibold">
+                    {formatCurrency(item.subtotal)}
+                  </span>
                   <span className="rounded bg-brand-surface px-1.5 py-0.5 text-xs font-medium text-brand">
                     x{item.quantity}
                   </span>
@@ -100,29 +135,48 @@ export function OrderSummaryPanel({
       <div className="space-y-4 px-4.5 pb-4">
         {beforeTotal}
 
+        {/* Payment breakdown (spec 011 FR-016): Ticket Total then the frozen
+            per-fee rows (collectively the "Tax & Service Fee"). The
+            registration phase opts out entirely (showFeeBreakdown=false) and
+            orders that predate fees (null subtotal) have nothing to itemize —
+            both collapse to the grand total alone. */}
+        {showFeeBreakdown && order.subtotal !== null ? (
+          <dl className="space-y-1.5 border-b pb-3 text-sm">
+            <div className="flex items-baseline justify-between">
+              <dt className="text-muted-foreground">Ticket Total</dt>
+              <dd className="font-medium">{formatCurrency(order.subtotal)}</dd>
+            </div>
+            {order.fees.map((fee) => (
+              <div key={fee.name} className="flex items-baseline justify-between">
+                <dt className="text-muted-foreground">{fee.name}</dt>
+                <dd className="font-medium">{formatCurrency(fee.amount)}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+
         <div className="flex items-baseline justify-between">
           <div>
             <p className="text-xs font-semibold uppercase text-muted-foreground">
               Total payment
             </p>
-            <p className="text-xs text-muted-foreground">Includes all taxes and fees</p>
+            <p className="text-xs text-muted-foreground">
+              Includes all taxes and fees
+            </p>
           </div>
-          <p className="text-xl font-bold text-brand">{formatCurrency(order.total_amount)}</p>
+          <p className="text-xl font-bold text-brand">
+            {formatCurrency(order.total_amount)}
+          </p>
         </div>
 
         {afterTotal}
 
-        <p className="flex items-center justify-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <p className="flex items-center justify-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
           <Lock aria-hidden className="size-3.5" /> Secure checkout
         </p>
       </div>
     </div>
   );
-}
-
-/** The order's total unit count across its lines, for "Subtotal (N items)". */
-function totalQuantity(order: TicketOrderDetail): number {
-  return order.items.reduce((sum, item) => sum + item.quantity, 0);
 }
 
 /** The event's gate-open wall-clock time in Jakarta, e.g. "15:00 WIB". */

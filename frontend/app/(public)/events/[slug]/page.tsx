@@ -119,7 +119,7 @@ export function EventDetailView({ slug }: { slug: string }) {
               {event.has_terms ? (
                 <Link
                   href={`/events/${encodeURIComponent(event.slug)}/tickets`}
-                  className="flex h-11 items-center gap-2 rounded-lg bg-brand px-6 text-sm font-bold text-brand-foreground uppercase transition-opacity hover:opacity-90"
+                  className="flex flex-wrap items-center justify-center gap-2 rounded-lg bg-brand px-6 py-4 text-sm font-bold text-brand-foreground uppercase transition-opacity hover:opacity-90"
                 >
                   Buy Tickets <MoveRight aria-hidden className="size-4" />
                 </Link>
@@ -236,7 +236,7 @@ function InfoCell({
 }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="flex size-10 items-center justify-center rounded-full bg-brand text-brand-foreground">
+      <span className="flex size-10 items-center justify-center rounded-full bg-brand text-brand-foreground shrink-0">
         {icon}
       </span>
       <div>

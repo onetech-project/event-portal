@@ -53,11 +53,11 @@ describe("apiFetch", () => {
   it("sends a JSON body and content type on POST", async () => {
     const spy = mockFetch(envelope({ order_number: "ORD-1" }, 201));
 
-    await apiFetch("/checkout", { method: "POST", body: { buyer_name: "Budi" } });
+    await apiFetch("/checkout", { method: "POST", body: { name: "Budi" } });
 
     const init = spy.mock.calls[0][1];
     expect(init.method).toBe("POST");
-    expect(init.body).toBe(JSON.stringify({ buyer_name: "Budi" }));
+    expect(init.body).toBe(JSON.stringify({ name: "Budi" }));
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
   });
 

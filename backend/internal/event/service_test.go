@@ -112,7 +112,7 @@ func TestPackageNotPurchasableWhenConstituentWindowClosed(t *testing.T) {
 	closed := testsupport.SeedTicketTypeWindow(t, pool, ev.ID, "Early Bird", 10,
 		time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 	// Package is within its own window (default: now-1d to now+29d).
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Early Bundle", "25000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Early Bundle", "25000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, closed.ID, ev.ID, 1)
 
 	packages, err := svc.PackagesForEventSlug(ctx, "constituent-window")
@@ -134,16 +134,16 @@ func TestInactivePackageAbsentFromPublicPayload(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "inactive-filter", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "General", "10000.00", 10)
 
-	active := testsupport.SeedPackage(t, pool, ev.ID, "Active Bundle", "15000.00", "ACTIVE")
+	active := testsupport.SeedPackage(t, pool, ev.ID, "Active Bundle", "15000.00", true)
 	testsupport.SeedPackageTicket(t, pool, active.ID, tt.ID, ev.ID, 1)
 
-	inactive := testsupport.SeedPackage(t, pool, ev.ID, "Hidden Bundle", "10000.00", "INACTIVE")
+	inactive := testsupport.SeedPackage(t, pool, ev.ID, "Hidden Bundle", "10000.00", false)
 	testsupport.SeedPackageTicket(t, pool, inactive.ID, tt.ID, ev.ID, 1)
 
 	packages, err := svc.PackagesForEventSlug(ctx, "inactive-filter")
 
 	require.NoError(t, err)
-	require.Len(t, packages, 1, "only ACTIVE packages appear to guests")
+	require.Len(t, packages, 1, "only active packages appear to guests")
 	assert.Equal(t, "Active Bundle", packages[0].Name)
 	_ = inactive // seeded but intentionally excluded
 }

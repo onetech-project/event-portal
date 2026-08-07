@@ -2,8 +2,9 @@ package notification
 
 // ResendResponse is the body of POST /api/v1/admin/orders/:id/resend-email.
 //
-// It echoes the address the tickets went to so an admin can confirm at a glance
-// that support reached the right buyer.
+// It echoes the address the tickets went to — the order's buyer, the sole
+// recipient (spec 011 FR-012, constitution v3.0.0) — so an admin can confirm at
+// a glance that support reached the right person.
 type ResendResponse struct {
 	Message string `json:"message"`
 	SentTo  string `json:"sent_to"`

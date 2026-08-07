@@ -14,56 +14,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const createAttendee = `-- name: CreateAttendee :one
-INSERT INTO attendees (order_id, ticket_type_id, package_id, name, email)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, order_id, ticket_type_id, package_id, name, email
-`
-
-type CreateAttendeeParams struct {
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	PackageID    uuid.NullUUID
-	Name         *string
-	Email        *string
-}
-
-type CreateAttendeeRow struct {
-	ID           uuid.UUID
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	PackageID    uuid.NullUUID
-	Name         *string
-	Email        *string
-}
-
-// ticket_type_id is never null, including for bundle-derived registrants: that is
-// what keeps one pass per attendee true for packages. package_id records only the
-// bundle a slot originated in.
-func (q *Queries) CreateAttendee(ctx context.Context, arg CreateAttendeeParams) (CreateAttendeeRow, error) {
-	row := q.db.QueryRow(ctx, createAttendee,
-		arg.OrderID,
-		arg.TicketTypeID,
-		arg.PackageID,
-		arg.Name,
-		arg.Email,
-	)
-	var i CreateAttendeeRow
-	err := row.Scan(
-		&i.ID,
-		&i.OrderID,
-		&i.TicketTypeID,
-		&i.PackageID,
-		&i.Name,
-		&i.Email,
-	)
-	return i, err
-}
-
 const createAttendeeSlot = `-- name: CreateAttendeeSlot :one
 INSERT INTO attendees (order_id, ticket_type_id, package_id, package_unit)
 VALUES ($1, $2, $3, $4)
-RETURNING id, order_id, ticket_type_id, package_id, package_unit, name, email, phone, dob, gender
+RETURNING id, order_id, ticket_type_id, package_id, package_unit, name, email, phone, dob, gender_id
 `
 
 type CreateAttendeeSlotParams struct {
@@ -83,7 +37,7 @@ type CreateAttendeeSlotRow struct {
 	Email        *string
 	Phone        *string
 	Dob          pgtype.Date
-	Gender       *string
+	GenderID     *int16
 }
 
 // An EMPTY slot: ticket-type-bound at booking, identity filled at checkout.
@@ -106,19 +60,28 @@ func (q *Queries) CreateAttendeeSlot(ctx context.Context, arg CreateAttendeeSlot
 		&i.Email,
 		&i.Phone,
 		&i.Dob,
-		&i.Gender,
+		&i.GenderID,
 	)
 	return i, err
 }
 
 const createBookedOrder = `-- name: CreateBookedOrder :one
 
-INSERT INTO orders (order_number, total_amount, subtotal, status, payment_expires_at)
-VALUES ($1, $2, $3, 'PENDING', $4)
-RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-          payment_provider, payment_url, email_sent, created_at, updated_at,
-          payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
-       buyer_dob, buyer_gender, subtotal
+WITH inserted AS (
+    INSERT INTO orders (order_number, total_amount, subtotal, status_id, payment_expires_at)
+    VALUES ($1, $2, $3, (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING'), $4)
+    RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount,
+              status_id, payment_provider, payment_url, email_sent, created_at,
+              updated_at, payment_qr_string, payment_expires_at, terms_agreed_at,
+              event_terms_id, subtotal
+)
+SELECT i.id, i.order_number, i.buyer_name, i.buyer_email, i.buyer_phone, i.total_amount,
+       os.name AS status,
+       i.payment_provider, i.payment_url, i.email_sent, i.created_at, i.updated_at,
+       i.payment_qr_string, i.payment_expires_at, i.terms_agreed_at, i.event_terms_id,
+       i.subtotal
+FROM inserted i
+JOIN order_statuses os ON os.id = i.status_id
 `
 
 type CreateBookedOrderParams struct {
@@ -128,17 +91,42 @@ type CreateBookedOrderParams struct {
 	PaymentExpiresAt *time.Time
 }
 
+type CreateBookedOrderRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	Subtotal         decimal.NullDecimal
+}
+
 // Spec 008: two-phase booking ------------------------------------------------
-// Booking (TX-B): the order exists before any buyer identity — those columns
+// Booking (TX-B): the order exists before any contact identity — those columns
 // stay NULL until checkout. payment_expires_at carries the 1-hour hold.
-func (q *Queries) CreateBookedOrder(ctx context.Context, arg CreateBookedOrderParams) (Order, error) {
+//
+// Wrapped in a CTE because RETURNING cannot join: the insert resolves PENDING to
+// its id, then the outer select joins the master list back so the caller still
+// receives `status` as the NAME, with the same NOT NULL string type as every
+// other order read (research R19).
+func (q *Queries) CreateBookedOrder(ctx context.Context, arg CreateBookedOrderParams) (CreateBookedOrderRow, error) {
 	row := q.db.QueryRow(ctx, createBookedOrder,
 		arg.OrderNumber,
 		arg.TotalAmount,
 		arg.Subtotal,
 		arg.PaymentExpiresAt,
 	)
-	var i Order
+	var i CreateBookedOrderRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderNumber,
@@ -156,8 +144,6 @@ func (q *Queries) CreateBookedOrder(ctx context.Context, arg CreateBookedOrderPa
 		&i.PaymentExpiresAt,
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
-		&i.BuyerDob,
-		&i.BuyerGender,
 		&i.Subtotal,
 	)
 	return i, err
@@ -199,58 +185,6 @@ func (q *Queries) CreateFee(ctx context.Context, arg CreateFeeParams) (Fee, erro
 	return i, err
 }
 
-const createOrder = `-- name: CreateOrder :one
-
-INSERT INTO orders (order_number, buyer_name, buyer_email, buyer_phone, total_amount, status)
-VALUES ($1, $2, $3, $4, $5, 'PENDING')
-RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-          payment_provider, payment_url, email_sent, created_at, updated_at,
-          payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
-       buyer_dob, buyer_gender, subtotal
-`
-
-type CreateOrderParams struct {
-	OrderNumber string
-	BuyerName   *string
-	BuyerEmail  *string
-	BuyerPhone  *string
-	TotalAmount decimal.Decimal
-}
-
-// Checkout writes (TX1) ----------------------------------------------------
-func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order, error) {
-	row := q.db.QueryRow(ctx, createOrder,
-		arg.OrderNumber,
-		arg.BuyerName,
-		arg.BuyerEmail,
-		arg.BuyerPhone,
-		arg.TotalAmount,
-	)
-	var i Order
-	err := row.Scan(
-		&i.ID,
-		&i.OrderNumber,
-		&i.BuyerName,
-		&i.BuyerEmail,
-		&i.BuyerPhone,
-		&i.TotalAmount,
-		&i.Status,
-		&i.PaymentProvider,
-		&i.PaymentUrl,
-		&i.EmailSent,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.PaymentQrString,
-		&i.PaymentExpiresAt,
-		&i.TermsAgreedAt,
-		&i.EventTermsID,
-		&i.BuyerDob,
-		&i.BuyerGender,
-		&i.Subtotal,
-	)
-	return i, err
-}
-
 const createOrderFee = `-- name: CreateOrderFee :exec
 INSERT INTO order_fees (order_id, name, amount, position)
 VALUES ($1, $2, $3, $4)
@@ -275,6 +209,7 @@ func (q *Queries) CreateOrderFee(ctx context.Context, arg CreateOrderFeeParams) 
 }
 
 const createOrderItem = `-- name: CreateOrderItem :one
+
 INSERT INTO order_items (order_id, ticket_type_id, package_id, quantity, price)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING id, order_id, ticket_type_id, package_id, quantity, price
@@ -297,6 +232,7 @@ type CreateOrderItemRow struct {
 	Price        decimal.Decimal
 }
 
+// Checkout writes (TX1) ----------------------------------------------------
 // Exactly one of ticket_type_id / package_id is set (order_items_line_kind_chk). A
 // package line is stored ONCE at the package's own price rather than expanded into
 // per-constituent rows, so total_amount stays exactly SUM(quantity * price).
@@ -334,21 +270,47 @@ func (q *Queries) DeleteFee(ctx context.Context, id uuid.UUID) (int64, error) {
 
 const getOrderByID = `-- name: GetOrderByID :one
 
-SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at,
-       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
-       buyer_dob, buyer_gender, subtotal
-FROM orders
-WHERE id = $1
+SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
+       os.name AS status,
+       o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at,
+       o.payment_qr_string, o.payment_expires_at, o.terms_agreed_at, o.event_terms_id,
+       o.subtotal
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE o.id = $1
 `
+
+type GetOrderByIDRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	Subtotal         decimal.NullDecimal
+}
 
 // Reads --------------------------------------------------------------------
 // The trailing two columns are listed in migration order (0002 appended them
 // after updated_at), which is what lets sqlc reuse the single Order struct
 // instead of emitting a near-identical row type per query.
-func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error) {
+// Every order read joins the status master list and aliases the NAME back to
+// `status`, so the generated Order struct still carries `Status string` holding
+// PENDING/PAID/CANCELLED/EXPIRED. That is the whole reason migration 0013 costs
+// no Go changes (research R19) — keep the alias if you touch these.
+func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (GetOrderByIDRow, error) {
 	row := q.db.QueryRow(ctx, getOrderByID, id)
-	var i Order
+	var i GetOrderByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderNumber,
@@ -366,25 +328,45 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.PaymentExpiresAt,
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
-		&i.BuyerDob,
-		&i.BuyerGender,
 		&i.Subtotal,
 	)
 	return i, err
 }
 
 const getOrderByNumber = `-- name: GetOrderByNumber :one
-SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at,
-       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
-       buyer_dob, buyer_gender, subtotal
-FROM orders
-WHERE order_number = $1
+SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
+       os.name AS status,
+       o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at,
+       o.payment_qr_string, o.payment_expires_at, o.terms_agreed_at, o.event_terms_id,
+       o.subtotal
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE o.order_number = $1
 `
 
-func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (Order, error) {
+type GetOrderByNumberRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	Subtotal         decimal.NullDecimal
+}
+
+func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (GetOrderByNumberRow, error) {
 	row := q.db.QueryRow(ctx, getOrderByNumber, orderNumber)
-	var i Order
+	var i GetOrderByNumberRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderNumber,
@@ -402,8 +384,6 @@ func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (Ord
 		&i.PaymentExpiresAt,
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
-		&i.BuyerDob,
-		&i.BuyerGender,
 		&i.Subtotal,
 	)
 	return i, err
@@ -427,18 +407,41 @@ func (q *Queries) GetOrderEventID(ctx context.Context, orderID uuid.UUID) (uuid.
 }
 
 const getOrderWithTermsByNumber = `-- name: GetOrderWithTermsByNumber :one
-SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at,
-       payment_qr_string, payment_expires_at, terms_agreed_at, event_terms_id,
-       buyer_dob, buyer_gender, subtotal
-FROM orders
-WHERE order_number = $1
+SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
+       os.name AS status,
+       o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at,
+       o.payment_qr_string, o.payment_expires_at, o.terms_agreed_at, o.event_terms_id,
+       o.subtotal
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE o.order_number = $1
 `
 
-// The 008 guest read: everything the order page needs to pick its screen.
-func (q *Queries) GetOrderWithTermsByNumber(ctx context.Context, orderNumber string) (Order, error) {
+type GetOrderWithTermsByNumberRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	Subtotal         decimal.NullDecimal
+}
+
+// The 008 guest read: everything the order page needs to pick its screen. The
+// screen it picks is chosen from the status NAME, which the join preserves.
+func (q *Queries) GetOrderWithTermsByNumber(ctx context.Context, orderNumber string) (GetOrderWithTermsByNumberRow, error) {
 	row := q.db.QueryRow(ctx, getOrderWithTermsByNumber, orderNumber)
-	var i Order
+	var i GetOrderWithTermsByNumberRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrderNumber,
@@ -456,8 +459,6 @@ func (q *Queries) GetOrderWithTermsByNumber(ctx context.Context, orderNumber str
 		&i.PaymentExpiresAt,
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
-		&i.BuyerDob,
-		&i.BuyerGender,
 		&i.Subtotal,
 	)
 	return i, err
@@ -519,7 +520,8 @@ const hasPendingOrdersForPackage = `-- name: HasPendingOrdersForPackage :one
 SELECT EXISTS (
     SELECT 1 FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
-    WHERE oi.package_id = $1 AND o.status = 'PENDING'
+    WHERE oi.package_id = $1
+      AND o.status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
 ) AS has_pending
 `
 
@@ -583,7 +585,7 @@ SELECT id, name FROM genders WHERE is_active ORDER BY name
 `
 
 type ListActiveGendersRow struct {
-	ID   uuid.UUID
+	ID   int16
 	Name string
 }
 
@@ -611,10 +613,11 @@ func (q *Queries) ListActiveGenders(ctx context.Context) ([]ListActiveGendersRow
 
 const listAttendeeSlotsByOrderID = `-- name: ListAttendeeSlotsByOrderID :many
 SELECT a.id, a.order_id, a.ticket_type_id, a.package_id, a.package_unit,
-       a.name, a.email, a.phone, a.dob, a.gender,
+       a.name, a.email, a.phone, a.dob, g.name AS gender,
        tt.name AS ticket_type_name
 FROM attendees a
 JOIN ticket_types tt ON tt.id = a.ticket_type_id
+LEFT JOIN genders g ON g.id = a.gender_id
 WHERE a.order_id = $1
 ORDER BY a.package_id NULLS FIRST, a.package_unit ASC, a.id ASC
 `
@@ -635,7 +638,10 @@ type ListAttendeeSlotsByOrderIDRow struct {
 
 // Slot list incl. the 008 detail columns and the human ticket-type name.
 // Ordering (spec 010): standalone slots first, then bundle slots contiguous
-// per (package_id, package_unit), so one visitor form maps to one unit.
+// per (package_id, package_unit), so one visitor form maps to one unit. The
+// FIRST row of this ordering is the order's primary contact (spec 011).
+// gender comes back as the master row's NAME (LEFT JOIN: unfilled slots are
+// NULL), keeping the wire contract unchanged over the gender_id FK.
 func (q *Queries) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListAttendeeSlotsByOrderIDRow, error) {
 	rows, err := q.db.Query(ctx, listAttendeeSlotsByOrderID, orderID)
 	if err != nil {
@@ -883,19 +889,21 @@ func (q *Queries) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID
 
 const listOrdersAdmin = `-- name: ListOrdersAdmin :many
 
-SELECT id, order_number, buyer_name, buyer_email, buyer_phone, total_amount, status,
-       payment_provider, payment_url, email_sent, created_at, updated_at
-FROM orders
-WHERE ($1::text IS NULL OR status = $1::text)
+SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
+       os.name AS status,
+       o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE ($1::text IS NULL OR os.name = $1::text)
   AND (
         $2::uuid[] IS NULL
         OR EXISTS (
             SELECT 1 FROM order_items oi
-            WHERE oi.order_id = orders.id
+            WHERE oi.order_id = o.id
               AND oi.ticket_type_id = ANY($2::uuid[])
         )
       )
-ORDER BY created_at DESC
+ORDER BY o.created_at DESC
 `
 
 type ListOrdersAdminParams struct {
@@ -919,6 +927,8 @@ type ListOrdersAdminRow struct {
 }
 
 // Admin read-only views ----------------------------------------------------
+// The `status` filter parameter is still the NAME the admin UI sends; it is
+// matched against the joined master row rather than a column on orders.
 func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams) ([]ListOrdersAdminRow, error) {
 	rows, err := q.db.Query(ctx, listOrdersAdmin, arg.Status, arg.TicketTypeIds)
 	if err != nil {
@@ -953,12 +963,13 @@ func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams
 }
 
 const listOrdersDueForExpiry = `-- name: ListOrdersDueForExpiry :many
-SELECT id, order_number, status, payment_expires_at
-FROM orders
-WHERE status = 'PENDING'
-  AND payment_expires_at IS NOT NULL
-  AND payment_expires_at <= $1
-ORDER BY payment_expires_at
+SELECT o.id, o.order_number, os.name AS status, o.payment_expires_at
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE o.status_id = 1 -- PENDING, pinned by migration 0013; see above
+  AND o.payment_expires_at IS NOT NULL
+  AND o.payment_expires_at <= $1
+ORDER BY o.payment_expires_at
 LIMIT $2
 `
 
@@ -977,6 +988,15 @@ type ListOrdersDueForExpiryRow struct {
 // Orders whose payment deadline has passed but which nothing has moved yet.
 // Oldest first, so the longest-held quota is released soonest. Uses the partial
 // index idx_orders_payment_expiry, which covers exactly this predicate.
+//
+// THE ONE PLACE THE LITERAL ID IS REQUIRED. Everywhere else the status name is
+// resolved with a subquery; here it cannot be. A partial index predicate must
+// be immutable, so the index is defined `WHERE status_id = 1`, and PostgreSQL
+// only matches a partial index when the query predicate provably implies it at
+// PLAN time. A subquery is a runtime value, so `status_id = (SELECT …)` would
+// silently stop using the index and turn every sweeper tick into a sequential
+// scan of the whole order history. That is why migration 0013 pins the seeded
+// ids and SCHEMA.md documents 1 = PENDING as part of the contract (research R20).
 func (q *Queries) ListOrdersDueForExpiry(ctx context.Context, arg ListOrdersDueForExpiryParams) ([]ListOrdersDueForExpiryRow, error) {
 	rows, err := q.db.Query(ctx, listOrdersDueForExpiry, arg.PaymentExpiresAt, arg.Limit)
 	if err != nil {
@@ -1068,7 +1088,7 @@ func (q *Queries) OrderNumberExists(ctx context.Context, orderNumber string) (bo
 const recordTermsAgreement = `-- name: RecordTermsAgreement :execrows
 UPDATE orders
 SET terms_agreed_at = now(), event_terms_id = $2, updated_at = now()
-WHERE id = $1 AND status = 'PENDING'
+WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
 `
 
 type RecordTermsAgreementParams struct {
@@ -1183,22 +1203,23 @@ func (q *Queries) SoldCountByTicketTypes(ctx context.Context, ids []uuid.UUID) (
 
 const updateAttendeeDetails = `-- name: UpdateAttendeeDetails :execrows
 UPDATE attendees
-SET name = $3, email = $4, phone = $5, dob = $6, gender = $7
+SET name = $3, email = $4, phone = $5, dob = $6, gender_id = $7
 WHERE id = $1 AND order_id = $2
 `
 
 type UpdateAttendeeDetailsParams struct {
-	ID      uuid.UUID
-	OrderID uuid.UUID
-	Name    *string
-	Email   *string
-	Phone   *string
-	Dob     pgtype.Date
-	Gender  *string
+	ID       uuid.UUID
+	OrderID  uuid.UUID
+	Name     *string
+	Email    *string
+	Phone    *string
+	Dob      pgtype.Date
+	GenderID *int16
 }
 
 // Checkout TX-D: fills one slot. order_id in the predicate stops a forged slot
-// id from writing into another order's attendee.
+// id from writing into another order's attendee. gender_id references the
+// master row whose NAME the request carried (spec 011, FR-018).
 func (q *Queries) UpdateAttendeeDetails(ctx context.Context, arg UpdateAttendeeDetailsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateAttendeeDetails,
 		arg.ID,
@@ -1207,7 +1228,7 @@ func (q *Queries) UpdateAttendeeDetails(ctx context.Context, arg UpdateAttendeeD
 		arg.Email,
 		arg.Phone,
 		arg.Dob,
-		arg.Gender,
+		arg.GenderID,
 	)
 	if err != nil {
 		return 0, err
@@ -1256,29 +1277,27 @@ func (q *Queries) UpdateFee(ctx context.Context, arg UpdateFeeParams) (Fee, erro
 
 const updateOrderBuyer = `-- name: UpdateOrderBuyer :execrows
 UPDATE orders
-SET buyer_name = $2, buyer_email = $3, buyer_phone = $4,
-    buyer_dob = $5, buyer_gender = $6, updated_at = now()
-WHERE id = $1 AND status = 'PENDING'
+SET buyer_name = $2, buyer_email = $3, buyer_phone = $4, updated_at = now()
+WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
 `
 
 type UpdateOrderBuyerParams struct {
-	ID          uuid.UUID
-	BuyerName   *string
-	BuyerEmail  *string
-	BuyerPhone  *string
-	BuyerDob    pgtype.Date
-	BuyerGender *string
+	ID         uuid.UUID
+	BuyerName  *string
+	BuyerEmail *string
+	BuyerPhone *string
 }
 
-// Checkout TX-D: buyer identity arrives with the visitor forms.
+// Checkout TX-D: the primary contact — a snapshot of the TOPMOST holder form
+// (first slot group in canonical slot order, spec 011). Only what downstream
+// consumes is kept: name/email/phone (gateway customer, admin list, delivery
+// fallback).
 func (q *Queries) UpdateOrderBuyer(ctx context.Context, arg UpdateOrderBuyerParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateOrderBuyer,
 		arg.ID,
 		arg.BuyerName,
 		arg.BuyerEmail,
 		arg.BuyerPhone,
-		arg.BuyerDob,
-		arg.BuyerGender,
 	)
 	if err != nil {
 		return 0, err
@@ -1288,8 +1307,10 @@ func (q *Queries) UpdateOrderBuyer(ctx context.Context, arg UpdateOrderBuyerPara
 
 const updateOrderStatusIfPending = `-- name: UpdateOrderStatusIfPending :execrows
 UPDATE orders
-SET status = $2, updated_at = now()
-WHERE id = $1 AND status = 'PENDING'
+SET status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = $2),
+    updated_at = now()
+WHERE orders.id = $1
+  AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
 `
 
 type UpdateOrderStatusIfPendingParams struct {
@@ -1299,6 +1320,11 @@ type UpdateOrderStatusIfPendingParams struct {
 
 // Guarded on PENDING so a replayed webhook notification cannot apply the same
 // transition (and its quota restoration) twice.
+//
+// Migration 0013 moved the column to a reference, but the caller still passes a
+// NAME: the resolution happens here, in the statement, which is what keeps every
+// Go status comparison in the codebase unchanged (spec 011 FR-026, research
+// R19). Still one atomic statement, so the idempotency guard is unweakened.
 func (q *Queries) UpdateOrderStatusIfPending(ctx context.Context, arg UpdateOrderStatusIfPendingParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateOrderStatusIfPending, arg.ID, arg.Status)
 	if err != nil {
@@ -1351,7 +1377,9 @@ SET payment_url = $2,
     payment_qr_string = $4,
     payment_expires_at = $5,
     updated_at = now()
-WHERE id = $1 AND status = 'PENDING' AND payment_qr_string IS NULL
+WHERE orders.id = $1
+  AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
+  AND payment_qr_string IS NULL
 `
 
 type UpdatePaymentDetailsIfUnstartedParams struct {
@@ -1381,7 +1409,7 @@ func (q *Queries) UpdatePaymentDetailsIfUnstarted(ctx context.Context, arg Updat
 const updatePaymentQR = `-- name: UpdatePaymentQR :execrows
 UPDATE orders
 SET payment_url = $2, payment_qr_string = $3, updated_at = now()
-WHERE id = $1 AND status = 'PENDING'
+WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
 `
 
 type UpdatePaymentQRParams struct {

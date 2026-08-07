@@ -48,27 +48,39 @@ CREATE TABLE ticket_types (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 4a. ORDER STATUSES (master data, migration 0009)
--- The status set is data, not a CHECK constraint: orders.status keeps its
--- varchar value (status-filtering queries untouched) but is foreign-keyed here.
+-- 4a. ORDER STATUSES (master data, migration 0009; re-keyed by 0013)
+-- The status set is data, not a CHECK constraint. orders references a row by id
+-- (migration 0013) while the NAME stays the value every interface exchanges and
+-- displays — reads alias `order_statuses.name AS status`, writes resolve the
+-- name in-statement, so no Go comparison or wire shape changed (spec 011
+-- FR-026).
+-- The seeded ids are FIXED and part of the schema contract: idx_orders_payment_expiry
+-- (bottom of this file) is a partial index, and PostgreSQL requires an immutable
+-- predicate — a subquery resolving 'PENDING' is rejected, so the literal 1 is
+-- the only option.
 CREATE TABLE order_statuses (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(50) NOT NULL UNIQUE, -- seeded: PENDING, PAID, CANCELLED, EXPIRED
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- seeded 1=PENDING, 2=PAID, 3=CANCELLED, 4=EXPIRED
+    name VARCHAR(256) NOT NULL UNIQUE, -- mandatory + unique: the name is what resolves to this row
+    is_active BOOLEAN NOT NULL DEFAULT TRUE, -- retire a status by clearing this, never by deleting the row
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE
+    created_by VARCHAR(50) NOT NULL, -- 'SYSTEM' for the seeded rows; an admin's id once master-list CRUD exists
+    updated_at TIMESTAMP WITH TIME ZONE,
+    updated_by VARCHAR(50)
 );
 
--- 4b. GENDERS (master data, migration 0008)
+-- 4b. GENDERS (master data, migration 0008; re-keyed by 0013)
 -- The registration forms' gender options (GET /ticket/genders); `name` is the
--- canonical value stored on orders.buyer_gender and attendees.gender, and
--- checkout validates submissions against the active rows.
+-- canonical value stored on the wire, and checkout validates submissions
+-- against the active rows. attendees.gender_id references the id; the order
+-- service maps name <-> id (spec 011 FR-018, FR-025).
 CREATE TABLE genders (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(50) NOT NULL UNIQUE, -- seeded: FEMALE, MALE
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    id SMALLINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- seeded: 1, 2
+    name VARCHAR(100) NOT NULL UNIQUE, -- seeded: FEMALE, MALE
+    is_active BOOLEAN NOT NULL DEFAULT TRUE, -- deactivating hides the option; stored references keep resolving
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE
+    created_by VARCHAR(50) NOT NULL, -- 'SYSTEM' for the seeded rows
+    updated_at TIMESTAMP WITH TIME ZONE,
+    updated_by VARCHAR(50)
 );
 
 -- 4c. FEES (master data, migration 0010)
@@ -99,23 +111,26 @@ CREATE TABLE order_fees (
 );
 
 -- 4. ORDERS
--- Two-phase booking (spec 008): booking creates the row with buyer fields NULL
--- and payment_expires_at = now()+BOOKING_HOLD; checkout fills the buyer, calls
--- the gateway, and overwrites payment_expires_at with now()+PAYMENT_WINDOW. The
--- same column carries both deadlines, so one sweeper query expires both phases.
+-- Two-phase booking (spec 008): booking creates the row with contact fields NULL
+-- and payment_expires_at = now()+BOOKING_HOLD; checkout fills the primary
+-- contact, calls the gateway, and overwrites payment_expires_at with
+-- now()+PAYMENT_WINDOW. The same column carries both deadlines, so one sweeper
+-- query expires both phases.
 -- total_amount = subtotal + SUM(order_fees.amount); subtotal is NULL on orders
 -- that predate fees (migration 0010).
+-- Spec 011: there is no buyer form — buyer_* is the primary contact, a snapshot
+-- of the TOPMOST holder form (first slot group in canonical slot order). The
+-- holder's dob/gender live only on their attendee row (buyer_dob/buyer_gender
+-- dropped by migration 0012).
 CREATE TABLE orders (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_number VARCHAR(100) UNIQUE NOT NULL,
-    buyer_name VARCHAR(255), -- NULL until checkout (booking precedes buyer entry)
-    buyer_email VARCHAR(255),
-    buyer_phone VARCHAR(50),
-    buyer_dob DATE, -- buyer form mirrors a visitor card (Figma 12-4456, migration 0007)
-    buyer_gender VARCHAR(10),
+    buyer_name VARCHAR(255), -- primary contact — snapshot of the topmost holder form (spec 011); NULL until checkout
+    buyer_email VARCHAR(255), -- primary contact email; also the delivery fallback for empty holder emails
+    buyer_phone VARCHAR(50), -- primary contact phone; fed to the payment gateway customer details
     subtotal NUMERIC(12, 2), -- pre-fee sum of the lines (migration 0010)
     total_amount NUMERIC(12, 2) NOT NULL,
-    status VARCHAR(50) NOT NULL REFERENCES order_statuses(name), -- CHECK replaced by FK (migration 0009)
+    status_id INTEGER NOT NULL REFERENCES order_statuses(id), -- was a varchar name FK (0009), re-keyed by 0013; reads alias order_statuses.name AS status, so the wire still carries PENDING/PAID/...
     payment_provider VARCHAR(50), 
     payment_url TEXT, -- provider's generate-qr-code action URL (audit/fallback); not a page the guest is sent to
     payment_qr_string TEXT, -- raw QRIS payload; the QR image is rendered from this on demand, never stored
@@ -157,6 +172,11 @@ CREATE TABLE order_items (
 -- whole unit, and checkout requires identical visitor data within it. NULL for
 -- standalone slots and for bundle slots booked before spec 010 (those keep the
 -- pre-010 one-form-per-slot behavior).
+-- Spec 011: gender is a real reference to the genders master (migration 0012
+-- replaced the free-text column + fixed CHECK with gender_id). The API keeps
+-- exchanging the gender NAME; reads JOIN genders, writes resolve name -> id.
+-- Phone is validated digits-only 10-12 at checkout since spec 011 (no CHECK —
+-- pre-011 rows keep their 7-20-digit-era values).
 CREATE TABLE attendees (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -164,10 +184,10 @@ CREATE TABLE attendees (
     package_id UUID REFERENCES packages(id) ON DELETE RESTRICT,
     package_unit SMALLINT CHECK (package_unit IS NULL OR package_unit >= 1),
     name VARCHAR(255), -- NULL while the slot is unfilled (pre-checkout)
-    email VARCHAR(255),
+    email VARCHAR(255), -- per-holder e-ticket delivery address (spec 011)
     phone VARCHAR(50),
     dob DATE,
-    gender VARCHAR(20) CHECK (gender IN ('MALE', 'FEMALE'))
+    gender_id SMALLINT REFERENCES genders(id) -- NULL while unfilled; name<->id mapped in the order service (0012, re-keyed by 0013)
 );
 
 -- 7. TICKETS (Generated after PAID)
@@ -206,7 +226,7 @@ CREATE TABLE packages (
     price NUMERIC(12, 2) NOT NULL CHECK (price >= 0),
     sales_start TIMESTAMP WITH TIME ZONE NOT NULL,
     sales_end TIMESTAMP WITH TIME ZONE NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE')),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE, -- was status ACTIVE|INACTIVE (migration 0013); a boolean on the wire too, unlike the order status
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT packages_sales_window_chk CHECK (sales_end > sales_start),
@@ -290,7 +310,10 @@ CREATE INDEX idx_attendees_order_id ON attendees(order_id);
 
 -- The expiry sweeper's only query: PENDING orders whose payment deadline passed.
 -- Partial, so it stays roughly the size of the live payment window.
-CREATE INDEX idx_orders_payment_expiry ON orders (payment_expires_at) WHERE status = 'PENDING';
+-- Partial on the LITERAL seeded id, not a name lookup: a partial index predicate
+-- must be immutable, so PostgreSQL rejects a subquery here. This is why
+-- order_statuses.id = 1 is PENDING by contract (migration 0013).
+CREATE INDEX idx_orders_payment_expiry ON orders (payment_expires_at) WHERE status_id = 1;
 -- Spec 008 content lookups, all by owning event.
 CREATE INDEX idx_event_terms_event_id ON event_terms(event_id);
 CREATE INDEX idx_event_activities_event_id ON event_activities(event_id);
