@@ -9,6 +9,7 @@ import { PaymentStatusCard } from "@/components/order/payment-status-card";
 import { WrongEvent } from "@/components/order/wrong-event";
 import { Loading, PageHeading, StatusAlert } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
+import { orderCheckoutPath, orderFormsPath } from "@/lib/order-routes";
 import { useOrderDetail } from "@/lib/queries";
 
 /**
@@ -39,20 +40,25 @@ export function OrderDoneView({
   const router = useRouter();
   const { data, isPending, isError, error } = useOrderDetail(orderNumber);
 
-  // The mirror of the payment screen's forward. An order still awaiting payment
+  // The mirror of the earlier screens' forwards. An order still awaiting payment
   // has not finished anything, so a guest who reaches this address early — by
   // editing the URL, or from a bookmark saved before paying — belongs back on
-  // the payment screen rather than reading a confirmation of nothing.
+  // the step they actually stopped at rather than reading a confirmation of
+  // nothing: the QR screen once payment has started, the holder forms before
+  // that (spec 011 FR-021).
   const stillPayable = data?.status === "PENDING";
+  const started = data?.payment_started === true;
   const ownedByThisEvent = data?.event.slug === eventSlug;
 
   useEffect(() => {
     if (stillPayable && ownedByThisEvent) {
       router.replace(
-        `/events/${encodeURIComponent(eventSlug)}/orders/${encodeURIComponent(orderNumber)}`,
+        started
+          ? orderCheckoutPath(eventSlug, orderNumber)
+          : orderFormsPath(eventSlug, orderNumber),
       );
     }
-  }, [stillPayable, ownedByThisEvent, router, eventSlug, orderNumber]);
+  }, [stillPayable, started, ownedByThisEvent, router, eventSlug, orderNumber]);
 
   if (isPending) return <Loading label="Loading your order…" />;
 
@@ -97,11 +103,7 @@ export function OrderDoneView({
         title={data.status === "EXPIRED" ? "Order expired" : "Order cancelled"}
         subtitle={`Order ${data.order_id}`}
       />
-      <PaymentStatusCard
-        status={data.status}
-        buyerEmail={data.buyer_email}
-        eventSlug={eventSlug}
-      />
+      <PaymentStatusCard status={data.status} eventSlug={eventSlug} />
     </main>
   );
 }

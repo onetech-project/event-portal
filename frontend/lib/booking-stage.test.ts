@@ -15,14 +15,33 @@ describe("bookingStageFromPathname", () => {
     expect(bookingStageFromPathname(`/events/${SLUG}/tickets`)).toBe("Booking");
   });
 
-  it("maps the order page to Payment", () => {
-    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}`)).toBe("Payment");
+  it("maps the ticket holder forms to Registration", () => {
+    // Spec 011 FR-020: the forms and the QR screen used to share this address,
+    // which forced the rail to report Payment here — reading as "Registration
+    // finished" while the guest was still filling it in.
+    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}`)).toBe("Registration");
   });
 
-  it("maps the confirmation page to Done, not Payment", () => {
-    // The order route is a prefix of the done route, so a naive prefix check
-    // reports Payment here and the rail never reaches its fourth stage.
+  it("maps the QR screen to Payment", () => {
+    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/checkout`)).toBe(
+      "Payment",
+    );
+  });
+
+  it("maps the confirmation page to Done, not Registration", () => {
+    // The order route is a prefix of both nested routes, so a naive prefix
+    // check stops at the forms and the rail never reaches its last two stages.
     expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/done`)).toBe("Done");
+  });
+
+  it("gives each of the four stages exactly one address", () => {
+    const stageOf = (path: string) => bookingStageFromPathname(path);
+    expect([
+      stageOf(`/events/${SLUG}/tickets`),
+      stageOf(`/events/${SLUG}/orders/${ORDER}`),
+      stageOf(`/events/${SLUG}/orders/${ORDER}/checkout`),
+      stageOf(`/events/${SLUG}/orders/${ORDER}/done`),
+    ]).toEqual([...BOOKING_STEPS]);
   });
 
   it("ignores a trailing slash", () => {
@@ -33,7 +52,10 @@ describe("bookingStageFromPathname", () => {
 
   it("is not confused by a slug or order number containing a stage name", () => {
     expect(bookingStageFromPathname("/events/checkout")).toBe("Booking");
-    expect(bookingStageFromPathname("/events/done/orders/done")).toBe("Payment");
+    expect(bookingStageFromPathname("/events/done/orders/done")).toBe("Registration");
+    expect(bookingStageFromPathname("/events/checkout/orders/checkout")).toBe(
+      "Registration",
+    );
   });
 
   it("falls back to Booking for an unrecognised path under an event", () => {
@@ -45,6 +67,7 @@ describe("bookingStageFromPathname", () => {
       `/events/${SLUG}`,
       `/events/${SLUG}/checkout`,
       `/events/${SLUG}/orders/${ORDER}`,
+      `/events/${SLUG}/orders/${ORDER}/checkout`,
       `/events/${SLUG}/orders/${ORDER}/done`,
       "/",
       "",

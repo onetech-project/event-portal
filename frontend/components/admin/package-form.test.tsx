@@ -49,7 +49,7 @@ const existing: PackageAdminView = {
   price: "250000.00",
   sales_start: "2026-07-01T00:00:00Z",
   sales_end: "2026-08-31T00:00:00Z",
-  status: "ACTIVE",
+  is_active: true,
   components: [
     { ticket_type_id: DAY_1, ticket_type_name: "Day 1", quantity_per_unit: 1 },
     { ticket_type_id: DAY_2, ticket_type_name: "Day 2", quantity_per_unit: 1 },

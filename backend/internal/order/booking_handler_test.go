@@ -106,9 +106,9 @@ func TestTicketOrderEndpointReturnsSlotsAndScreenRoutingFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &detail))
 	assert.ElementsMatch(t,
 		[]string{"order_id", "status", "total_amount", "subtotal", "fees",
-			"buyer_name", "buyer_email", "expires_at", "terms_agreed_at",
+			"expires_at", "terms_agreed_at",
 			"payment_started", "event", "items", "slots", "server_time", "payment"},
-		keysOfMap(detail))
+		keysOfMap(detail), "spec 011 removed buyer_name/buyer_email from the guest read")
 
 	assert.Equal(t, false, detail["payment_started"], "no gateway involvement at booking")
 	assert.Nil(t, detail["terms_agreed_at"], "agreement not yet recorded")

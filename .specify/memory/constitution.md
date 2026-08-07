@@ -1,5 +1,122 @@
 <!--
 Sync Impact Report
+Version change: 2.1.0 → 3.0.0 (MAJOR — the delivery mandate is redefined a second
+time, in the opposite direction: behavior compliant under 2.x — one email per
+distinct holder address — is non-compliant under 3.0.0. Same reasoning as the
+2.0.0 bump: a reversal is a backward-incompatible redefinition, not expanded
+guidance.)
+
+Trigger: clarification of 2026-08-06 (recorded in specs/011-order-buyer-info
+spec.md, Clarifications): the buyer is ticket holder 1, i.e. the first holder
+form IS the buyer information, and "Buyer is the only one that gets invoice and
+tickets, not the others". Delivery therefore returns to exactly one email — the
+rule 1.1.1 held — while everything else spec 011 introduced (holder forms with no
+separate buyer form, primary contact derived from the first canonical slot,
+gender_id FK, the three-column buyer snapshot) stands unchanged.
+
+Note for future readers: 2.0.0 moved this rule to per-holder fan-out and 3.0.0
+moves it back. The intermediate state was implemented and then reverted inside a
+single working session; the holder email addresses are still collected and stored
+as holder identity, so widening delivery again later is a delivery-layer change
+only, not a data-capture one.
+
+Modified sections:
+  - Critical Data Flow Rules, ticket-generation bullet — delivery is one email to
+    the order's buyer (the primary-contact snapshot `orders.buyer_email`, i.e. the
+    first holder form's address) carrying every ticket in the order as a PDF plus
+    the receipt. No email is sent to the other holders' addresses.
+    `orders.email_sent` is set after that one email is delivered.
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - PRD.md — follow-up in the implementation change: §1.4 "Payment & Delivery"
+    returns to one email to the buyer (it was rewritten for per-holder delivery
+    under 2.0.0).
+  - ARCHITECTURE.md — follow-up in the implementation change: the delivery
+    sequence diagram returns from per-holder fan-out to a single send.
+  - SCHEMA.md — no impact; no column changes.
+
+Templates requiring follow-up: none.
+
+Previous report (2.0.0 → 2.1.0) follows.
+
+Version change: 2.0.0 → 2.1.0 (MINOR — new guidance added to Critical Data Flow
+Rules; no existing rule removed or redefined)
+
+Trigger: user direction during the spec 011 design iteration (2026-08-06): the
+Order Summary panel on the order page's form-filling (registration) step shows
+only the grand Total Payment — the itemized fee breakdown does not belong on
+that step. The awaiting-payment step's summary and the receipt email keep the
+full itemization; the frozen per-order fee math (order_fees) is untouched.
+
+Modified sections:
+  - Critical Data Flow Rules — added the fee-presentation bullet (form-step
+    summary shows the grand total only, labeled as including taxes and fees;
+    itemized Ticket Total / per-fee rows remain on the awaiting-payment summary
+    and in the receipt email).
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - No impact — none of the three documents describes the summary panel's fee
+    rows; this is a display rule with no flow, product-scope, or schema change.
+  - spec 011 (specs/011-order-buyer-info) FR-016/US4 amended in the same change.
+
+Templates requiring follow-up: none.
+
+Previous report (1.1.1 → 2.0.0) follows.
+
+Version change: 1.1.1 → 2.0.0 (MAJOR — backward-incompatible redefinition of a
+binding rule: the Critical Data Flow Rules delivery mandate is reversed, so
+behavior compliant under 1.1.1 — one email to the buyer with all tickets — is
+non-compliant under 2.0.0. No Core Principle is removed, but the versioning
+policy's MAJOR criterion, backward-incompatible redefinition, is the honest fit;
+MINOR's "materially expanded guidance added" does not describe a reversal.)
+
+Trigger: spec 011 (specs/011-order-buyer-info) removes the separate buyer contact
+form from the order page: identity is collected as one holder form per standalone
+ticket / per bundle unit, the topmost form's holder is the order's primary contact,
+and post-payment delivery becomes per-holder (spec FR-012). The Critical Data Flow
+Rules bullet mandating "exactly one email is sent to the buyer containing all
+tickets as a PDF" directly conflicted with that and is redefined. The
+one-Ticket-per-Attendee half of the bullet is unchanged, as is Principle IV's
+non-blocking dispatch and email_sent-after-delivery rule (delivery now means every
+recipient email, not one).
+
+Modified sections:
+  - Critical Data Flow Rules, ticket-generation bullet — delivery is now one email
+    per distinct holder email address (tickets grouped by attendees.email so a
+    bundle unit's identical rows collapse into one message), each carrying that
+    holder's tickets as a PDF plus the receipt; orders.email_sent is set only
+    after every recipient email is delivered. orders.buyer_* columns remain as
+    the denormalized primary-contact snapshot (the topmost form's holder).
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (Governance clause: ARCHITECTURE.md, PRD.md, SCHEMA.md
+MUST be kept in sync with any amendment):
+  - PRD.md — UPDATED WITH THIS AMENDMENT: §1.4 "Checkout & Order" (buyer info
+    entry → per-holder forms, topmost form = primary contact) and "Payment &
+    Delivery" (1 Email to Buyer → one email per distinct holder address with
+    that holder's PDF + receipt).
+  - ARCHITECTURE.md — follow-up in the implementation change (documents the
+    running system): BOTH sequence diagrams, not just delivery — the
+    booking/checkout diagram (~line 166 "Fill buyer + visitor forms" and ~line
+    169 "TX-D — save buyer + attendee details" → holder forms only, TX-D saves
+    attendee details + primary-contact snapshot) AND the delivery diagram
+    (~lines 189-237: single email → per-holder fan-out, email_sent after all
+    recipients).
+  - SCHEMA.md — follow-up in the implementation change: buyer-column comments
+    (~lines 103, 111, 114) re-documented as "primary contact — snapshot of the
+    topmost holder form (spec 011)"; buyer_dob/buyer_gender and the attendees
+    gender storage change ship with spec 011's migration and must be reflected
+    in the same change.
+
+Templates requiring follow-up: none.
+
+Previous report (1.1.0 → 1.1.1) follows.
+
 Version change: 1.1.0 → 1.1.1 (PATCH — wording only, no semantic change)
 
 Trigger: spec 008 (e2e purchase flow) split the single-call checkout into the two-phase
@@ -143,14 +260,27 @@ into enterprise/scale concerns directly threatens that timeline.
 ## Critical Data Flow Rules
 
 * Ticket generation: on `PAID`, exactly one `Ticket` (unique `ticket_code` + QR) is
-  generated per `Attendee`, and exactly one email is sent to the buyer containing all
-  tickets as a PDF.
+  generated per `Attendee`. Delivery is to the buyer alone: **exactly one email**,
+  addressed to the order's primary-contact snapshot `orders.buyer_email` — the
+  first holder form's address, that form being both ticket holder 1 and the buyer
+  — carrying **every** ticket in the order as a single PDF together with the
+  receipt. The other holders' `attendees.email` values are holder identity, not
+  delivery addresses, and MUST NOT be mailed. `email_sent` MUST be set only after
+  that email has been delivered; a failure leaves it FALSE so resend stays armed.
+  Resend (guest and admin) targets the same single address.
 * Admin ticket validation: lookup by manual `Ticket Code` (primary) or camera QR scan
   (secondary) MUST resolve to one of `Valid`, `Already Used`, `Invalid`; marking a
   ticket `Used` MUST be irreversible through the validation flow.
 * Quota (`ticket_types.quota`) MUST never go negative; enforce via the `CHECK (quota
   >= 0)` constraint and atomic deduction inside the checkout transaction (Principle
   IV) — application code MUST NOT rely on optimistic checks alone.
+* Fee presentation: on the order page's form-filling (registration) step, the Order
+  Summary panel MUST NOT itemize fees — no Ticket Total or per-fee rows — it shows
+  only the grand Total Payment, labeled as including all taxes and fees. The itemized
+  breakdown (ticket total, each frozen per-order fee, grand total) remains on the
+  awaiting-payment step's summary and is mandatory in the receipt email. This is a
+  display rule only: the frozen `order_fees` math and the totals themselves are
+  unchanged.
 * Quota semantics: `ticket_types.quota` is the **remaining** quota — the live counter
   that checkout decrements and that cancel/expire/deny/failure restore. It is NOT the
   original allocation, and SCHEMA.md defines no `quota_total` column. Any admin-facing
@@ -178,4 +308,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 1.1.1 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-05
+**Version**: 3.0.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-06

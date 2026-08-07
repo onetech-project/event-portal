@@ -160,7 +160,7 @@ func run(log *logger.Logger) error {
 	ticketSvc := ticket.NewService(pool, ticketRepo, orderRepo, log)
 
 	notificationSvc := notification.NewService(
-		notificationOrderAdapter{orders: orderRepo},
+		notificationOrderAdapter{orders: orderRepo, guestReads: publicOrderSvc},
 		notificationTicketAdapter{tickets: ticketRepo},
 		notification.NewSMTPMailer(notification.SMTPConfig{
 			Host:     cfg.SMTPHost,
@@ -174,9 +174,9 @@ func run(log *logger.Logger) error {
 
 	paymentSvc := payment.NewService(pool, paymentRepo, gateway,
 		paymentOrderAdapter{orders: orderRepo},
-		eventSvc,        // payment.QuotaRestorer
-		ticketSvc,       // payment.TicketIssuer
-		notificationSvc, // payment.TicketDeliverer
+		eventSvc,  // payment.QuotaRestorer
+		ticketSvc, // payment.TicketIssuer
+		ticketDelivererAdapter{notifications: notificationSvc}, // payment.TicketDeliverer (narrows the spec-011 recipient list)
 		log)
 
 	adminSvc := admin.NewService(adminRepo, admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL), log)

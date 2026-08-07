@@ -67,83 +67,6 @@ func (s *Service) WithTimers(t Timers) *Service {
 	return s
 }
 
-// reservedLine records what TX1 actually reserved, so the compensation path knows
-// exactly how much quota to give back.
-type reservedLine struct {
-	TicketTypeID uuid.UUID
-	Name         string
-	Quantity     int32
-	UnitPrice    decimal.Decimal
-}
-
-// Checkout runs the three-step purchase sequence required by
-// research.md "Checkout transaction shape":
-//
-//	TX1  quota deduction + orders + order_items + attendees, committed atomically
-//	     (ARCHITECTURE.md §3.4, Constitution Principle IV)
-//	 →   Gateway.CreateTransaction, outside any transaction
-//	TX2  stamp payment_url / payment_provider
-//
-// The gateway call is deliberately outside TX1: the quota-deducting UPDATE holds a
-// row lock until commit, so a ~200-500ms provider round-trip inside it would
-// serialize every concurrent buyer of the same ticket type. If that call fails, a
-// compensating transaction cancels the order and restores its quota so the guest
-// can safely retry (spec FR-021).
-func (s *Service) Checkout(ctx context.Context, req CheckoutRequest) (OrderResponse, error) {
-	// Reject what can be decided without I/O first, so a malformed request never
-	// opens a transaction or takes a quota row lock.
-	if err := req.Validate(); err != nil {
-		return OrderResponse{}, err
-	}
-
-	created, total, reserved, expanded, err := s.reserve(ctx, req)
-	if err != nil {
-		return OrderResponse{}, err
-	}
-
-	session, err := s.gateway.CreateTransaction(ctx, s.paymentRequestFor(created, total, expanded, req))
-	if err != nil {
-		s.log.ErrorContext(ctx, "payment initiation failed; compensating",
-			"order_number", created.OrderNumber, "provider", s.gateway.Name(), "error", err.Error())
-		s.compensate(ctx, created, reserved)
-		return OrderResponse{}, apperr.Wrap(err, 502, apperr.CodePaymentInitiationFailed,
-			"We could not start the payment with the provider. No tickets were reserved — please try again.")
-	}
-
-	if err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return s.repo.UpdatePaymentDetails(ctx, tx, created.ID, PaymentDetails{
-			// The provider's hosted QR image is recorded for audit; the guest is
-			// shown an image we render ourselves from QRString.
-			PaymentURL: session.QRImageURL,
-			Provider:   s.gateway.Name(),
-			QRString:   session.QRString,
-			ExpiresAt:  session.ExpiresAt,
-		})
-	}); err != nil {
-		// The payment session exists but we could not record it. Compensating here
-		// would strand a live payment session against a cancelled order, so the
-		// order is left PENDING and the guest is asked to retry; the webhook still
-		// resolves it either way.
-		s.log.ErrorContext(ctx, "could not persist payment details",
-			"order_number", created.OrderNumber, "error", err.Error())
-		return OrderResponse{}, apperr.Wrap(err, 502, apperr.CodePaymentInitiationFailed,
-			"We could not complete the payment setup. Please try again.")
-	}
-
-	s.log.InfoContext(ctx, "checkout completed",
-		"order_number", created.OrderNumber, "provider", s.gateway.Name(), "total_amount", total.String())
-
-	return OrderResponse{
-		OrderNumber: created.OrderNumber,
-		Status:      created.Status,
-		TotalAmount: money.From(total),
-		// Retained for compatibility and audit. The client no longer navigates
-		// here: it routes in-app to the order page, which renders the QR itself
-		// (spec FR-009).
-		PaymentURL: session.QRImageURL,
-	}, nil
-}
-
 // Book runs TX-B (contracts/booking-flow.md §1): the reservation transaction
 // without any buyer identity or gateway involvement. Fired on the T&C "Agree"
 // click, immediately followed by RecordAgreement from the same click.
@@ -241,8 +164,10 @@ func (s *Service) bookOnce(ctx context.Context, req BookRequest) (OrderRecord, e
 
 		// Fees are data (clarified 2026-08-05): the active master rows are
 		// applied to the subtotal and frozen onto the order here, so a later
-		// fee edit never changes what this order shows or charges.
-		activeFees, err := s.repo.ListActiveFees(ctx)
+		// fee edit never changes what this order shows or charges. Read on
+		// THIS transaction — a pool read here would take a second connection
+		// while quota row locks are held, starving the pool under load.
+		activeFees, err := s.repo.ListActiveFeesTx(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -393,16 +318,17 @@ func (s *Service) Genders(ctx context.Context) ([]GenderOption, error) {
 	return out, nil
 }
 
-// activeGenderSet loads the gender master list as a membership set for
-// Validate (clarified 2026-08-05).
-func (s *Service) activeGenderSet(ctx context.Context) (map[string]bool, error) {
+// activeGenders loads the gender master list as a NAME → id map: Validate
+// checks membership by name (the wire value), and the checkout fill loop
+// resolves the same map into the gender_id it stores (spec 011, FR-018).
+func (s *Service) activeGenders(ctx context.Context) (map[string]int16, error) {
 	records, err := s.repo.ListActiveGenders(ctx)
 	if err != nil {
 		return nil, err
 	}
-	valid := make(map[string]bool, len(records))
+	valid := make(map[string]int16, len(records))
 	for _, r := range records {
-		valid[r.Name] = true
+		valid[r.Name] = r.ID
 	}
 	return valid, nil
 }
@@ -412,7 +338,7 @@ func (s *Service) activeGenderSet(ctx context.Context) (map[string]bool, error) 
 // re-runs. No compensation: quota was committed at booking and stays held by
 // the live order.
 func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req CheckoutFormsRequest) (CheckoutQRResponse, error) {
-	validGenders, err := s.activeGenderSet(ctx)
+	validGenders, err := s.activeGenders(ctx)
 	if err != nil {
 		return CheckoutQRResponse{}, err
 	}
@@ -456,18 +382,19 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		return CheckoutQRResponse{}, err
 	}
 
-	// Validated as parseable above.
-	buyerDob, _ := time.Parse(visitorDobFormat, req.BuyerDob)
+	// The primary contact is the holder of the TOPMOST form: the visitor mapped
+	// to the first slot in canonical slot order — never attendees[0] of the
+	// client-controlled array (spec 011, contract §1).
+	primary := primaryContact(req.Attendees, slots)
 
-	// TX-D: buyer + every slot, atomically — a retried checkout overwrites.
+	// TX-D: primary-contact snapshot + every slot, atomically — a retried
+	// checkout overwrites.
 	var paymentItems []PaymentItem
 	if err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		updated, err := s.repo.UpdateOrderBuyer(ctx, tx, ord.ID, BuyerDetails{
-			Name:   req.BuyerName,
-			Email:  req.BuyerEmail,
-			Phone:  req.BuyerPhone,
-			Dob:    buyerDob,
-			Gender: req.BuyerGender,
+			Name:  primary.Name,
+			Email: primary.Email,
+			Phone: primary.Phone,
 		})
 		if err != nil {
 			return err
@@ -479,7 +406,9 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		for _, v := range req.Attendees {
 			dob, _ := time.Parse(visitorDobFormat, v.Dob) // validated above
 			filled, err := s.repo.UpdateAttendeeDetails(ctx, tx, v.ID, ord.ID, SlotDetails{
-				Name: v.Name, Email: v.Email, Phone: v.Phone, Dob: dob, Gender: v.Gender,
+				Name: v.Name, Email: v.Email, Phone: v.Phone, Dob: dob,
+				// Membership was validated above, so the name always resolves.
+				GenderID: validGenders[v.Gender],
 			})
 			if err != nil {
 				return err
@@ -501,13 +430,14 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		return CheckoutQRResponse{}, err
 	}
 
-	// Gateway call — outside any transaction (Constitution Principle IV).
+	// Gateway call — outside any transaction (Constitution Principle IV). The
+	// customer is the primary contact (spec 011, FR-017).
 	session, err := s.gateway.CreateTransaction(ctx, PaymentRequest{
 		OrderNumber:   ord.OrderNumber,
 		GrossAmount:   ord.TotalAmount,
-		CustomerName:  req.BuyerName,
-		CustomerEmail: req.BuyerEmail,
-		CustomerPhone: req.BuyerPhone,
+		CustomerName:  primary.Name,
+		CustomerEmail: primary.Email,
+		CustomerPhone: primary.Phone,
 		Items:         paymentItems,
 	})
 	if err != nil {
@@ -627,6 +557,23 @@ func matchVisitorsToSlots(visitors []CheckoutVisitor, slots []AttendeeSlotRecord
 	return nil
 }
 
+// primaryContact returns the visitor filling the FIRST slot in canonical slot
+// order — the topmost form on screen (standalone slots sort before bundle
+// slots, spec 010 §1), which spec 011 makes the order's primary contact. Runs
+// after matchVisitorsToSlots, so the first slot's visitor is guaranteed to
+// exist.
+func primaryContact(visitors []CheckoutVisitor, slots []AttendeeSlotRecord) CheckoutVisitor {
+	if len(slots) == 0 {
+		return CheckoutVisitor{}
+	}
+	for _, v := range visitors {
+		if v.ID == slots[0].ID {
+			return v
+		}
+	}
+	return CheckoutVisitor{}
+}
+
 // validateBundleUnitConsistency enforces spec 010 FR-003: one visitor form
 // fills a whole bundle unit, so every submitted visitor mapped to slots of the
 // same (package_id, package_unit) must be field-identical — the server owns
@@ -690,227 +637,6 @@ func visitorFieldDiffs(a, b CheckoutVisitor) []string {
 // (spec 008 path; the handler and DTO agree on this one definition).
 func TicketQRImagePath(orderNumber string) string {
 	return fmt.Sprintf("/api/v1/ticket/order/%s/qris.png", orderNumber)
-}
-
-// reserve runs TX1, retrying only on an order-number collision.
-func (s *Service) reserve(ctx context.Context, req CheckoutRequest) (OrderRecord, decimal.Decimal, []reservedLine, []ExpandedItem, error) {
-	var lastErr error
-	for attempt := range orderNumberAttempts {
-		created, total, reserved, expanded, err := s.reserveOnce(ctx, req)
-		if err == nil {
-			return created, total, reserved, expanded, nil
-		}
-		if !errors.Is(err, ErrOrderNumberTaken) {
-			return OrderRecord{}, decimal.Zero, nil, nil, err
-		}
-		lastErr = err
-		s.log.WarnContext(ctx, "order number collision; retrying", "attempt", attempt+1)
-	}
-	return OrderRecord{}, decimal.Zero, nil, nil, fmt.Errorf("could not allocate a unique order number: %w", lastErr)
-}
-
-func (s *Service) reserveOnce(ctx context.Context, req CheckoutRequest) (OrderRecord, decimal.Decimal, []reservedLine, []ExpandedItem, error) {
-	orderNumber, err := GenerateOrderNumber(s.now())
-	if err != nil {
-		return OrderRecord{}, decimal.Zero, nil, nil, err
-	}
-
-	var (
-		created  OrderRecord
-		total    decimal.Decimal
-		reserved []reservedLine
-		expanded []ExpandedItem
-	)
-
-	txErr := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
-		// Reset per attempt: a retried transaction must not accumulate state.
-		total = decimal.Zero
-		reserved = reserved[:0]
-		expanded = expanded[:0]
-
-		now := s.now()
-
-		// Step 1+2: Resolve and validate every item server-side, expanding
-		// packages into per-ticket-type demand (contracts/checkout-transaction.md §2.2).
-		expanded = make([]ExpandedItem, 0, len(req.Items))
-		for _, item := range req.Items {
-			expandedItem, err := expandItem(ctx, s.events, tx, item, now)
-			if err != nil {
-				return err
-			}
-			expanded = append(expanded, expandedItem)
-		}
-
-		// Step 2.5: The cheap Validate pass cannot size package attendee slots
-		// without the composition, so the exact per-(package_id, ticket_type_id)
-		// counts are checked now, against the expansion (§2.2).
-		if err := validateAttendees(req, expanded); err != nil {
-			return err
-		}
-
-		// Step 3: Aggregate demand per ticket type across the ENTIRE selection
-		// (§2.3). This prevents the oversell where a bundle + standalone of the
-		// same ticket type are validated in isolation from each other.
-		demand := aggregateDemand(expanded)
-
-		// Step 4: Deterministic global lock order (§2.4). Two overlapping bundles
-		// bought concurrently in opposing natural order must not deadlock.
-		sortedIDs := sortedTicketTypeIDs(demand)
-
-		// Step 5: Guarded deduction in sorted order (§2.5). The atomic
-		// WHERE ... AND quota >= qty prevents oversell; zero rows = insufficient.
-		for _, ttID := range sortedIDs {
-			if err := s.events.CheckAndDeductQuota(ctx, tx, ttID, demand[ttID]); err != nil {
-				if errors.Is(err, ErrInsufficientQuota) {
-					return apperr.BadRequest(apperr.CodeInsufficientQuota,
-						fmt.Sprintf("Only fewer than %d ticket(s) remain.", demand[ttID]))
-				}
-				return err
-			}
-			// Record what was deducted, per ticket type, for compensation and
-			// payment items. Name comes from whichever expanded item contributed
-			// this ticket type — for a standalone line it is the ticket's own name;
-			// for a bundle component it is the ticket name from the composition.
-			reserved = append(reserved, reservedLine{
-				TicketTypeID: ttID,
-				Name:         ticketNameFor(ttID, expanded),
-				Quantity:     demand[ttID],
-				UnitPrice:    priceFor(ttID, expanded),
-			})
-		}
-
-		// Step 6: Persist order, order_items, attendees.
-		//
-		// total_amount is SUM(line quantity × server-side price), never from the
-		// client (FR-006, FR-025).
-		for _, item := range expanded {
-			total = total.Add(item.UnitPrice.Mul(decimal.NewFromInt32(item.Quantity)))
-		}
-
-		created, err = s.repo.CreateOrder(ctx, tx, CreateOrderParams{
-			OrderNumber: orderNumber,
-			BuyerName:   req.BuyerName,
-			BuyerEmail:  req.BuyerEmail,
-			BuyerPhone:  req.BuyerPhone,
-			TotalAmount: total,
-		})
-		if err != nil {
-			return err
-		}
-
-		// One order_items row per SELECTED line, not per expanded constituent.
-		// A package line is stored once at the package's own price (§2.6).
-		for _, item := range expanded {
-			if err := s.repo.CreateOrderItem(ctx, tx, created.ID, item.Ref, item.Quantity, item.UnitPrice); err != nil {
-				return err
-			}
-		}
-
-		// Attendees, one row per constituent unit. For a package line of quantity
-		// q with components c1..cN, there are q × Σ(ci.quantity) attendee rows,
-		// each bound to the specific ticket type it opens (§2.6).
-		for _, attendee := range req.Attendees {
-			ref := AttendeeRef{TicketTypeID: attendee.TicketTypeID}
-			if attendee.PackageID != nil {
-				ref.PackageID = uuid.NullUUID{UUID: *attendee.PackageID, Valid: true}
-			}
-			if _, err := s.repo.CreateAttendee(ctx, tx, created.ID, ref, attendee.Name, attendee.Email); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if txErr != nil {
-		return OrderRecord{}, decimal.Zero, nil, nil, txErr
-	}
-
-	return created, total, reserved, expanded, nil
-}
-
-// compensate undoes a committed TX1 after the gateway call failed: the order is
-// cancelled and every reserved seat is returned, in one transaction (spec FR-021).
-func (s *Service) compensate(ctx context.Context, created OrderRecord, reserved []reservedLine) {
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
-		cancelled, err := s.repo.UpdateOrderStatusIfPending(ctx, tx, created.ID, "CANCELLED")
-		if err != nil {
-			return err
-		}
-		if !cancelled {
-			// Something else already moved the order on (a webhook that beat us
-			// here). Its quota accounting is that path's responsibility, not ours.
-			return nil
-		}
-		for _, line := range reserved {
-			if err := s.events.RestoreQuota(ctx, tx, line.TicketTypeID, line.Quantity); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		// Nothing more can be done in-band. This is logged loudly because it is the
-		// one path that can leave quota held by an order that will never be paid.
-		s.log.ErrorContext(ctx, "compensation failed; quota may remain reserved",
-			"order_number", created.OrderNumber, "order_id", created.ID.String(), "error", err.Error())
-	}
-}
-
-// ticketNameFor returns the human name for a ticket type ID from the set of
-// expanded items. For a standalone line it is the ticket's own name; for a
-// bundle component it is the ticket name from the composition query.
-func ticketNameFor(ttID uuid.UUID, items []ExpandedItem) string {
-	for _, item := range items {
-		if name, ok := item.Demand[ttID]; ok && name > 0 {
-			if item.TicketName != "" {
-				return item.TicketName
-			}
-		}
-	}
-	return ""
-}
-
-// priceFor returns the unit price for a ticket type ID. For standalone lines
-// this is the ticket type's own price; for a bundle component it is derived
-// from the package line's price. Since we record per-ticket-type holds but
-// package lines store the package price, this returns the ticket type's own
-// price for standalone lines and the package price divided evenly for components.
-func priceFor(ttID uuid.UUID, items []ExpandedItem) decimal.Decimal {
-	for _, item := range items {
-		if item.TicketName != "" {
-			if _, ok := item.Demand[ttID]; ok {
-				return item.UnitPrice
-			}
-		}
-	}
-	return decimal.Zero
-}
-
-func (s *Service) paymentRequestFor(created OrderRecord, total decimal.Decimal, expanded []ExpandedItem, req CheckoutRequest) PaymentRequest {
-	items := make([]PaymentItem, 0, len(expanded))
-	for _, item := range expanded {
-		name := item.TicketName
-		id := ""
-		if item.Ref.IsPackage() {
-			name = item.PackageName
-			id = item.Ref.PackageID.UUID.String()
-		} else {
-			id = item.Ref.TicketTypeID.UUID.String()
-		}
-		items = append(items, PaymentItem{
-			ID:       id,
-			Name:     name,
-			Price:    item.UnitPrice,
-			Quantity: item.Quantity,
-		})
-	}
-	return PaymentRequest{
-		OrderNumber:   created.OrderNumber,
-		GrossAmount:   total,
-		CustomerName:  req.BuyerName,
-		CustomerEmail: req.BuyerEmail,
-		CustomerPhone: req.BuyerPhone,
-		Items:         items,
-	}
 }
 
 // FeeLine is one computed fee at booking: the display name with any percentage

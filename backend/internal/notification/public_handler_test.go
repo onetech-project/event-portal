@@ -58,18 +58,23 @@ func resendBody(orderNumber string) string {
 	return fmt.Sprintf(`{"order_id":%q}`, orderNumber)
 }
 
-func TestPublicResendSendsOneEmailToTheStoredBuyerAddress(t *testing.T) {
+// Spec 011 FR-012: the public resend runs the same single delivery as the
+// original send — one email to the buyer — while the caller still only sees the
+// uniform 202 body.
+func TestPublicResendSendsOneEmailToTheBuyer(t *testing.T) {
 	e, f := newPublicResendAPI(t, 0)
 
 	rec := publicResend(t, e, resendBody(f.orders.order.OrderNumber))
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Len(t, f.mailer.sent, 1)
-	assert.Equal(t, "budi@example.com", f.mailer.sent[0].To)
+	assert.Equal(t, notification.PublicResendMessage, decodeMessage(t, rec))
+	require.Len(t, f.mailer.sent, 1, "exactly one email for the whole order")
+	assert.Equal(t, []string{"budi@example.com"}, f.mailer.toAddresses())
 }
 
 // FR-024: the destination is never the caller's to choose. The body carries the
-// order number and nothing else is read from it.
+// order number and nothing else is read from it — delivery goes to the stored
+// buyer address, untouched by what the caller supplied.
 func TestPublicResendIgnoresAnAddressSuppliedInTheBody(t *testing.T) {
 	e, f := newPublicResendAPI(t, 0)
 
@@ -79,8 +84,9 @@ func TestPublicResendIgnoresAnAddressSuppliedInTheBody(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	require.Len(t, f.mailer.sent, 1)
-	assert.Equal(t, "budi@example.com", f.mailer.sent[0].To,
+	assert.Equal(t, []string{"budi@example.com"}, f.mailer.toAddresses(),
 		"an unauthenticated endpoint that mails a caller-supplied address is an open relay")
+	assert.NotEqual(t, "attacker@example.com", f.mailer.sent[0].To)
 }
 
 // FR-026: a 404 here would let anyone probe which order numbers are real.
@@ -123,6 +129,8 @@ func TestPublicResendBodyNamesNeitherRecipientNorOrder(t *testing.T) {
 	require.True(t, ok, "resend payload rides the envelope's data field")
 	assert.ElementsMatch(t, []string{"message"}, keysOfBody(data),
 		"unlike the admin resend, this one must not echo sent_to")
+	assert.NotContains(t, rec.Body.String(), "ani@example.com")
+	assert.NotContains(t, rec.Body.String(), "bayu@example.com")
 	assert.NotContains(t, rec.Body.String(), "budi@example.com")
 	assert.NotContains(t, rec.Body.String(), f.orders.order.OrderNumber)
 }
@@ -166,7 +174,8 @@ func TestPublicResendRateLimitsRepeatRequestsForTheSameOrder(t *testing.T) {
 	rec := publicResend(t, e, body)
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Len(t, f.mailer.sent, 1, "the throttled request must not have sent a second email")
+	assert.Len(t, f.mailer.sent, 1,
+		"only the first request's email went out; the throttled one sent nothing")
 }
 
 func TestPublicResendLimitsPerOrderNotGlobally(t *testing.T) {

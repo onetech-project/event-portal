@@ -80,9 +80,7 @@ export function SelectionSummary({
                     <div className="flex items-center justify-between gap-4 text-sm leading-5">
                       <span className="text-ticket-muted">
                         {line.quantity}{" "}
-                        {line.kind === "package"
-                          ? "Bundle"
-                          : `Ticket${line.quantity > 1 ? "s" : ""}`}
+                        {`Ticket${line.quantity > 1 ? "s" : ""}`}
                       </span>
                       <span className="font-bold text-ticket-ink">
                         {/* Presentational only: the server recomputes what is charged. */}
@@ -97,7 +95,7 @@ export function SelectionSummary({
             </div>
 
             <div className="flex items-center justify-between gap-4 pt-3 text-base leading-5">
-              <span className="text-ticket-muted">Total {units} Ticket</span>
+              <span className="text-ticket-muted">Total {units} {`Ticket${units > 1 ? "s" : ""}`}</span>
               <span className="font-bold text-ticket-ink">
                 {formatCurrency(String(total))}
               </span>

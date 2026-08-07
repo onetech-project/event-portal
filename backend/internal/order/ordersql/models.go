@@ -5,8 +5,6 @@
 package ordersql
 
 import (
-	"time"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
@@ -21,26 +19,4 @@ type Fee struct {
 	IsActive  bool
 	CreatedAt pgtype.Timestamptz
 	UpdatedAt pgtype.Timestamptz
-}
-
-type Order struct {
-	ID               uuid.UUID
-	OrderNumber      string
-	BuyerName        *string
-	BuyerEmail       *string
-	BuyerPhone       *string
-	TotalAmount      decimal.Decimal
-	Status           string
-	PaymentProvider  *string
-	PaymentUrl       *string
-	EmailSent        *bool
-	CreatedAt        *time.Time
-	UpdatedAt        *time.Time
-	PaymentQrString  *string
-	PaymentExpiresAt *time.Time
-	TermsAgreedAt    *time.Time
-	EventTermsID     uuid.NullUUID
-	BuyerDob         pgtype.Date
-	BuyerGender      *string
-	Subtotal         decimal.NullDecimal
 }

@@ -18,10 +18,13 @@ import (
 // image stays sharp when the PDF is printed rather than scanned from a screen.
 const qrPixelSize = 512
 
-// TicketDetail is everything printed on one ticket.
+// TicketDetail is everything printed on one ticket. AttendeeEmail is not
+// printed — it is the per-holder delivery address the sender groups by
+// (spec 011).
 type TicketDetail struct {
 	TicketCode     string
 	AttendeeName   string
+	AttendeeEmail  string
 	TicketTypeName string
 	EventName      string
 	Venue          string

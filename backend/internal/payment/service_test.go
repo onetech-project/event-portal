@@ -215,7 +215,7 @@ func newBundleWebhookFixture(t *testing.T) webhookFixture {
 	ev := testsupport.SeedEvent(t, pool, "webhook-bundle", "PUBLISHED")
 	day1 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 1", "30000.00", 7)
 	day2 := testsupport.SeedTicketType(t, pool, ev.ID, "Day 2", "20000.00", 7)
-	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", "ACTIVE")
+	pkg := testsupport.SeedPackage(t, pool, ev.ID, "Day 1+2", "50000.00", true)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day1.ID, ev.ID, 1)
 	testsupport.SeedPackageTicket(t, pool, pkg.ID, day2.ID, ev.ID, 1)
 	ord := testsupport.SeedOrder(t, pool, "ORD-WEBHOOK-BUNDLE", "PENDING")

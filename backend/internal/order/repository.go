@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/internal/order/ordersql"
@@ -94,16 +94,6 @@ type QuotaHold struct {
 	Quantity     int32
 }
 
-// CreateOrderParams carries the server-computed values for a new order. There is
-// deliberately no status or total field taken from the client.
-type CreateOrderParams struct {
-	OrderNumber string
-	BuyerName   string
-	BuyerEmail  string
-	BuyerPhone  string
-	TotalAmount decimal.Decimal
-}
-
 // Repository is the only place in the codebase that talks to orders, order_items,
 // and attendees.
 type Repository struct {
@@ -116,24 +106,6 @@ func NewRepository(dbtx ordersql.DBTX) *Repository {
 }
 
 // --- Checkout writes (all take the caller's TX1) --------------------------
-
-// CreateOrder inserts a PENDING order with no payment URL yet.
-func (r *Repository) CreateOrder(ctx context.Context, tx pgx.Tx, p CreateOrderParams) (OrderRecord, error) {
-	row, err := r.queries.WithTx(tx).CreateOrder(ctx, ordersql.CreateOrderParams{
-		OrderNumber: p.OrderNumber,
-		BuyerName:   &p.BuyerName,
-		BuyerEmail:  &p.BuyerEmail,
-		BuyerPhone:  &p.BuyerPhone,
-		TotalAmount: p.TotalAmount,
-	})
-	if isUniqueViolation(err) {
-		return OrderRecord{}, ErrOrderNumberTaken
-	}
-	if err != nil {
-		return OrderRecord{}, fmt.Errorf("create order: %w", err)
-	}
-	return toOrderRecord(row), nil
-}
 
 // CreateOrderItem inserts one line item, priced from current server-side data.
 //
@@ -155,23 +127,6 @@ func (r *Repository) CreateOrderItem(ctx context.Context, tx pgx.Tx, orderID uui
 		return fmt.Errorf("create order item: %w", err)
 	}
 	return nil
-}
-
-// CreateAttendee inserts one attendee, who will receive exactly one ticket once
-// the order is paid. Bundle-derived registrants are ordinary attendees that also
-// record the package they came from.
-func (r *Repository) CreateAttendee(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, ref AttendeeRef, name, email string) (uuid.UUID, error) {
-	row, err := r.queries.WithTx(tx).CreateAttendee(ctx, ordersql.CreateAttendeeParams{
-		OrderID:      orderID,
-		TicketTypeID: ref.TicketTypeID,
-		PackageID:    ref.PackageID,
-		Name:         &name,
-		Email:        &email,
-	})
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("create attendee: %w", err)
-	}
-	return row.ID, nil
 }
 
 // OrderNumberExists reports whether a generated order number is already in use.
@@ -312,7 +267,7 @@ func (r *Repository) GetOrderByNumber(ctx context.Context, orderNumber string) (
 	if err != nil {
 		return OrderRecord{}, fmt.Errorf("get order by number: %w", err)
 	}
-	return toOrderRecord(row), nil
+	return toOrderRecord(ordersql.GetOrderByIDRow(row)), nil
 }
 
 // ListOrderItemsByOrderID returns an order's line items for display. Restoring
@@ -421,7 +376,7 @@ func (r *Repository) CreateBookedOrder(ctx context.Context, tx pgx.Tx, orderNumb
 	if err != nil {
 		return OrderRecord{}, fmt.Errorf("create booked order: %w", err)
 	}
-	return toOrderRecord(row), nil
+	return toOrderRecord(ordersql.GetOrderByIDRow(row)), nil
 }
 
 // CreateAttendeeSlot inserts one EMPTY attendee slot: bound to its ticket type
@@ -466,16 +421,15 @@ func (r *Repository) EventIDForOrder(ctx context.Context, orderID uuid.UUID) (uu
 	return eventID, nil
 }
 
-// UpdateOrderBuyer stamps the buyer identity onto a PENDING order (TX-D).
-// Returns false when the order is no longer PENDING.
+// UpdateOrderBuyer stamps the primary contact onto a PENDING order (TX-D) —
+// a snapshot of the topmost holder form (spec 011). Returns false when the
+// order is no longer PENDING.
 func (r *Repository) UpdateOrderBuyer(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, buyer BuyerDetails) (bool, error) {
 	rows, err := r.queries.WithTx(tx).UpdateOrderBuyer(ctx, ordersql.UpdateOrderBuyerParams{
-		ID:          orderID,
-		BuyerName:   &buyer.Name,
-		BuyerEmail:  &buyer.Email,
-		BuyerPhone:  &buyer.Phone,
-		BuyerDob:    pgtype.Date{Time: buyer.Dob, Valid: true},
-		BuyerGender: &buyer.Gender,
+		ID:         orderID,
+		BuyerName:  &buyer.Name,
+		BuyerEmail: &buyer.Email,
+		BuyerPhone: &buyer.Phone,
 	})
 	if err != nil {
 		return false, fmt.Errorf("update order buyer: %w", err)
@@ -483,14 +437,14 @@ func (r *Repository) UpdateOrderBuyer(ctx context.Context, tx pgx.Tx, orderID uu
 	return rows > 0, nil
 }
 
-// BuyerDetails is the buyer identity checkout stamps onto the order (TX-D) —
-// the same personal fields as one visitor slot (Figma 12-4456).
+// BuyerDetails is the primary contact checkout stamps onto the order (TX-D):
+// the topmost holder form's name/email/phone — exactly what downstream reads
+// (gateway customer details, admin list, delivery fallback). The holder's dob
+// and gender live only on their attendee row (spec 011).
 type BuyerDetails struct {
-	Name   string
-	Email  string
-	Phone  string
-	Dob    time.Time
-	Gender string
+	Name  string
+	Email string
+	Phone string
 }
 
 // ListActiveGenders returns the gender master list, the source of both the
@@ -508,18 +462,23 @@ func (r *Repository) ListActiveGenders(ctx context.Context) ([]GenderRecord, err
 }
 
 // GenderRecord is one row of the gender master list.
+//
+// ID narrowed from uuid to a small integer in migration 0013 (spec 011 FR-025).
+// It stays storage-internal either way: the NAME is what the wire carries.
 type GenderRecord struct {
-	ID   uuid.UUID
+	ID   int16
 	Name string
 }
 
 // SlotDetails is one visitor form's content, written into an attendee slot.
+// GenderID is the master row resolved from the NAME the request carried
+// (spec 011, FR-018).
 type SlotDetails struct {
-	Name   string
-	Email  string
-	Phone  string
-	Dob    time.Time
-	Gender string
+	Name     string
+	Email    string
+	Phone    string
+	Dob      time.Time
+	GenderID int16
 }
 
 // UpdateAttendeeDetails fills one slot (TX-D). The orderID predicate stops a
@@ -527,13 +486,13 @@ type SlotDetails struct {
 // that no slot matched.
 func (r *Repository) UpdateAttendeeDetails(ctx context.Context, tx pgx.Tx, slotID, orderID uuid.UUID, d SlotDetails) (bool, error) {
 	rows, err := r.queries.WithTx(tx).UpdateAttendeeDetails(ctx, ordersql.UpdateAttendeeDetailsParams{
-		ID:      slotID,
-		OrderID: orderID,
-		Name:    &d.Name,
-		Email:   &d.Email,
-		Phone:   &d.Phone,
-		Dob:     pgtype.Date{Time: d.Dob, Valid: true},
-		Gender:  &d.Gender,
+		ID:       slotID,
+		OrderID:  orderID,
+		Name:     &d.Name,
+		Email:    &d.Email,
+		Phone:    &d.Phone,
+		Dob:      pgtype.Date{Time: d.Dob, Valid: true},
+		GenderID: &d.GenderID,
 	})
 	if err != nil {
 		return false, fmt.Errorf("update attendee details: %w", err)
@@ -709,7 +668,12 @@ func (r *Repository) SoldCountByPackage(ctx context.Context, packageIDs []uuid.U
 	return counts, nil
 }
 
-func toOrderRecord(row ordersql.Order) OrderRecord {
+// Migration 0013 made every order read join the status master list to alias the
+// NAME back to `status`, so sqlc no longer recognises these queries as returning
+// the bare `orders` row and emits a per-query struct instead of the shared
+// `ordersql.Order` model. The structs are field-for-field identical, so the call
+// sites convert rather than each growing its own mapper.
+func toOrderRecord(row ordersql.GetOrderByIDRow) OrderRecord {
 	return OrderRecord{
 		ID:              row.ID,
 		OrderNumber:     row.OrderNumber,
@@ -771,6 +735,23 @@ type FeeRow struct {
 type OrderFeeRecord struct {
 	Name   string
 	Amount decimal.Decimal
+}
+
+// ListActiveFeesTx returns the fee master rows booking applies, in display
+// order, on the CALLER'S transaction. Booking must use this form: reading via
+// the pool from inside TX-B would grab a second connection while the first
+// holds quota row locks — at MaxConns concurrent bookings that starves the
+// pool into a deadlock.
+func (r *Repository) ListActiveFeesTx(ctx context.Context, tx pgx.Tx) ([]FeeRecord, error) {
+	rows, err := r.queries.WithTx(tx).ListActiveFees(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active fees: %w", err)
+	}
+	out := make([]FeeRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, FeeRecord{ID: row.ID, Name: row.Name, FeeType: row.FeeType, Value: row.Value})
+	}
+	return out, nil
 }
 
 // ListActiveFees returns the fee master rows booking applies, in display order.

@@ -35,7 +35,9 @@ ORDER BY t.created_at ASC, t.ticket_code ASC;
 
 -- name: ListTicketDetailsByOrderID :many
 -- Everything the ticket PDF prints, for the initial delivery and every resend.
-SELECT t.ticket_code, t.status, a.name AS attendee_name,
+-- attendee_email is the per-holder delivery address (spec 011): notification
+-- groups an order's tickets by it and sends each holder their own PDF.
+SELECT t.ticket_code, t.status, a.name AS attendee_name, a.email AS attendee_email,
        tt.name AS ticket_type_name, e.name AS event_name,
        e.venue, e.start_date
 FROM tickets t

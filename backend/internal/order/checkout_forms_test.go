@@ -43,6 +43,9 @@ func bookAgreedOrder(t *testing.T, f checkoutFixture) (string, []uuid.UUID) {
 	return resp.OrderID, ids
 }
 
+// formsFor fills every slot with the same visitor identity except gender, which
+// alternates through the seeded master names. No buyer block (spec 011): the
+// primary contact is derived server-side from the first canonical slot.
 func formsFor(slotIDs []uuid.UUID) order.CheckoutFormsRequest {
 	visitors := make([]order.CheckoutVisitor, 0, len(slotIDs))
 	for i, id := range slotIDs {
@@ -50,19 +53,12 @@ func formsFor(slotIDs []uuid.UUID) order.CheckoutFormsRequest {
 			ID:     id,
 			Name:   "Visitor",
 			Email:  "visitor@example.com",
-			Phone:  "+62812345678",
+			Phone:  "081234567890",
 			Dob:    "2000-01-31",
 			Gender: []string{"FEMALE", "MALE"}[i%2],
 		})
 	}
-	return order.CheckoutFormsRequest{
-		BuyerName:   "Siti Rahayu",
-		BuyerEmail:  "siti@example.com",
-		BuyerPhone:  "+628123456789",
-		BuyerDob:    "1995-05-05",
-		BuyerGender: "FEMALE",
-		Attendees:   visitors,
-	}
+	return order.CheckoutFormsRequest{Attendees: visitors}
 }
 
 func TestCheckoutOrderSavesFormsAndStartsPayment(t *testing.T) {
@@ -79,9 +75,20 @@ func TestCheckoutOrderSavesFormsAndStartsPayment(t *testing.T) {
 
 	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
 	require.NoError(t, err)
+	// The primary contact is derived from the topmost holder form (spec 011).
 	require.NotNil(t, stored.BuyerName)
-	assert.Equal(t, "Siti Rahayu", *stored.BuyerName)
+	assert.Equal(t, "Visitor", *stored.BuyerName)
+	require.NotNil(t, stored.BuyerEmail)
+	assert.Equal(t, "visitor@example.com", *stored.BuyerEmail)
+	require.NotNil(t, stored.BuyerPhone)
+	assert.Equal(t, "081234567890", *stored.BuyerPhone)
 	require.NotNil(t, stored.PaymentQRString)
+
+	// The gateway's customer is the same primary contact (FR-017).
+	call := f.gateway.lastCall()
+	assert.Equal(t, "Visitor", call.CustomerName)
+	assert.Equal(t, "visitor@example.com", call.CustomerEmail)
+	assert.Equal(t, "081234567890", call.CustomerPhone)
 
 	// The 14-minute window replaced the 1-hour hold on the same column.
 	require.NotNil(t, stored.PaymentExpiresAt)
@@ -102,7 +109,7 @@ func TestCheckoutOrderRejectsBadFormsWithAFieldMap(t *testing.T) {
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
 	bad := formsFor(slotIDs)
-	bad.BuyerEmail = "not-an-email"
+	bad.Attendees[0].Email = "not-an-email"
 	bad.Attendees[0].Dob = "31-01-2000"
 	bad.Attendees[1].Gender = "OTHER"
 
@@ -113,7 +120,7 @@ func TestCheckoutOrderRejectsBadFormsWithAFieldMap(t *testing.T) {
 	assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
 	fields, ok := appErr.Data.(map[string]string)
 	require.True(t, ok, "400001 carries the field map as data")
-	assert.Contains(t, fields, "buyer_email")
+	assert.Contains(t, fields, "attendees[0].email")
 	assert.Contains(t, fields, "attendees[0].dob")
 	assert.Contains(t, fields, "attendees[1].gender")
 
@@ -122,6 +129,108 @@ func TestCheckoutOrderRejectsBadFormsWithAFieldMap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, stored.BuyerName)
 	assert.Equal(t, 0, f.gateway.callCount())
+}
+
+// Spec 011 (clarified 2026-08-07): the phone rule is 10-15 digits and nothing
+// else, and every failure carries the exact shared message keyed to the
+// offending form.
+func TestCheckoutOrderRejectsMalformedPhonesWithTheExactMessage(t *testing.T) {
+	for name, phone := range map[string]string{
+		"nine digits":         "081234567",
+		"sixteen digits":      "0812345678901234",
+		"contains separators": "0812-3456-789",
+		"contains letters":    "08123456789a",
+		"leading plus":        "+628123456789",
+		"empty":               "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCheckoutFixture(t)
+			orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+			bad := formsFor(slotIDs)
+			bad.Attendees[0].Phone = phone
+
+			_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, bad)
+
+			var appErr *apperr.Error
+			require.True(t, errors.As(err, &appErr))
+			assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
+			fields, ok := appErr.Data.(map[string]string)
+			require.True(t, ok, "400001 carries the field map as data")
+			assert.Equal(t, "Enter a phone number of 10-15 digits.", fields["attendees[0].phone"])
+			assert.Equal(t, 0, f.gateway.callCount())
+		})
+	}
+}
+
+// Both length boundaries are inclusive, and — the point of FR-006's "verbatim"
+// rule — the local and international spellings of the SAME number are stored
+// exactly as submitted rather than normalised into one another.
+func TestCheckoutAcceptsThePhoneLengthBoundariesAndStoresItVerbatim(t *testing.T) {
+	for name, phone := range map[string]string{
+		"ten digits":         "0812345678",
+		"fifteen digits":     "081234567890123",
+		"local form":         "08123456789",
+		"international form": "628123456789",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCheckoutFixture(t)
+			orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+			forms := formsFor(slotIDs)
+			for i := range forms.Attendees {
+				forms.Attendees[i].Phone = phone
+			}
+
+			_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
+			require.NoError(t, err)
+
+			stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
+			require.NoError(t, err)
+			require.NotNil(t, stored.BuyerPhone)
+			assert.Equal(t, phone, *stored.BuyerPhone)
+			assert.Equal(t, phone, f.gateway.lastCall().CustomerPhone)
+		})
+	}
+}
+
+// Spec 011: every attendee row stores a gender_id that resolves back to exactly
+// the gender NAME its form submitted — checked against the database directly.
+func TestCheckoutStoresAGenderIDResolvingToTheSubmittedName(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	forms := formsFor(slotIDs) // genders alternate FEMALE / MALE
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
+	require.NoError(t, err)
+
+	submitted := map[uuid.UUID]string{}
+	for _, v := range forms.Attendees {
+		submitted[v.ID] = v.Gender
+	}
+
+	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
+	require.NoError(t, err)
+	rows, err := f.pool.Query(context.Background(), `
+		SELECT a.id, g.name
+		FROM attendees a
+		JOIN genders g ON g.id = a.gender_id
+		WHERE a.order_id = $1`, stored.ID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	resolved := map[uuid.UUID]string{}
+	for rows.Next() {
+		var id uuid.UUID
+		var name string
+		require.NoError(t, rows.Scan(&id, &name))
+		resolved[id] = name
+	}
+	require.NoError(t, rows.Err())
+
+	// The inner JOIN drops any NULL gender_id, so map equality proves both
+	// non-NULL storage and correct name resolution for every slot.
+	assert.Equal(t, submitted, resolved)
 }
 
 func TestCheckoutOrderRefusesWhenAgreementWasNeverRecorded(t *testing.T) {
@@ -184,7 +293,7 @@ func TestCheckoutOrderKeepsFormsWhenTheGatewayFails(t *testing.T) {
 	require.NoError(t, storedErr)
 	assert.Equal(t, "PENDING", stored.Status)
 	require.NotNil(t, stored.BuyerName)
-	assert.Equal(t, "Siti Rahayu", *stored.BuyerName)
+	assert.Equal(t, "Visitor", *stored.BuyerName, "the derived primary contact survives the failure")
 	assert.Nil(t, stored.PaymentQRString)
 
 	// And the retry succeeds once the provider recovers.
@@ -238,19 +347,12 @@ func bookAgreedBundleOrder(t *testing.T, f checkoutFixture, qty int32) (string, 
 func visitorNamed(id uuid.UUID, name, email string) order.CheckoutVisitor {
 	return order.CheckoutVisitor{
 		ID: id, Name: name, Email: email,
-		Phone: "+62812345678", Dob: "2000-01-31", Gender: "FEMALE",
+		Phone: "081234567890", Dob: "2000-01-31", Gender: "FEMALE",
 	}
 }
 
 func bundleForms(visitors []order.CheckoutVisitor) order.CheckoutFormsRequest {
-	return order.CheckoutFormsRequest{
-		BuyerName:   "Siti Rahayu",
-		BuyerEmail:  "siti@example.com",
-		BuyerPhone:  "+628123456789",
-		BuyerDob:    "1995-05-05",
-		BuyerGender: "FEMALE",
-		Attendees:   visitors,
-	}
+	return order.CheckoutFormsRequest{Attendees: visitors}
 }
 
 func TestCheckoutBundleUnitRejectsDivergentVisitorData(t *testing.T) {
@@ -390,6 +492,75 @@ func TestCheckoutMixedOrderKeepsStandaloneVisitorIndependent(t *testing.T) {
 			assert.Equal(t, "Solo Visitor", *slot.Name)
 		}
 	}
+}
+
+// Spec 011: the primary contact is the visitor of the FIRST slot in canonical
+// order (standalone slots sort before bundle slots) — never simply the first
+// element of the client-controlled attendees array.
+func TestCheckoutMixedOrderDerivesThePrimaryContactFromTheFirstCanonicalSlot(t *testing.T) {
+	f := newCheckoutFixture(t)
+	ev, _, _, pkg := f.seedBundleEvent(t, 10, 10)
+	solo := testsupport.SeedTicketType(t, f.pool, ev.ID, "Regular", "150000.00", 10)
+	termsID := testsupport.SeedEventTerms(t, f.pool, ev.ID, "<p>terms</p>")
+
+	pkgID := pkg.ID
+	soloID := solo.ID
+	resp, err := f.svc.Book(context.Background(), order.BookRequest{
+		EventID: ev.ID,
+		Items: []order.CheckoutItem{
+			{PackageID: &pkgID, Quantity: 1},
+			{TicketTypeID: &soloID, Quantity: 1},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.RecordAgreement(context.Background(), resp.OrderID,
+		order.AgreementRequest{Agreed: true, EventTermsID: termsID}))
+
+	stored, err := f.repo.GetOrderByNumber(context.Background(), resp.OrderID)
+	require.NoError(t, err)
+	slots, err := f.repo.ListAttendeeSlotsByOrderID(context.Background(), stored.ID)
+	require.NoError(t, err)
+	require.Len(t, slots, 3, "2 bundle constituents + 1 standalone")
+	require.False(t, slots[0].PackageID.Valid,
+		"canonical order (package_id NULLS FIRST) puts the standalone slot first")
+
+	// Submit the visitor forms in REVERSED canonical order, so the request
+	// array leads with a bundle visitor.
+	visitors := make([]order.CheckoutVisitor, 0, len(slots))
+	for i := len(slots) - 1; i >= 0; i-- {
+		slot := slots[i]
+		if slot.PackageID.Valid {
+			v := visitorNamed(slot.ID, "Bundle Visitor", "bundle@example.com")
+			v.Phone = "089999999999"
+			visitors = append(visitors, v)
+		} else {
+			v := visitorNamed(slot.ID, "Solo Visitor", "solo@example.com")
+			v.Phone = "081111111111"
+			visitors = append(visitors, v)
+		}
+	}
+	require.NotEqual(t, slots[0].ID, visitors[0].ID, "the array's first element is not the first canonical slot")
+
+	_, err = f.svc.CheckoutOrder(context.Background(), resp.OrderID,
+		order.CheckoutFormsRequest{Attendees: visitors})
+	require.NoError(t, err)
+
+	// orders.buyer_* snapshots the standalone (first canonical) visitor, not
+	// visitors[0] of the submitted array.
+	var buyerName, buyerEmail, buyerPhone string
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT buyer_name, buyer_email, buyer_phone FROM orders WHERE id = $1`, stored.ID).
+		Scan(&buyerName, &buyerEmail, &buyerPhone))
+	assert.Equal(t, "Solo Visitor", buyerName)
+	assert.Equal(t, "solo@example.com", buyerEmail)
+	assert.Equal(t, "081111111111", buyerPhone)
+	assert.NotEqual(t, visitors[0].Name, buyerName, "the request array's first element must not win")
+
+	// The gateway received the same primary contact as its customer (FR-017).
+	call := f.gateway.lastCall()
+	assert.Equal(t, "Solo Visitor", call.CustomerName)
+	assert.Equal(t, "solo@example.com", call.CustomerEmail)
+	assert.Equal(t, "081111111111", call.CustomerPhone)
 }
 
 func TestCheckoutBundleExemptsLegacySlotsWithoutAUnit(t *testing.T) {

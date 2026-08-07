@@ -196,9 +196,9 @@ func (q *Queries) CreateEventGuideline(ctx context.Context, arg CreateEventGuide
 }
 
 const createPackage = `-- name: CreatePackage :one
-INSERT INTO packages (event_id, name, description, price, sales_start, sales_end, status)
+INSERT INTO packages (event_id, name, description, price, sales_start, sales_end, is_active)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+RETURNING id, event_id, name, description, price, sales_start, sales_end, is_active,
           created_at, updated_at
 `
 
@@ -209,11 +209,24 @@ type CreatePackageParams struct {
 	Price       decimal.Decimal
 	SalesStart  time.Time
 	SalesEnd    time.Time
-	Status      string
+	IsActive    bool
+}
+
+type CreatePackageRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	IsActive    bool
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
 }
 
 // No quota column is written because none exists.
-func (q *Queries) CreatePackage(ctx context.Context, arg CreatePackageParams) (Package, error) {
+func (q *Queries) CreatePackage(ctx context.Context, arg CreatePackageParams) (CreatePackageRow, error) {
 	row := q.db.QueryRow(ctx, createPackage,
 		arg.EventID,
 		arg.Name,
@@ -221,9 +234,9 @@ func (q *Queries) CreatePackage(ctx context.Context, arg CreatePackageParams) (P
 		arg.Price,
 		arg.SalesStart,
 		arg.SalesEnd,
-		arg.Status,
+		arg.IsActive,
 	)
-	var i Package
+	var i CreatePackageRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -232,7 +245,7 @@ func (q *Queries) CreatePackage(ctx context.Context, arg CreatePackageParams) (P
 		&i.Price,
 		&i.SalesStart,
 		&i.SalesEnd,
-		&i.Status,
+		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -560,15 +573,28 @@ func (q *Queries) GetPackageAvailability(ctx context.Context, packageID uuid.UUI
 }
 
 const getPackageByID = `-- name: GetPackageByID :one
-SELECT id, event_id, name, description, price, sales_start, sales_end, status,
+SELECT id, event_id, name, description, price, sales_start, sales_end, is_active,
        created_at, updated_at
 FROM packages
 WHERE id = $1
 `
 
-func (q *Queries) GetPackageByID(ctx context.Context, id uuid.UUID) (Package, error) {
+type GetPackageByIDRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	IsActive    bool
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+}
+
+func (q *Queries) GetPackageByID(ctx context.Context, id uuid.UUID) (GetPackageByIDRow, error) {
 	row := q.db.QueryRow(ctx, getPackageByID, id)
-	var i Package
+	var i GetPackageByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -577,7 +603,7 @@ func (q *Queries) GetPackageByID(ctx context.Context, id uuid.UUID) (Package, er
 		&i.Price,
 		&i.SalesStart,
 		&i.SalesEnd,
-		&i.Status,
+		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -1030,14 +1056,14 @@ WITH component_stats AS (
 )
 SELECT
     p.id, p.event_id, p.name, p.description, p.price,
-    p.sales_start, p.sales_end, p.status, p.created_at, p.updated_at,
+    p.sales_start, p.sales_end, p.is_active, p.created_at, p.updated_at,
     COALESCE(cs.available_units, 0)::int AS available_units,
     cs.limiting_ticket_type_id,
     (
         COALESCE(cs.available_units, 0) > 0
         AND COALESCE(cs.component_count, 0) > 0
         AND COALESCE(cs.all_components_on_sale, FALSE)
-        AND p.status = 'ACTIVE'
+        AND p.is_active
         AND p.sales_start <= now()
         AND p.sales_end   >= now()
     ) AS purchasable
@@ -1055,7 +1081,7 @@ type ListPackagesWithAvailabilityByEventIDRow struct {
 	Price                decimal.Decimal
 	SalesStart           time.Time
 	SalesEnd             time.Time
-	Status               string
+	IsActive             bool
 	CreatedAt            *time.Time
 	UpdatedAt            *time.Time
 	AvailableUnits       int32
@@ -1100,7 +1126,7 @@ func (q *Queries) ListPackagesWithAvailabilityByEventID(ctx context.Context, eve
 			&i.Price,
 			&i.SalesStart,
 			&i.SalesEnd,
-			&i.Status,
+			&i.IsActive,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.AvailableUnits,
@@ -1176,7 +1202,7 @@ const listPublishedPackagesByEventSlug = `-- name: ListPublishedPackagesByEventS
 SELECT p.id
 FROM packages p
 JOIN events e ON e.id = p.event_id
-WHERE e.slug = $1 AND e.status = 'PUBLISHED' AND p.status = 'ACTIVE'
+WHERE e.slug = $1 AND e.status = 'PUBLISHED' AND p.is_active
 `
 
 // Guest-facing variant: only ACTIVE packages of a PUBLISHED event.
@@ -1405,7 +1431,7 @@ func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUI
 }
 
 const packageForCheckout = `-- name: PackageForCheckout :one
-SELECT id, event_id, name, price, sales_start, sales_end, status
+SELECT id, event_id, name, price, sales_start, sales_end, is_active
 FROM packages
 WHERE id = $1
 `
@@ -1417,7 +1443,7 @@ type PackageForCheckoutRow struct {
 	Price      decimal.Decimal
 	SalesStart time.Time
 	SalesEnd   time.Time
-	Status     string
+	IsActive   bool
 }
 
 // Server-side truth for a package at checkout: authoritative price, window, status
@@ -1433,7 +1459,7 @@ func (q *Queries) PackageForCheckout(ctx context.Context, id uuid.UUID) (Package
 		&i.Price,
 		&i.SalesStart,
 		&i.SalesEnd,
-		&i.Status,
+		&i.IsActive,
 	)
 	return i, err
 }
@@ -1599,9 +1625,9 @@ func (q *Queries) UpdateEventGuideline(ctx context.Context, arg UpdateEventGuide
 const updatePackage = `-- name: UpdatePackage :one
 UPDATE packages
 SET name = $2, description = $3, price = $4, sales_start = $5, sales_end = $6,
-    status = $7, updated_at = now()
+    is_active = $7, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, description, price, sales_start, sales_end, status,
+RETURNING id, event_id, name, description, price, sales_start, sales_end, is_active,
           created_at, updated_at
 `
 
@@ -1612,12 +1638,25 @@ type UpdatePackageParams struct {
 	Price       decimal.Decimal
 	SalesStart  time.Time
 	SalesEnd    time.Time
-	Status      string
+	IsActive    bool
+}
+
+type UpdatePackageRow struct {
+	ID          uuid.UUID
+	EventID     uuid.UUID
+	Name        string
+	Description *string
+	Price       decimal.Decimal
+	SalesStart  time.Time
+	SalesEnd    time.Time
+	IsActive    bool
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
 }
 
 // event_id is absent on purpose: a package never moves between events, since its
 // composition is bound to that event by the composite foreign keys.
-func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (Package, error) {
+func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (UpdatePackageRow, error) {
 	row := q.db.QueryRow(ctx, updatePackage,
 		arg.ID,
 		arg.Name,
@@ -1625,9 +1664,9 @@ func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (P
 		arg.Price,
 		arg.SalesStart,
 		arg.SalesEnd,
-		arg.Status,
+		arg.IsActive,
 	)
-	var i Package
+	var i UpdatePackageRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -1636,7 +1675,7 @@ func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (P
 		&i.Price,
 		&i.SalesStart,
 		&i.SalesEnd,
-		&i.Status,
+		&i.IsActive,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

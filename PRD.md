@@ -32,12 +32,12 @@ The goal of this MVP is validation, not scalability. High availability, microser
 
 **Checkout & Order:**
 *   Guest selects quantities for multiple ticket types.
-*   Guest enters Buyer Info and **Dynamic Attendee Info** (Name & Email per ticket).
+*   Guest enters **Dynamic Attendee Info** only — one holder form per standalone ticket and one per bundle unit (Name, Email, Phone, Gender, Date of Birth); there is no separate Buyer Info form. The topmost form's holder is the order's primary contact (spec 011).
 *   System creates a unique `Order Number`, deducts quota safely, and returns a Payment URL.
 
 **Payment & Delivery:**
 *   Webhook updates Order status (`Pending` -> `Paid` / `Cancelled` / `Expired`).
-*   On `Paid`: Backend generates 1 Ticket per Attendee (with unique Ticket Code + QR Code) and sends 1 Email to Buyer containing the PDF.
+*   On `Paid`: Backend generates 1 Ticket per Attendee (with unique Ticket Code + QR Code) and sends **exactly one email to the buyer** — the address on the first ticket holder form — containing every ticket in the order as a PDF plus the receipt. The other holders' emails are identity, not delivery addresses (spec 011 FR-012 / constitution v3.0.0).
 
 **Admin QR Validation:**
 *   Admin validator accepts manual `Ticket Code` input as primary, or Camera QR scan as secondary.

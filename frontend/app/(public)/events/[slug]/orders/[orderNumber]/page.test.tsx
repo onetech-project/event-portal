@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,8 +20,6 @@ const PENDING: TicketOrderDetail = {
   total_amount: "550000.00",
   subtotal: "500000.00",
   fees: [{ name: "PPN (10%)", amount: "50000.00" }],
-  buyer_name: "Siti Rahayu",
-  buyer_email: "siti@example.com",
   terms_agreed_at: "2026-08-01T10:00:30Z",
   expires_at: "2026-08-01T10:15:00Z",
   payment_started: true,
@@ -96,64 +94,6 @@ beforeEach(() => {
   push.mockClear();
 });
 
-describe("order page — awaiting payment", () => {
-  it("shows the order, the QR code, and the amount to pay", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
-
-    renderOrder();
-
-    expect(await screen.findByText(/scan to pay/i)).toBeInTheDocument();
-    // The Complete Purchase countdown banner spans the page (Figma 32-1366).
-    expect(screen.getByText(/complete purchase/i)).toBeInTheDocument();
-    expect(screen.getByText("Jazz Night 2026")).toBeInTheDocument();
-    // The summary lists the ticket line with its quantity badge.
-    expect(screen.getByText("Regular")).toBeInTheDocument();
-    expect(screen.getByText("x2")).toBeInTheDocument();
-    // How to pay is a collapsible on the summary (Figma 203-1157).
-    expect(screen.getByRole("button", { name: /how to pay with qris/i })).toBeInTheDocument();
-
-    // The fee breakdown frozen at booking (Figma 32-1366).
-    expect(screen.getByText(/subtotal \(2 items\)/i)).toBeInTheDocument();
-    expect(screen.getByText("PPN (10%)")).toBeInTheDocument();
-
-    // Rendered by our own API from the stored payload — the browser never talks
-    // to the payment provider.
-    const qr = screen.getByRole("img", { name: /QRIS code/i });
-    expect(qr).toHaveAttribute("src", "http://api.test" + PENDING.payment!.qr_image_path);
-  });
-
-  it("expands the how-to-pay collapsible to the QRIS steps", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
-
-    renderOrder();
-    const trigger = await screen.findByRole("button", { name: /how to pay with qris/i });
-
-    // Collapsed by default (Figma 32-1366); the steps appear on demand.
-    expect(screen.queryByText(/scan qr or pay menu/i)).not.toBeInTheDocument();
-    await userEvent.setup().click(trigger);
-    expect(await screen.findByText(/scan qr or pay menu/i)).toBeInTheDocument();
-    expect(screen.getByText(/enter your pin/i)).toBeInTheDocument();
-  });
-
-  it("offers a way to check the payment status on demand", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
-
-    renderOrder();
-
-    expect(
-      await screen.findByRole("button", { name: /check payment status/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("says the page updates itself while it is polling", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
-
-    renderOrder();
-
-    expect(await screen.findByText(/updates by itself/i)).toBeInTheDocument();
-  });
-});
-
 // FR-013: an order reached through the wrong event is a dead end, not a
 // redirect. Forwarding to the owning event would make a wrong URL work.
 describe("order page — wrong event", () => {
@@ -173,7 +113,7 @@ describe("order page — wrong event", () => {
     renderOrder("some-other-event");
     await screen.findByRole("heading", { name: /order not found for this event/i });
 
-    expect(screen.queryByText("siti@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText(PENDING.order_id)).not.toBeInTheDocument();
     expect(screen.queryByText("Regular")).not.toBeInTheDocument();
     expect(screen.queryByText("x2")).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /QRIS code/i })).not.toBeInTheDocument();
@@ -195,11 +135,14 @@ describe("order page — wrong event", () => {
   });
 });
 
-// FR-018: this page is only ever the paying screen. Anything settled belongs on
-// the confirmation, whether it settled while the guest watched or was already
-// settled when they opened a saved link.
-describe("order page — settled", () => {
+// Spec 011 FR-021: this page is only ever the ticket-holder-forms screen.
+// Anything further along belongs elsewhere — a settled order on the
+// confirmation, an order already paying on the QR screen — and every hop is a
+// replace so the back button cannot bounce between screens that forward to
+// each other.
+describe("order page — settled and started", () => {
   const DONE_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}/done`;
+  const CHECKOUT_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}/checkout`;
 
   it("sends a paid order to the confirmation screen", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PAID)));
@@ -209,9 +152,9 @@ describe("order page — settled", () => {
     await waitFor(() => expect(replace).toHaveBeenCalledWith(DONE_PATH));
   });
 
-  // FR-020 / Figma 288-2295: an expired order is a dead end shown HERE, not a
+  // FR-020 / FR-022: an expired order is a dead end shown HERE, not a
   // confirmation — forwarding to /done would congratulate a failed purchase.
-  it("shows the Time's Up state for an expired order instead of forwarding", async () => {
+  it("shows the Time's Up dialog for an expired order instead of forwarding", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
 
     renderOrder();
@@ -221,19 +164,44 @@ describe("order page — settled", () => {
     ).toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
     expect(screen.queryByRole("img", { name: /QRIS code/i })).not.toBeInTheDocument();
-
-    // The way back to repeat the order stays inside the event.
-    expect(screen.getByRole("link", { name: /repeat order/i })).toHaveAttribute(
-      "href",
-      `/events/${PENDING.event.slug}/tickets`,
-    );
-    expect(screen.getByRole("link", { name: /return to home page/i })).toHaveAttribute(
-      "href",
-      "/",
-    );
   });
 
-  it("shows a cancelled order the same dead end, worded as cancelled", async () => {
+  // The assertion that actually distinguishes FR-022 from the full-page card it
+  // replaced. Without it, this suite passes for either design: the old card
+  // also showed a "Time's Up" heading — it just destroyed everything else on
+  // the way. The guest keeps the screen they were on.
+  it("keeps the order's own screen rendered behind the dialog", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
+
+    renderOrder();
+    await screen.findByRole("heading", { name: /time's up/i });
+
+    expect(screen.getByText("Jazz Night 2026")).toBeInTheDocument();
+    expect(screen.getByText("Regular")).toBeInTheDocument();
+  });
+
+  // FR-023/FR-024: one way out, and no way to dismiss it into a page the guest
+  // can no longer submit.
+  it("offers exactly one action and no way to dismiss itself", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
+
+    renderOrder();
+    const dialog = await screen.findByRole("dialog");
+
+    const actions = within(dialog).getAllByRole("link");
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toHaveAccessibleName(/return to home page/i);
+    expect(actions[0]).toHaveAttribute("href", "/");
+
+    // The Repeat Order link is gone (FR-024) — and with it the copy that told
+    // the guest to repeat an order nothing offers to repeat.
+    expect(screen.queryByRole("link", { name: /repeat order/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/please repeat your order/i)).not.toBeInTheDocument();
+    // No close (X) control anywhere on it.
+    expect(within(dialog).queryByRole("button", { name: /close/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a cancelled order the same dialog, worded as cancelled", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(envelope({ ...PENDING, status: "CANCELLED", payment: null })),
@@ -245,6 +213,12 @@ describe("order page — settled", () => {
       await screen.findByRole("heading", { name: /order cancelled/i }),
     ).toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
+    // Same single action as the expiry variant.
+    expect(screen.getByRole("link", { name: /return to home page/i })).toHaveAttribute(
+      "href",
+      "/",
+    );
+    expect(screen.queryByRole("link", { name: /repeat order/i })).not.toBeInTheDocument();
   });
 
   it("replaces rather than pushes, so back does not bounce off this screen", async () => {
@@ -278,13 +252,19 @@ describe("order page — settled", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
-  it("does not forward an order that is still pending", async () => {
+  it("sends an order whose payment already started to the QR screen", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
 
     renderOrder();
 
-    await screen.findByRole("img", { name: /QRIS code/i });
-    expect(replace).not.toHaveBeenCalled();
+    // The hop Continue to Payment takes, and the one a bookmark of this
+    // address takes after the fact (spec 011 FR-021).
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(CHECKOUT_PATH));
+    expect(push).not.toHaveBeenCalled();
+    // No forms are rendered on the way out — they are no longer fillable.
+    expect(
+      screen.queryByPlaceholderText(/as written on id card/i),
+    ).not.toBeInTheDocument();
   });
 
   // A settled page must place no further load on the API.
@@ -299,53 +279,6 @@ describe("order page — settled", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(fetchSpy.mock.calls.length).toBe(afterLoad);
-  });
-});
-
-describe("order page — checking status", () => {
-  it("reports that nothing has changed yet", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) =>
-      Promise.resolve(
-        url.includes("/payment/refresh")
-          ? envelope({
-              order_number: PENDING.order_id,
-              status: "PENDING",
-              changed: false,
-              checked_at: "2026-08-01T10:04:00Z",
-            })
-          : envelope(PENDING),
-      ),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
-
-    renderOrder();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /check payment status/i }),
-    );
-
-    expect(await screen.findByText(/still waiting for your payment/i)).toBeInTheDocument();
-  });
-
-  // FR-018: pressing too often is a cooldown, not an error.
-  it("shows a cooldown rather than an error when rate limited", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) =>
-      Promise.resolve(
-        url.includes("/payment/refresh")
-          ? jsonResponse(
-              { error_code: "RATE_LIMITED", message: "Too many requests." },
-              429,
-            )
-          : envelope(PENDING),
-      ),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
-
-    renderOrder();
-    const button = await screen.findByRole("button", { name: /check payment status/i });
-    await userEvent.click(button);
-
-    expect(await screen.findByText(/wait a few seconds/i)).toBeInTheDocument();
-    await waitFor(() => expect(button).toBeDisabled());
   });
 });
 
@@ -374,14 +307,15 @@ describe("order page — unknown order", () => {
   });
 });
 
-// --- US5 (spec 008): the registration phase, Option B ------------------------
+// --- The registration phase (spec 011, superseding 008 US5) ------------------
+//
+// One visitor card per slot group and nothing else: the buyer form is gone,
+// and delivery is per ticket holder.
 
 const HELD: TicketOrderDetail = {
   ...PENDING,
   payment_started: false,
   payment: null,
-  buyer_name: null,
-  buyer_email: null,
   terms_agreed_at: "2026-08-01T10:00:30Z",
   expires_at: "2026-08-01T11:00:00Z",
   slots: [
@@ -464,105 +398,305 @@ const GENDERS = [
   { id: "g2222222-2222-2222-2222-222222222222", name: "MALE" },
 ];
 
+/**
+ * A valid spec-011 phone (FR-006, clarified 2026-08-07): 10-15 digits, stored
+ * exactly as typed. The local `08…` form is what this fixture enters, so it is
+ * also what the payload carries — the form normalises nothing.
+ */
+const PHONE = "081234567890";
+
+/**
+ * URL-routed fetch stub for the registration phase: the gender master list, a
+ * successful checkout, and the given order for everything else. A fresh
+ * Response per call, so no body is ever consumed twice.
+ */
+function registrationFetch(order: TicketOrderDetail) {
+  return vi.fn().mockImplementation((url: string) => {
+    if (String(url).includes("/ticket/genders")) {
+      return Promise.resolve(envelope(GENDERS));
+    }
+    if (String(url).includes("/ticket/checkout/")) {
+      return Promise.resolve(
+        envelope({
+          order_id: order.order_id,
+          qr_string: "QR",
+          expires_at: "2026-08-01T10:17:00Z",
+          qr_image_url: `/api/v1/ticket/order/${order.order_id}/qris.png`,
+          qr_refresh_after_seconds: 420,
+        }),
+      );
+    }
+    return Promise.resolve(envelope(order));
+  });
+}
+
+/** Fills visitor card `index` (name/email/phone/dob/gender) with valid values. */
+async function fillCard(
+  user: ReturnType<typeof userEvent.setup>,
+  index: number,
+  person: { name: string; email: string; dob?: string },
+) {
+  const names = screen.getAllByPlaceholderText(/as written on id card/i);
+  const emails = screen.getAllByPlaceholderText("name@example.com");
+  const phones = screen.getAllByPlaceholderText("08123456789");
+  const dobs = screen.getAllByPlaceholderText("DD/MM/YYYY");
+  const genders = screen.getAllByRole("combobox");
+  await user.type(names[index], person.name);
+  await user.type(emails[index], person.email);
+  await user.type(phones[index], PHONE);
+  // Fixtures keep the wire's ISO date; the field is typed as DD/MM/YYYY and
+  // the form converts back to ISO on submit.
+  const [year, month, day] = (person.dob ?? "2000-01-31").split("-");
+  await user.type(dobs[index], `${day}/${month}/${year}`);
+  // Gender is the design-system Select: choosing means opening it and
+  // clicking an option.
+  await user.click(genders[index]);
+  await user.click(await screen.findByRole("option", { name: "Female" }));
+}
+
+/** Waits for the registration phase to mount and returns its submit button. */
+async function findContinueButton() {
+  return await screen.findByRole("button", { name: /continue to payment/i });
+}
+
 describe("order page — registration phase (payment not started)", () => {
-  it("shows empty visitor forms, one card per slot, plus the buyer block", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(HELD)));
+  it("shows one empty visitor card per slot and no buyer card", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
 
     renderOrder();
 
-    // No page heading on this step (Figma 12-4456) — the buyer card leads.
-    expect(await screen.findByText(/buyer contact/i)).toBeInTheDocument();
-    // Buyer block + two visitor cards; every input empty (Option B revisit).
-    const nameInputs = screen.getAllByPlaceholderText(/as written on id card/i);
-    expect(nameInputs).toHaveLength(3);
+    // Two slots → two cards; every input empty (Option B revisit).
+    const nameInputs = await screen.findAllByPlaceholderText(/as written on id card/i);
+    expect(nameInputs).toHaveLength(2);
     for (const input of nameInputs) {
       expect(input).toHaveValue("");
     }
+    // Spec 011: the separate buyer form is gone — the first card's holder is
+    // the primary contact.
+    expect(screen.queryByText(/buyer contact/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /QRIS code/i })).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /continue to payment/i }),
     ).toBeInTheDocument();
   });
 
-  it("renders the Figma 12-4456 summary: badge, event box, QRIS radio, no hold countdown", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(HELD)));
+  it("pins the delivery notice to the first holder card only", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
 
-    // Blue info badge beside the buyer card title, not a helper paragraph.
-    expect(
-      screen.getByText(/the invoice and e-ticket will be sent via email/i),
-    ).toBeInTheDocument();
+    // Two cards, ONE chip (FR-011, clarified 2026-08-06): it rides the FIRST
+    // card's header, top right (Figma 206-1804).
+    const nameInputs = await screen.findAllByPlaceholderText(/as written on id card/i);
+    expect(nameInputs).toHaveLength(2);
+    const chip = screen.getByText("The invoice and e-ticket will be sent via email");
+    expect(nameInputs[0].closest<HTMLElement>('[data-slot="card"]')).toContainElement(chip);
+    expect(nameInputs[1].closest<HTMLElement>('[data-slot="card"]')).not.toContainElement(chip);
+    // The page-top banner is gone — the chip is the only delivery notice.
+    expect(screen.queryByText(/emailed to each ticket holder/i)).not.toBeInTheDocument();
+  });
+
+  it("marks every field of every card as required", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    await screen.findAllByPlaceholderText(/as written on id card/i);
+
+    // 2 cards × 5 fields, each label carrying the visual asterisk plus the
+    // screen-reader-only "(required)" (spec 011 US1-AS3).
+    expect(screen.getAllByText("*")).toHaveLength(10);
+    expect(screen.getAllByText("(required)")).toHaveLength(10);
+  });
+
+  it("renders the Figma 12-4456 summary: event box, QRIS radio, no hold countdown", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    await screen.findAllByPlaceholderText(/as written on id card/i);
 
     // Event box carries venue, address, and gate-open time from the API.
     expect(screen.getByText("Balai Sarbini")).toBeInTheDocument();
     expect(screen.getByText("Jakarta, Indonesia")).toBeInTheDocument();
     expect(screen.getByText(/gate opens at .* WIB/i)).toBeInTheDocument();
 
+    // NOTE: spec 011 FR-013 asks for the Booking ID in this header; it was
+    // removed from the panel by hand to match the design, so the assertion is
+    // suspended rather than deleted — restore both together, or amend FR-013.
+
     // QRIS is a pre-selected radio — the sole payment method.
     expect(screen.getByRole("radio", { name: /pay with qris/i })).toBeChecked();
 
     // The order-hold countdown box is gone from this step.
     expect(screen.queryByText(/complete purchase/i)).not.toBeInTheDocument();
+
+    // Fees are NOT itemized while the forms are being filled (spec 011 FR-016,
+    // constitution v2.1.0): the grand total alone, with its taxes-and-fees
+    // note. HELD carries a non-null subtotal and a fee, so their absence is
+    // the flag doing the work, not missing data.
+    expect(HELD.subtotal).not.toBeNull();
+    expect(screen.queryByText("Ticket Total")).not.toBeInTheDocument();
+    expect(screen.queryByText("PPN (10%)")).not.toBeInTheDocument();
+    expect(screen.getByText(/total payment/i)).toBeInTheDocument();
+    expect(screen.getByText(/includes all taxes and fees/i)).toBeInTheDocument();
   });
 
-  it("submits the forms to the checkout endpoint with the slot ids", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes("/ticket/genders")) {
-        return Promise.resolve(envelope(GENDERS));
-      }
-      if (String(url).includes("/ticket/checkout/")) {
-        return Promise.resolve(
-          envelope({
-            order_id: HELD.order_id,
-            qr_string: "QR",
-            expires_at: "2026-08-01T10:17:00Z",
-            qr_image_url: `/api/v1/ticket/order/${HELD.order_id}/qris.png`,
-            qr_refresh_after_seconds: 420,
-          }),
-        );
-      }
-      return Promise.resolve(envelope(HELD));
-    });
+  it("enables Continue only once every field of every card is valid", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    const button = await findContinueButton();
+
+    // FR-009: gated from the start.
+    expect(button).toBeDisabled();
+
+    const user = userEvent.setup();
+    await fillCard(user, 0, { name: "Siti Rahayu", email: "siti@example.com" });
+    // One card done, the other still empty: still gated.
+    expect(button).toBeDisabled();
+
+    await fillCard(user, 1, { name: "Budi Visitor", email: "budi@example.com" });
+    await waitFor(() => expect(button).toBeEnabled());
+
+    // Clearing any field re-arms the gate.
+    await user.clear(screen.getAllByPlaceholderText(/as written on id card/i)[0]);
+    await waitFor(() => expect(button).toBeDisabled());
+  });
+
+  it("reveals errors on untouched fields when the gate is clicked, and posts nothing", async () => {
+    const fetchSpy = registrationFetch(HELD);
     vi.stubGlobal("fetch", fetchSpy);
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
+    await findContinueButton();
+
+    // The wrapper around the disabled button catches the click and runs
+    // trigger() — the "attempted to proceed" moment (US2-AS5).
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("continue-gate"));
+
+    // Untouched fields now show their errors…
+    expect(await screen.findAllByText("Select a gender.")).toHaveLength(2);
+    expect(screen.getAllByText("Full name is required.")).toHaveLength(2);
+    expect(screen.getAllByText("Enter a phone number of 10-15 digits.")).toHaveLength(2);
+    expect(screen.getAllByText("Date of birth is required.")).toHaveLength(2);
+    // …and nothing was submitted.
+    expect(
+      fetchSpy.mock.calls.some((args) => String(args[0]).includes("/ticket/checkout/")),
+    ).toBe(false);
+  });
+
+  it("rejects a phone number outside 10-15 digits with the exact message", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    const phones = await screen.findAllByPlaceholderText("08123456789");
+    // The numeric mobile keyboard (FR-006); the mask and schema do the rest.
+    expect(phones[0]).toHaveAttribute("inputmode", "numeric");
 
     const user = userEvent.setup();
-    // Index 0 of every repeated input belongs to the buyer block; visitor
-    // cards follow in slot order.
-    const names = screen.getAllByPlaceholderText(/as written on id card/i);
-    const emails = screen.getAllByPlaceholderText("name@example.com");
-    const phones = screen.getAllByPlaceholderText("+62812XXXXXXX");
-    await user.type(names[0], "Siti Rahayu");
-    await user.type(emails[0], "siti@example.com");
-    await user.type(phones[0], "+628123456789");
+    await user.type(phones[0], "081234");
+    await user.tab(); // mode "onTouched": the error appears on leaving the field.
 
-    // Buyer form carries gender + dob too (Figma 12-4456): index 0 of the
-    // repeated controls belongs to the buyer, visitors follow. Gender is the
-    // design-system Select, so choosing means opening it and clicking an option.
-    const chooseGender = async (combobox: HTMLElement) => {
-      await user.click(combobox);
-      await user.click(await screen.findByRole("option", { name: "Female" }));
-    };
-    const dobs = document.querySelectorAll('input[type="date"]');
-    const genders = screen.getAllByRole("combobox");
-    await user.type(dobs[0] as HTMLElement, "1995-05-05");
-    await chooseGender(genders[0]);
-    // The trigger shows the human label, not the stored value.
-    expect(genders[0]).toHaveTextContent("Female");
-    expect(genders[0]).not.toHaveTextContent("FEMALE");
-    for (let i = 0; i < 2; i++) {
-      await user.type(names[i + 1], `Visitor ${i}`);
-      await user.type(emails[i + 1], `v${i}@example.com`);
-      await user.type(phones[i + 1], "+62812345678");
-      await user.type(dobs[i + 1] as HTMLElement, "2000-01-31");
-      await chooseGender(genders[i + 1]);
-    }
+    expect(
+      await screen.findByText("Enter a phone number of 10-15 digits."),
+    ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /continue to payment/i }));
+    // A full-length number clears it again.
+    await user.clear(phones[0]);
+    await user.type(phones[0], PHONE);
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Enter a phone number of 10-15 digits."),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  // The old field was a bare `type="tel"` input, which is only a keyboard hint:
+  // letters typed straight through and sat there until the schema complained on
+  // blur. The mask is what actually keeps them out (clarified 2026-08-07).
+  it("drops everything that is not a digit as it is typed", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    const phones = await screen.findAllByPlaceholderText("08123456789");
+    const user = userEvent.setup();
+
+    await user.type(phones[0], "abc0812-345 def6789");
+    expect(phones[0]).toHaveValue("08123456789");
+
+    // FR-006 keeps whichever form the guest chose, so the local and
+    // international spellings stay DIFFERENT values — nothing is normalised.
+    await user.clear(phones[0]);
+    await user.type(phones[0], "+62 812-3456-789");
+    expect(phones[0]).toHaveValue("628123456789");
+
+    // 15 digits is the ceiling; typing past it is ignored, not rejected.
+    await user.clear(phones[0]);
+    await user.type(phones[0], "08123456789012345");
+    expect(phones[0]).toHaveValue("081234567890123");
+  });
+
+  it("types date of birth as masked DD/MM/YYYY with no calendar control", async () => {
+    vi.stubGlobal("fetch", registrationFetch(HELD));
+
+    renderOrder();
+    const dobs = await screen.findAllByPlaceholderText("DD/MM/YYYY");
+    // A text field, not the native picker (clarified 2026-08-06).
+    expect(dobs[0]).toHaveAttribute("inputmode", "numeric");
+    expect(dobs[0]).not.toHaveAttribute("type", "date");
+
+    // Digits alone produce the separators.
+    const user = userEvent.setup();
+    await user.type(dobs[0], "31121999");
+    expect(dobs[0]).toHaveValue("31/12/1999");
+
+    // A date that does not exist on the calendar is rejected…
+    await user.clear(dobs[0]);
+    await user.type(dobs[0], "31022000");
+    await user.tab();
+    expect(await screen.findByText("Enter a real calendar date.")).toBeInTheDocument();
+
+    // …as is a future one, while TODAY is accepted (spec edge case).
+    const now = new Date();
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const today = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}`;
+    await user.clear(dobs[0]);
+    await user.type(dobs[0], `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear() + 1}`);
+    await user.tab();
+    expect(
+      await screen.findByText("Date of birth cannot be in the future."),
+    ).toBeInTheDocument();
+
+    await user.clear(dobs[0]);
+    await user.type(dobs[0], today);
+    await user.tab();
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Date of birth cannot be in the future."),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("submits one attendee per slot and no buyer keys", async () => {
+    const fetchSpy = registrationFetch(HELD);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderOrder();
+    const button = await findContinueButton();
+
+    const user = userEvent.setup();
+    await fillCard(user, 0, {
+      name: "Siti Rahayu",
+      email: "siti@example.com",
+      dob: "1995-05-05",
+    });
+    await fillCard(user, 1, {
+      name: "Budi Visitor",
+      email: "budi@example.com",
+      dob: "2000-01-31",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
 
     await waitFor(() => {
       const call = fetchSpy.mock.calls.find((args) =>
@@ -570,56 +704,55 @@ describe("order page — registration phase (payment not started)", () => {
       );
       expect(call).toBeDefined();
       const body = JSON.parse(String(call?.[1]?.body));
-      expect(body.buyer_email).toBe("siti@example.com");
-      expect(body.buyer_dob).toBe("1995-05-05");
-      expect(body.buyer_gender).toBe("FEMALE");
+      // Spec 011: attendees only — the server derives the primary contact
+      // from the topmost form via canonical slot order.
+      expect(Object.keys(body)).toEqual(["attendees"]);
       expect(body.attendees).toHaveLength(2);
-      expect(body.attendees[0].id).toBe(HELD.slots[0].id);
-      expect(body.attendees[0].gender).toBe("FEMALE");
-      expect(body.attendees[0].dob).toBe("2000-01-31");
+      expect(body.attendees[0]).toMatchObject({
+        id: HELD.slots[0].id,
+        name: "Siti Rahayu",
+        email: "siti@example.com",
+        phone: PHONE,
+        dob: "1995-05-05",
+        gender: "FEMALE",
+      });
+      expect(body.attendees[1]).toMatchObject({
+        id: HELD.slots[1].id,
+        name: "Budi Visitor",
+        email: "budi@example.com",
+        dob: "2000-01-31",
+      });
     });
   });
 
-  it("keeps the QR phase for an order whose payment already started", async () => {
+  it("shows no forms once payment has started — that step is over", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
 
     renderOrder();
 
-    expect(await screen.findByText(/scan to pay/i)).toBeInTheDocument();
-    expect(screen.queryByText(/buyer contact/i)).not.toBeInTheDocument();
+    // Spec 011 FR-020: the QR now has an address of its own, so this page has
+    // nothing left to render for a started order and forwards instead.
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/invoice and e-ticket will be sent via email/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /continue to payment/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/scan to pay/i)).not.toBeInTheDocument();
   });
 });
 
 // --- Spec 010 US1: a bundle unit collapses into one visitor form -------------
 
 describe("order page — registration phase with a bundle", () => {
-  /** Fills one visitor-form row (name/email/phone/dob/gender) at `index`. */
-  async function fillPerson(
-    user: ReturnType<typeof userEvent.setup>,
-    index: number,
-    person: { name: string; email: string; dob: string },
-  ) {
-    const names = screen.getAllByPlaceholderText(/as written on id card/i);
-    const emails = screen.getAllByPlaceholderText("name@example.com");
-    const phones = screen.getAllByPlaceholderText("+62812XXXXXXX");
-    const dobs = document.querySelectorAll('input[type="date"]');
-    const genders = screen.getAllByRole("combobox");
-    await user.type(names[index], person.name);
-    await user.type(emails[index], person.email);
-    await user.type(phones[index], "+628123456789");
-    await user.type(dobs[index] as HTMLElement, person.dob);
-    await user.click(genders[index]);
-    await user.click(await screen.findByRole("option", { name: "Female" }));
-  }
-
   it("collapses a bundle unit into ONE form titled with the bundle name", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(BUNDLE_HELD)));
+    vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
 
-    // Buyer block + a single bundle card — not one card per constituent slot.
-    expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(2);
+    // A single bundle card — not one card per constituent slot.
+    expect(await screen.findAllByPlaceholderText(/as written on id card/i)).toHaveLength(1);
     // The card's title is the bundle's ("2-Day Bundle" also sits in the order
     // summary, so scope to card titles), with the pass count as its badge;
     // constituent ticket-type names do not appear as card titles.
@@ -633,41 +766,20 @@ describe("order page — registration phase with a bundle", () => {
   });
 
   it("fans the single bundle form out to one payload entry per slot", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes("/ticket/genders")) {
-        return Promise.resolve(envelope(GENDERS));
-      }
-      if (String(url).includes("/ticket/checkout/")) {
-        return Promise.resolve(
-          envelope({
-            order_id: BUNDLE_HELD.order_id,
-            qr_string: "QR",
-            expires_at: "2026-08-01T10:17:00Z",
-            qr_image_url: `/api/v1/ticket/order/${BUNDLE_HELD.order_id}/qris.png`,
-            qr_refresh_after_seconds: 420,
-          }),
-        );
-      }
-      return Promise.resolve(envelope(BUNDLE_HELD));
-    });
+    const fetchSpy = registrationFetch(BUNDLE_HELD);
     vi.stubGlobal("fetch", fetchSpy);
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
+    const button = await findContinueButton();
 
     const user = userEvent.setup();
-    await fillPerson(user, 0, {
-      name: "Siti Rahayu",
-      email: "siti@example.com",
-      dob: "1995-05-05",
-    });
-    await fillPerson(user, 1, {
+    await fillCard(user, 0, {
       name: "Bundle Visitor",
       email: "visitor@example.com",
       dob: "2000-01-31",
     });
-
-    await user.click(screen.getByRole("button", { name: /continue to payment/i }));
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
 
     await waitFor(() => {
       const call = fetchSpy.mock.calls.find((args) =>
@@ -676,7 +788,8 @@ describe("order page — registration phase with a bundle", () => {
       expect(call).toBeDefined();
       const body = JSON.parse(String(call?.[1]?.body));
       // One form, two slots: identical visitor data on both entries (FR-003),
-      // each carrying its own slot id.
+      // each carrying its own slot id — and nothing but attendees in the body.
+      expect(Object.keys(body)).toEqual(["attendees"]);
       expect(body.attendees).toHaveLength(2);
       expect(body.attendees.map((a: { id: string }) => a.id)).toEqual([
         BUNDLE_HELD.slots[0].id,
@@ -697,30 +810,14 @@ describe("order page — registration phase with a bundle", () => {
       ...BUNDLE_HELD,
       slots: [HELD.slots[0], ...BUNDLE_HELD.slots],
     };
-    const fetchSpy = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes("/ticket/genders")) {
-        return Promise.resolve(envelope(GENDERS));
-      }
-      if (String(url).includes("/ticket/checkout/")) {
-        return Promise.resolve(
-          envelope({
-            order_id: MIXED_HELD.order_id,
-            qr_string: "QR",
-            expires_at: "2026-08-01T10:17:00Z",
-            qr_image_url: `/api/v1/ticket/order/${MIXED_HELD.order_id}/qris.png`,
-            qr_refresh_after_seconds: 420,
-          }),
-        );
-      }
-      return Promise.resolve(envelope(MIXED_HELD));
-    });
+    const fetchSpy = registrationFetch(MIXED_HELD);
     vi.stubGlobal("fetch", fetchSpy);
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
+    const button = await findContinueButton();
 
-    // Buyer + standalone card + ONE bundle card = 3 forms for 3 slots.
-    expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(3);
+    // Standalone card + ONE bundle card = 2 forms for 3 slots.
+    expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(2);
     const cardTitles = Array.from(
       document.querySelectorAll('[data-slot="card-title"]'),
     ).map((el) => el.textContent ?? "");
@@ -728,22 +825,18 @@ describe("order page — registration phase with a bundle", () => {
     expect(cardTitles.some((title) => title.includes("2-Day Bundle"))).toBe(true);
 
     const user = userEvent.setup();
-    await fillPerson(user, 0, {
-      name: "Siti Rahayu",
-      email: "siti@example.com",
-      dob: "1995-05-05",
-    });
-    await fillPerson(user, 1, {
+    await fillCard(user, 0, {
       name: "Solo Visitor",
       email: "solo@example.com",
       dob: "1999-09-09",
     });
-    await fillPerson(user, 2, {
+    await fillCard(user, 1, {
       name: "Bundle Visitor",
       email: "bundle@example.com",
       dob: "2000-01-31",
     });
-    await user.click(screen.getByRole("button", { name: /continue to payment/i }));
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
 
     await waitFor(() => {
       const call = fetchSpy.mock.calls.find((args) =>
@@ -793,51 +886,31 @@ describe("order page — registration phase with a bundle", () => {
         unitSlot("74444444-4444-4444-4444-444444444444", 2, "Day 2 Pass"),
       ],
     };
-    const fetchSpy = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes("/ticket/genders")) {
-        return Promise.resolve(envelope(GENDERS));
-      }
-      if (String(url).includes("/ticket/checkout/")) {
-        return Promise.resolve(
-          envelope({
-            order_id: TWO_UNITS_HELD.order_id,
-            qr_string: "QR",
-            expires_at: "2026-08-01T10:17:00Z",
-            qr_image_url: `/api/v1/ticket/order/${TWO_UNITS_HELD.order_id}/qris.png`,
-            qr_refresh_after_seconds: 420,
-          }),
-        );
-      }
-      return Promise.resolve(envelope(TWO_UNITS_HELD));
-    });
+    const fetchSpy = registrationFetch(TWO_UNITS_HELD);
     vi.stubGlobal("fetch", fetchSpy);
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
+    const button = await findContinueButton();
 
-    // Buyer + one form per purchased unit (4 slots → 2 forms), told apart by
-    // their visitor labels.
-    expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(3);
+    // One form per purchased unit (4 slots → 2 forms), told apart by their
+    // visitor labels.
+    expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(2);
     expect(screen.getByText("Visitor 1")).toBeInTheDocument();
     expect(screen.getByText("Visitor 2")).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await fillPerson(user, 0, {
-      name: "Siti Rahayu",
-      email: "siti@example.com",
-      dob: "1995-05-05",
-    });
-    await fillPerson(user, 1, {
+    await fillCard(user, 0, {
       name: "First Guest",
       email: "first@example.com",
       dob: "2000-01-31",
     });
-    await fillPerson(user, 2, {
+    await fillCard(user, 1, {
       name: "Second Guest",
       email: "second@example.com",
       dob: "2001-02-01",
     });
-    await user.click(screen.getByRole("button", { name: /continue to payment/i }));
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
 
     await waitFor(() => {
       const call = fetchSpy.mock.calls.find((args) =>
@@ -883,20 +956,16 @@ describe("order page — registration phase with a bundle", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     renderOrder();
-    await screen.findByText(/buyer contact/i);
+    const button = await findContinueButton();
 
     const user = userEvent.setup();
-    await fillPerson(user, 0, {
-      name: "Siti Rahayu",
-      email: "siti@example.com",
-      dob: "1995-05-05",
-    });
-    await fillPerson(user, 1, {
+    await fillCard(user, 0, {
       name: "Bundle Visitor",
       email: "visitor@example.com",
       dob: "2000-01-31",
     });
-    await user.click(screen.getByRole("button", { name: /continue to payment/i }));
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
 
     // Payload index 1 remaps to the single visible bundle card's dob field.
     expect(await screen.findByText(message)).toBeInTheDocument();

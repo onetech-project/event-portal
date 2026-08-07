@@ -40,8 +40,6 @@ function harness() {
     total_amount: "100000.00",
     subtotal: null,
     fees: [],
-    buyer_name: null,
-    buyer_email: null,
     expires_at: null,
     terms_agreed_at: null,
     payment_started: true,

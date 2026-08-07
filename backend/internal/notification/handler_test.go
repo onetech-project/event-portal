@@ -53,9 +53,10 @@ func TestResendEndpointReturns200AndTheRecipient(t *testing.T) {
 	require.True(t, ok, "resend payload rides the envelope's data field")
 	assert.ElementsMatch(t, []string{"message", "sent_to"}, keysOfBody(data))
 	assert.Equal(t, "Email resent", data["message"])
-	assert.Equal(t, "budi@example.com", data["sent_to"])
+	assert.Equal(t, "budi@example.com", data["sent_to"],
+		"sent_to is the buyer — the order's sole recipient (spec 011 FR-012)")
 
-	require.Len(t, f.mailer.sent, 1)
+	require.Len(t, f.mailer.sent, 1, "exactly one email for the whole order")
 	assert.Equal(t, 1, f.orders.markCalled, "a successful resend also sets email_sent")
 }
 
@@ -102,10 +103,12 @@ func TestResendEndpointReproducesTheSameTickets(t *testing.T) {
 	require.Equal(t, http.StatusOK, resend(t, e, f.orderID.String()).Code)
 	require.Equal(t, http.StatusOK, resend(t, e, f.orderID.String()).Code)
 
-	require.Len(t, f.mailer.sent, 2)
+	require.Len(t, f.mailer.sent, 2, "one email per round")
+	first, second := f.mailer.sent[0], f.mailer.sent[1]
+	assert.Equal(t, first.To, second.To, "the resend reaches the same buyer")
 	assert.Equal(t,
-		len(f.mailer.sent[0].Attachments[0].Content),
-		len(f.mailer.sent[1].Attachments[0].Content),
+		len(first.Attachments[0].Content),
+		len(second.Attachments[0].Content),
 		"the same codes render the same document; nothing is regenerated")
 }
 

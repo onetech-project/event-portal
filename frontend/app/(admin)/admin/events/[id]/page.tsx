@@ -379,7 +379,7 @@ function PackagesSection({ event }: Readonly<{ event: EventAdminDetail }>) {
                     stores no inventory of its own. */}
                 <p className="mt-1 text-xs text-muted-foreground">
                   Available: <strong>{pkg.available_units}</strong> bundle(s) · {pkg.sold}{" "}
-                  sold · {pkg.status}
+                  sold · {pkg.is_active ? "Active" : "Inactive"}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   On sale {formatDateTime(pkg.sales_start)} — {formatDateTime(pkg.sales_end)}

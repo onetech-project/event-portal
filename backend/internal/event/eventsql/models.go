@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 type Event struct {
@@ -63,19 +62,6 @@ type EventTerm struct {
 	Content   string
 	CreatedAt *time.Time
 	UpdatedAt *time.Time
-}
-
-type Package struct {
-	ID          uuid.UUID
-	EventID     uuid.UUID
-	Name        string
-	Description *string
-	Price       decimal.Decimal
-	SalesStart  time.Time
-	SalesEnd    time.Time
-	Status      string
-	CreatedAt   *time.Time
-	UpdatedAt   *time.Time
 }
 
 type PackageTicket struct {

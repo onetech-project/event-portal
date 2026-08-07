@@ -134,6 +134,7 @@ func (r *Repository) ListDetailsByOrderID(ctx context.Context, orderID uuid.UUID
 			TicketCode:     row.TicketCode,
 			Status:         row.Status,
 			AttendeeName:   strv(row.AttendeeName),
+			AttendeeEmail:  strv(row.AttendeeEmail),
 			TicketTypeName: row.TicketTypeName,
 			EventName:      row.EventName,
 			Venue:          row.Venue,

@@ -22,7 +22,7 @@ type PackageRow struct {
 	Price       decimal.Decimal
 	SalesStart  time.Time
 	SalesEnd    time.Time
-	Status      string
+	IsActive    bool
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }
@@ -59,7 +59,7 @@ type AdminPackageParams struct {
 	Price       decimal.Decimal
 	SalesStart  time.Time
 	SalesEnd    time.Time
-	Status      string
+	IsActive    bool
 }
 
 // AdminPackageComponentParams is one constituent to persist.
@@ -87,7 +87,7 @@ func (r *Repository) ListPackagesWithAvailabilityByEventID(ctx context.Context, 
 				ID: row.ID, EventID: row.EventID, Name: row.Name,
 				Description: row.Description, Price: row.Price,
 				SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
-				Status: row.Status, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+				IsActive: row.IsActive, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 			},
 			AvailableUnits:       row.AvailableUnits,
 			LimitingTicketTypeID: row.LimitingTicketTypeID,
@@ -149,7 +149,7 @@ func (r *Repository) GetPackageByID(ctx context.Context, id uuid.UUID) (PackageR
 	if err != nil {
 		return PackageRow{}, fmt.Errorf("get package: %w", err)
 	}
-	return toPackageRow(row), nil
+	return toPackageRow(eventsql.CreatePackageRow(row)), nil
 }
 
 // PackageForCheckout returns the server-side truth about a package and its full
@@ -184,7 +184,7 @@ func (r *Repository) PackageForCheckout(ctx context.Context, tx pgx.Tx, id uuid.
 		Price:      row.Price,
 		SalesStart: row.SalesStart,
 		SalesEnd:   row.SalesEnd,
-		Status:     row.Status,
+		IsActive:   row.IsActive,
 		Components: make([]PackageComponent, 0, len(rows)),
 	}
 	for _, r := range rows {
@@ -287,7 +287,7 @@ func (r *Repository) CreatePackage(ctx context.Context, tx pgx.Tx, p AdminPackag
 		Price:       p.Price,
 		SalesStart:  p.SalesStart,
 		SalesEnd:    p.SalesEnd,
-		Status:      p.Status,
+		IsActive:    p.IsActive,
 	})
 	if err != nil {
 		return PackageRow{}, fmt.Errorf("create package: %w", err)
@@ -311,7 +311,7 @@ func (r *Repository) UpdatePackage(ctx context.Context, tx pgx.Tx, id uuid.UUID,
 		Price:       p.Price,
 		SalesStart:  p.SalesStart,
 		SalesEnd:    p.SalesEnd,
-		Status:      p.Status,
+		IsActive:    p.IsActive,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PackageRow{}, ErrNotFound
@@ -319,7 +319,7 @@ func (r *Repository) UpdatePackage(ctx context.Context, tx pgx.Tx, id uuid.UUID,
 	if err != nil {
 		return PackageRow{}, fmt.Errorf("update package: %w", err)
 	}
-	return toPackageRow(row), nil
+	return toPackageRow(eventsql.CreatePackageRow(row)), nil
 }
 
 // ReplacePackageComponents rewrites a package's composition wholesale as a
@@ -355,7 +355,7 @@ func (r *Repository) DeletePackage(ctx context.Context, tx pgx.Tx, id uuid.UUID)
 	return affected > 0, nil
 }
 
-func toPackageRow(row eventsql.Package) PackageRow {
+func toPackageRow(row eventsql.CreatePackageRow) PackageRow {
 	return PackageRow{
 		ID:          row.ID,
 		EventID:     row.EventID,
@@ -364,7 +364,7 @@ func toPackageRow(row eventsql.Package) PackageRow {
 		Price:       row.Price,
 		SalesStart:  row.SalesStart,
 		SalesEnd:    row.SalesEnd,
-		Status:      row.Status,
+		IsActive:    row.IsActive,
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
 	}

@@ -378,7 +378,7 @@ func toAdminPackageParams(req PackageRequest) AdminPackageParams {
 		Price:       req.Price.Decimal(),
 		SalesStart:  req.SalesStart,
 		SalesEnd:    req.SalesEnd,
-		Status:      req.Status,
+		IsActive:    req.IsActive,
 	}
 }
 
@@ -407,7 +407,7 @@ func toPackageAdminDTO(row PackageRow, available int32, sold int, components []P
 		Price:          money.From(row.Price),
 		SalesStart:     row.SalesStart,
 		SalesEnd:       row.SalesEnd,
-		Status:         row.Status,
+		IsActive:       row.IsActive,
 		Components:     componentDTOs,
 		AvailableUnits: available,
 		Sold:           int32(sold),

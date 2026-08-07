@@ -31,10 +31,14 @@ type Detail struct {
 }
 
 // FullDetail extends Detail with the event context printed on a ticket PDF.
+// AttendeeEmail is the holder's delivery address (spec 011): the notification
+// domain groups an order's tickets by it for per-holder emails. Empty for
+// pre-008 rows whose slot was never filled.
 type FullDetail struct {
 	TicketCode     string
 	Status         string
 	AttendeeName   string
+	AttendeeEmail  string
 	TicketTypeName string
 	EventName      string
 	Venue          string

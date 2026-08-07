@@ -122,7 +122,7 @@ func TestStatusStreamCatchesADriftedTransitionWithoutAPublish(t *testing.T) {
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		_, err := f.pool.Exec(context.Background(),
-			`UPDATE orders SET status = 'EXPIRED' WHERE id = $1`, f.orderID)
+			`UPDATE orders SET status_id = (SELECT id FROM order_statuses WHERE name = 'EXPIRED') WHERE id = $1`, f.orderID)
 		require.NoError(t, err)
 	}()
 

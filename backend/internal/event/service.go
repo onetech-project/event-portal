@@ -189,7 +189,7 @@ func (s *Service) PackagesForEvent(ctx context.Context, eventID uuid.UUID) ([]Pa
 	// Only ACTIVE packages appear to guests; inactive ones are admin-visible only.
 	filtered := rows[:0]
 	for _, row := range rows {
-		if row.Status == PackageStatusActive {
+		if row.IsActive {
 			filtered = append(filtered, row)
 		}
 	}

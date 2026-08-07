@@ -70,7 +70,7 @@ func (h *Handler) resendPublic(c echo.Context) error {
 
 	// SendTicketEmail already refuses anything that is not PAID, so an unpaid or
 	// cancelled order sends nothing and still answers identically.
-	if err := h.svc.SendTicketEmail(ctx, orderID); err != nil {
+	if _, err := h.svc.SendTicketEmail(ctx, orderID); err != nil {
 		h.svc.log.WarnContext(ctx, "public ticket email resend failed",
 			"order_number", req.OrderID, "error", err.Error())
 		return accepted()
@@ -87,19 +87,21 @@ func (h *Handler) resend(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	// Read the order first so the response can report where the email went, and so
-	// a missing order is a 404 before any rendering work happens.
-	order, err := h.svc.orders.OrderForDelivery(ctx, orderID)
-	if err != nil {
+	// Read the order first so a missing order is a 404 before any rendering
+	// work happens.
+	if _, err := h.svc.orders.OrderForDelivery(ctx, orderID); err != nil {
 		return err
 	}
 
-	if err := h.svc.SendTicketEmail(ctx, orderID); err != nil {
+	// The recipient comes from the send itself rather than being re-derived here,
+	// so what the admin is shown is exactly the address that was mailed.
+	recipient, err := h.svc.SendTicketEmail(ctx, orderID)
+	if err != nil {
 		return err
 	}
 
 	return httpx.Respond(c, http.StatusOK, ResendResponse{
 		Message: "Email resent",
-		SentTo:  order.BuyerEmail,
+		SentTo:  recipient,
 	})
 }

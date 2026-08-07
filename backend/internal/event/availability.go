@@ -52,7 +52,7 @@ type PackageForCheckout struct {
 	Price      decimal.Decimal
 	SalesStart time.Time
 	SalesEnd   time.Time
-	Status     string
+	IsActive   bool
 	Components []PackageComponent
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/internal/event"
 	"github.com/manjo/ticketing/backend/internal/notification"
@@ -194,7 +195,13 @@ func (a paymentOrderAdapter) UpdatePaymentQR(ctx context.Context, orderID uuid.U
 
 // --- notification.OrderProvider: delivery's view of the order domain -------
 
-type notificationOrderAdapter struct{ orders *order.Repository }
+// guestReads supplies the itemized order summary (line names resolved through
+// the event domain) that every recipient's receipt prints since spec 011 —
+// reusing the guest order read rather than re-deriving displays here.
+type notificationOrderAdapter struct {
+	orders     *order.Repository
+	guestReads *order.PublicService
+}
 
 func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID uuid.UUID) (notification.OrderDelivery, error) {
 	rec, err := a.orders.GetOrderByID(ctx, orderID)
@@ -207,8 +214,9 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		return notification.OrderDelivery{}, err
 	}
 
-	// Buyer identity is nullable since 008 (booking precedes the forms), but
-	// delivery only ever runs for PAID orders, where checkout has filled it.
+	// Contact identity is nullable since 008 (booking precedes the forms), but
+	// delivery only ever runs for PAID orders, where checkout has snapshotted
+	// the primary contact (spec 011).
 	buyerName, buyerEmail := "", ""
 	if rec.BuyerName != nil {
 		buyerName = *rec.BuyerName
@@ -216,6 +224,36 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 	if rec.BuyerEmail != nil {
 		buyerEmail = *rec.BuyerEmail
 	}
+
+	detail, err := a.guestReads.TicketOrderByNumber(ctx, rec.OrderNumber)
+	if err != nil {
+		return notification.OrderDelivery{}, err
+	}
+	items := make([]notification.ReceiptLine, 0, len(detail.Items))
+	for _, it := range detail.Items {
+		name := ""
+		if it.PackageName != nil {
+			name = *it.PackageName
+		} else if it.TicketTypeName != nil {
+			name = *it.TicketTypeName
+		}
+		items = append(items, notification.ReceiptLine{
+			Name:      name,
+			Quantity:  it.Quantity,
+			UnitPrice: it.UnitPrice.Decimal(),
+			Subtotal:  it.Subtotal.Decimal(),
+		})
+	}
+	fees := make([]notification.ReceiptFee, 0, len(detail.Fees))
+	for _, fee := range detail.Fees {
+		fees = append(fees, notification.ReceiptFee{Name: fee.Name, Amount: fee.Amount.Decimal()})
+	}
+	var subtotal *decimal.Decimal
+	if detail.Subtotal != nil {
+		d := detail.Subtotal.Decimal()
+		subtotal = &d
+	}
+
 	return notification.OrderDelivery{
 		ID:          rec.ID,
 		OrderNumber: rec.OrderNumber,
@@ -223,6 +261,9 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		BuyerEmail:  buyerEmail,
 		Status:      rec.Status,
 		TotalAmount: rec.TotalAmount,
+		Subtotal:    subtotal,
+		Items:       items,
+		Fees:        fees,
 	}, nil
 }
 
@@ -257,6 +298,7 @@ func (a notificationTicketAdapter) TicketDetailsForOrder(ctx context.Context, or
 		out = append(out, notification.TicketDetail{
 			TicketCode:     detail.TicketCode,
 			AttendeeName:   detail.AttendeeName,
+			AttendeeEmail:  detail.AttendeeEmail,
 			TicketTypeName: detail.TicketTypeName,
 			EventName:      detail.EventName,
 			Venue:          detail.Venue,
@@ -264,6 +306,18 @@ func (a notificationTicketAdapter) TicketDetailsForOrder(ctx context.Context, or
 		})
 	}
 	return out, nil
+}
+
+// --- payment.TicketDeliverer: fulfilment's view of the notification domain --
+
+// ticketDelivererAdapter narrows SendTicketEmail's signature (which returns the
+// recipient for the admin resend) back to the error-only contract payment
+// declares — fulfilment has no use for the address.
+type ticketDelivererAdapter struct{ notifications *notification.Service }
+
+func (a ticketDelivererAdapter) SendTicketEmail(ctx context.Context, orderID uuid.UUID) error {
+	_, err := a.notifications.SendTicketEmail(ctx, orderID)
+	return err
 }
 
 // --- order.EventLookup: the admin order views' view of the event domain ----

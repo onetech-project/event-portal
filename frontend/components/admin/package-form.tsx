@@ -65,7 +65,7 @@ export function PackageForm({
       price: pkg?.price ?? "",
       salesStart: toDateTimeLocal(pkg?.sales_start),
       salesEnd: toDateTimeLocal(pkg?.sales_end),
-      status: pkg?.status ?? "ACTIVE",
+      isActive: pkg?.is_active ?? true,
       components: (pkg?.components ?? []).map((component) => component.ticket_type_id),
     },
   });
@@ -92,7 +92,7 @@ export function PackageForm({
       price: values.price,
       sales_start: toApiDateTime(values.salesStart),
       sales_end: toApiDateTime(values.salesEnd),
-      status: values.status,
+      is_active: values.isActive,
       // A bundle always grants exactly one of each selected ticket type.
       components: values.components.map((ticketTypeId) => ({
         ticket_type_id: ticketTypeId,
@@ -144,15 +144,17 @@ export function PackageForm({
             <Textarea rows={2} {...register("description")} />
           </Field>
 
-          <Field label="Status" error={errors.status?.message}>
-            {/* A native select: this field has no controlled state to thread. */}
-            <select
-              {...register("status")}
-              className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            >
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="INACTIVE">INACTIVE</option>
-            </select>
+          <Field label="Active" error={errors.isActive?.message}>
+            {/* A plain checkbox: the field is a boolean now, so the two-option
+                select it replaced had nothing left to choose between. */}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                {...register("isActive")}
+                className="size-4 rounded border-input accent-primary"
+              />
+              Available for purchase
+            </label>
           </Field>
 
           <Field label="Sales start" error={errors.salesStart?.message}>

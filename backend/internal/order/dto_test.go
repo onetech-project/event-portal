@@ -14,23 +14,19 @@ import (
 )
 
 var (
-	ttRegular = uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	ttVIP     = uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	evBookable = uuid.MustParse("00000000-0000-0000-0000-0000000000ee")
+	ttRegular  = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	ttVIP      = uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	pkgBundle  = uuid.MustParse("33333333-3333-3333-3333-333333333333")
 )
 
 func ptr(u uuid.UUID) *uuid.UUID { return &u }
 
-func validRequest() order.CheckoutRequest {
-	return order.CheckoutRequest{
-		BuyerName:  "Budi Santoso",
-		BuyerEmail: "budi@example.com",
-		BuyerPhone: "+628123456789",
+func validBookRequest() order.BookRequest {
+	return order.BookRequest{
+		EventID: evBookable,
 		Items: []order.CheckoutItem{
 			{TicketTypeID: ptr(ttRegular), Quantity: 2},
-		},
-		Attendees: []order.CheckoutAttendee{
-			{TicketTypeID: ttRegular, Name: "Budi", Email: "budi@example.com"},
-			{TicketTypeID: ttRegular, Name: "Siti", Email: "siti@example.com"},
 		},
 	}
 }
@@ -43,160 +39,93 @@ func codeOf(t *testing.T, err error) string {
 	return appErr.Code
 }
 
-func TestValidRequestPasses(t *testing.T) {
-	require.NoError(t, validRequest().Validate())
+func TestValidBookRequestPasses(t *testing.T) {
+	require.NoError(t, validBookRequest().Validate())
 }
 
-func TestValidatePassesForMultipleTicketTypes(t *testing.T) {
-	req := validRequest()
-	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ptr(ttVIP), Quantity: 1})
-	req.Attendees = append(req.Attendees,
-		order.CheckoutAttendee{TicketTypeID: ttVIP, Name: "Andi", Email: "andi@example.com"})
+func TestBookValidatePassesForMixedTicketAndPackageLines(t *testing.T) {
+	req := validBookRequest()
+	req.Items = append(req.Items,
+		order.CheckoutItem{TicketTypeID: ptr(ttVIP), Quantity: 1},
+		order.CheckoutItem{PackageID: ptr(pkgBundle), Quantity: 1})
 
 	require.NoError(t, req.Validate())
 }
 
-func TestValidateRejectsMissingBuyerFields(t *testing.T) {
-	for _, field := range []string{"name", "email", "phone"} {
-		t.Run(field, func(t *testing.T) {
-			req := validRequest()
-			switch field {
-			case "name":
-				req.BuyerName = "  "
-			case "email":
-				req.BuyerEmail = ""
-			case "phone":
-				req.BuyerPhone = ""
-			}
+func TestBookValidateRejectsAMissingEventID(t *testing.T) {
+	req := validBookRequest()
+	req.EventID = uuid.Nil
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
+}
+
+func TestBookValidateRejectsEmptyItems(t *testing.T) {
+	req := validBookRequest()
+	req.Items = nil
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
+}
+
+func TestBookValidateRejectsNonPositiveQuantity(t *testing.T) {
+	for name, qty := range map[string]int32{"zero": 0, "negative": -1} {
+		t.Run(name, func(t *testing.T) {
+			req := validBookRequest()
+			req.Items = []order.CheckoutItem{{TicketTypeID: ptr(ttRegular), Quantity: qty}}
 
 			assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
 		})
 	}
 }
 
-func TestValidateRejectsMalformedBuyerEmail(t *testing.T) {
-	req := validRequest()
-	req.BuyerEmail = "not-an-email"
-
-	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsEmptyItems(t *testing.T) {
-	req := validRequest()
-	req.Items = nil
-	req.Attendees = nil
-
-	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsNonPositiveQuantity(t *testing.T) {
-	req := validRequest()
-	req.Items = []order.CheckoutItem{{TicketTypeID: ptr(ttRegular), Quantity: 0}}
-	req.Attendees = nil
-
-	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsDuplicateTicketTypeLines(t *testing.T) {
-	req := validRequest()
+func TestBookValidateRejectsDuplicateTicketTypeLines(t *testing.T) {
+	req := validBookRequest()
 	req.Items = []order.CheckoutItem{
 		{TicketTypeID: ptr(ttRegular), Quantity: 1},
 		{TicketTypeID: ptr(ttRegular), Quantity: 1},
 	}
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()),
-		"a repeated ticket type makes the per-line attendee mapping ambiguous")
+		"a repeated ticket type makes the per-line slot mapping ambiguous")
 }
 
-// FR-003/004: sum(items[].quantity) must equal len(attendees).
-func TestValidateRejectsTooFewAttendees(t *testing.T) {
-	req := validRequest()
-	req.Attendees = req.Attendees[:1]
-
-	assert.Equal(t, apperr.CodeAttendeeCountMismatch, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsTooManyAttendees(t *testing.T) {
-	req := validRequest()
-	req.Attendees = append(req.Attendees,
-		order.CheckoutAttendee{TicketTypeID: ttRegular, Name: "Extra", Email: "extra@example.com"})
-
-	assert.Equal(t, apperr.CodeAttendeeCountMismatch, codeOf(t, req.Validate()))
-}
-
-// The per-ticket-type breakdown must match too, not just the grand total.
-func TestValidateRejectsCorrectTotalButWrongPerTicketTypeSplit(t *testing.T) {
-	req := order.CheckoutRequest{
-		BuyerName:  "Budi",
-		BuyerEmail: "budi@example.com",
-		BuyerPhone: "+628123456789",
-		Items: []order.CheckoutItem{
-			{TicketTypeID: ptr(ttRegular), Quantity: 1},
-			{TicketTypeID: ptr(ttVIP), Quantity: 1},
-		},
-		Attendees: []order.CheckoutAttendee{
-			{TicketTypeID: ttRegular, Name: "A", Email: "a@example.com"},
-			{TicketTypeID: ttRegular, Name: "B", Email: "b@example.com"},
-		},
-	}
-
-	assert.Equal(t, apperr.CodeAttendeeCountMismatch, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsAttendeeForAnUnorderedTicketType(t *testing.T) {
-	req := validRequest()
-	req.Attendees[1].TicketTypeID = ttVIP
-
-	assert.Equal(t, apperr.CodeAttendeeCountMismatch, codeOf(t, req.Validate()))
-}
-
-func TestValidateRejectsAttendeeWithMissingNameOrEmail(t *testing.T) {
-	t.Run("name", func(t *testing.T) {
-		req := validRequest()
-		req.Attendees[0].Name = " "
-		assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-	})
-	t.Run("email", func(t *testing.T) {
-		req := validRequest()
-		req.Attendees[0].Email = "nope"
-		assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-	})
-}
-
-func TestValidateRejectsNilTicketTypeID(t *testing.T) {
-	req := validRequest()
-	req.Items[0].TicketTypeID = &uuid.Nil
-
-	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
-}
-
-func TestTotalQuantitySumsLineItems(t *testing.T) {
-	req := validRequest()
-	req.Items = append(req.Items, order.CheckoutItem{TicketTypeID: ptr(ttVIP), Quantity: 3})
-
-	assert.Equal(t, int32(5), req.TotalQuantity())
-}
-
-func TestValidateRejectsItemWithBothTicketTypeAndPackage(t *testing.T) {
-	pkgID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	req := validRequest()
+func TestBookValidateRejectsDuplicatePackageLines(t *testing.T) {
+	req := validBookRequest()
 	req.Items = []order.CheckoutItem{
-		{TicketTypeID: ptr(ttRegular), PackageID: ptr(pkgID), Quantity: 1},
+		{PackageID: ptr(pkgBundle), Quantity: 1},
+		{PackageID: ptr(pkgBundle), Quantity: 2},
 	}
-	req.Attendees = []order.CheckoutAttendee{
-		{TicketTypeID: ttRegular, Name: "A", Email: "a@example.com"},
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()),
+		"a repeated package must be combined into a single line")
+}
+
+func TestBookValidateRejectsItemWithBothTicketTypeAndPackage(t *testing.T) {
+	req := validBookRequest()
+	req.Items = []order.CheckoutItem{
+		{TicketTypeID: ptr(ttRegular), PackageID: ptr(pkgBundle), Quantity: 1},
 	}
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()),
 		"an item must reference exactly one of ticket_type_id or package_id")
 }
 
-func TestValidateRejectsItemWithNeitherTicketTypeNorPackage(t *testing.T) {
-	req := validRequest()
-	req.Items = []order.CheckoutItem{
-		{Quantity: 1},
-	}
-	req.Attendees = nil
+func TestBookValidateRejectsItemWithNeitherTicketTypeNorPackage(t *testing.T) {
+	req := validBookRequest()
+	req.Items = []order.CheckoutItem{{Quantity: 1}}
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
+}
+
+func TestBookValidateRejectsNilTicketTypeID(t *testing.T) {
+	req := validBookRequest()
+	req.Items = []order.CheckoutItem{{TicketTypeID: &uuid.Nil, Quantity: 1}}
+
+	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
+}
+
+func TestBookValidateRejectsNilPackageID(t *testing.T) {
+	req := validBookRequest()
+	req.Items = []order.CheckoutItem{{PackageID: &uuid.Nil, Quantity: 1}}
 
 	assert.Equal(t, apperr.CodeValidation, codeOf(t, req.Validate()))
 }

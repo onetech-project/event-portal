@@ -32,8 +32,10 @@ func newSweepFixture(t *testing.T) (*payment.Service, *bytes.Buffer, *testsuppor
 	// the hold deadline set, already in the past.
 	var ord testsupport.Order
 	require.NoError(t, pool.QueryRow(context.Background(), `
-		INSERT INTO orders (order_number, total_amount, status, payment_expires_at)
-		VALUES ('ORD-HOLD-SWEEP', 200000, 'PENDING', now() - interval '1 minute')
+		INSERT INTO orders (order_number, total_amount, status_id, payment_expires_at)
+		VALUES ('ORD-HOLD-SWEEP', 200000,
+		        (SELECT id FROM order_statuses WHERE name = 'PENDING'),
+		        now() - interval '1 minute')
 		RETURNING id`).Scan(&ord.ID))
 	ord.OrderNumber = "ORD-HOLD-SWEEP"
 	testsupport.SeedOrderItem(t, pool, ord.ID, tt.ID, 2)
