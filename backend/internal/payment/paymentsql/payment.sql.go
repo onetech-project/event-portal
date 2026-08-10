@@ -50,10 +50,15 @@ type CreatePaymentRow struct {
 	CreatedAt     *time.Time
 }
 
-// One row per notification received. `status` stores the provider's RAW
+// One row per notification received. `payments.status` stores the provider's RAW
 // transaction_status (so `deny` stays distinguishable from `failure` even though
-// both fold into orders.status = 'CANCELLED'), and raw_response keeps the full
+// both fold into the order's CANCELLED status), and raw_response keeps the full
 // payload for audit.
+//
+// Deliberately untouched by migration 0013: this is the provider's own status
+// string, a different column with a different meaning from the order's status,
+// which became a reference to the order-status master list. No query in this
+// file reads or writes the `orders` table at all.
 func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (CreatePaymentRow, error) {
 	row := q.db.QueryRow(ctx, createPayment,
 		arg.OrderID,

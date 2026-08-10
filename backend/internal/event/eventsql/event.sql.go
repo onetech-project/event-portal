@@ -826,6 +826,35 @@ func (q *Queries) ListEventGuidelines(ctx context.Context, eventID uuid.UUID) ([
 	return items, nil
 }
 
+const listEventIDsByTicketTypeIDs = `-- name: ListEventIDsByTicketTypeIDs :many
+SELECT DISTINCT event_id FROM ticket_types WHERE id = ANY($1::uuid[])
+`
+
+// The inverse of ListTicketTypeIDsByEventID. The payment domain holds quota
+// holds keyed by ticket type and needs the owning events to invalidate their
+// cached lists; `orders` has no event_id column, so this is the resolution path.
+// DISTINCT because an order's holds routinely span several ticket types of the
+// same event.
+func (q *Queries) ListEventIDsByTicketTypeIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listEventIDsByTicketTypeIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var event_id uuid.UUID
+		if err := rows.Scan(&event_id); err != nil {
+			return nil, err
+		}
+		items = append(items, event_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEvents = `-- name: ListEvents :many
 
 SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
