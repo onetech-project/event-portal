@@ -126,7 +126,7 @@ const (
 	defaultKeepAliveInterval = 25 * time.Second
 	defaultDriftReadInterval = 15 * time.Second
 	// defaultStreamCap is the per-IP concurrent connection cap.
-	defaultStreamCap = 5
+	defaultStreamCap = 10
 )
 
 // RegisterStatusStream mounts the SSE endpoint. It manages its own per-IP
@@ -200,10 +200,9 @@ func (h *Handler) statusStream(c echo.Context) error {
 			}
 
 		case <-keepAlive.C:
-			if _, err := fmt.Fprint(res, ": keep-alive\n\n"); err != nil {
+			if err := writeKeepAlive(res); err != nil {
 				return nil
 			}
-			res.Flush()
 
 		case <-drift.C:
 			current, err := h.svc.orders.OrderByNumber(ctx, orderNumber)
@@ -225,6 +224,27 @@ func (h *Handler) statusStream(c echo.Context) error {
 			}
 		}
 	}
+}
+
+// keepAliveEvent is the SSE event name of the liveness beat.
+const keepAliveEvent = "keep-alive"
+
+// writeKeepAlive emits the periodic beat as a NAMED event rather than as a
+// comment frame.
+//
+// A comment (`: keep-alive`) nurses intermediaries just as well, and that is all
+// it was ever asked to do. But the browser's EventSource discards comments
+// without dispatching anything, so a client cannot tell a healthy idle stream
+// from one an intermediary is holding open and forwarding nothing — which is the
+// exact failure the client's liveness watchdog exists to catch (FR-021e). A
+// named event is observable via addEventListener and, unlike an unnamed data
+// frame, does NOT reach onmessage, so the status path needs no filtering.
+func writeKeepAlive(res *echo.Response) error {
+	if _, err := fmt.Fprintf(res, "event: %s\ndata: {}\n\n", keepAliveEvent); err != nil {
+		return err
+	}
+	res.Flush()
+	return nil
 }
 
 // writeSSE emits one data frame and flushes it to the socket.

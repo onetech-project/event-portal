@@ -1,5 +1,14 @@
 # Research: End-to-End Guest Purchase Flow
 
+> **Superseded by [spec 012](../012-manjo-payment-gateway/spec.md) (2026-08-10).**
+> The payment gateway changed from Midtrans to Manjo, and three capabilities described
+> below were withdrawn rather than reimplemented: the mid-window QR refresh
+> (`POST /ticket/checkout/:order_id/refresh-qr` and `qr_refresh_after_seconds`), the
+> guest's status-check button (`POST /ticket/order/:order_id/payment/refresh`), and
+> the provider status query that backed it. The payment deadline is now the gateway's
+> own (`qr_ea`), adopted verbatim, so one order gets one code for one window. Read the
+> sections below as history.
+
 **Feature**: 008-e2e-purchase-flow · **Date**: 2026-08-05
 
 Every decision below resolves an unknown from plan.md's Technical Context or a

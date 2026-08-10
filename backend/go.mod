@@ -2,6 +2,8 @@ module github.com/manjo/ticketing/backend
 
 go 1.26.5
 
+replace github.com/pgauto/cdtc => gitlab.pg-poppay.com/company/shared/cdtc/go v0.0.0-20260810054158-27225c7fa75d
+
 require (
 	github.com/exaring/otelpgx v0.11.1
 	github.com/go-mail/mail/v2 v2.3.0
@@ -13,6 +15,7 @@ require (
 	github.com/jung-kurt/gofpdf v1.16.2
 	github.com/labstack/echo/v4 v4.15.4
 	github.com/microcosm-cc/bluemonday v1.0.27
+	github.com/pgauto/cdtc v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.24.1
 	github.com/shopspring/decimal v1.4.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e

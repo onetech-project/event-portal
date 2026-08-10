@@ -19,12 +19,20 @@ const (
 	CodeTicketTypeNotFound      = "TICKET_TYPE_NOT_FOUND"
 	CodeEventNotFound           = "EVENT_NOT_FOUND"
 	CodePaymentInitiationFailed = "PAYMENT_INITIATION_FAILED"
-	// CodePaymentStatusUnavailable reports that the payment provider could not be
-	// reached for a status check. The order is untouched; the caller may retry.
-	CodePaymentStatusUnavailable = "PAYMENT_STATUS_UNAVAILABLE"
+	// CodePaymentSessionDuplicate reports that the gateway had already issued a
+	// code for this order's reference and will not issue another.
+	//
+	// It is separate from CodePaymentInitiationFailed because the guest's
+	// instruction differs: a generic failure is worth retrying, this one never is.
+	// No call returns an existing code, so the order can never be paid — its seats
+	// are released and the guest must start again (FR-007d, FR-007e).
+	CodePaymentSessionDuplicate = "PAYMENT_SESSION_DUPLICATE"
 	CodeTicketNotFound          = "TICKET_NOT_FOUND"
 	CodeRateLimited             = "RATE_LIMITED"
-	CodeInvalidSignature        = "INVALID_SIGNATURE"
+	// CodeInvalidSignature reports a notification this system could not
+	// authenticate. Under the Manjo contract that means a missing or wrong bearer
+	// token; the code keeps its name because clients branch on it.
+	CodeInvalidSignature = "INVALID_SIGNATURE"
 
 	// Admin management (specs/002).
 	CodeInvalidCredentials  = "INVALID_CREDENTIALS"
@@ -101,8 +109,12 @@ func Numeric(status int, code string) int {
 		return 429001
 	case CodeInternal:
 		return 500000
-	case CodePaymentInitiationFailed, CodePaymentStatusUnavailable:
+	case CodePaymentInitiationFailed:
 		return 502001
+	// A duplicate reference is a conflict, not a gateway fault: the gateway
+	// answered correctly and the answer is final.
+	case CodePaymentSessionDuplicate:
+		return 409006
 	default:
 		return status * 1000
 	}

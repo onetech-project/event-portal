@@ -95,6 +95,8 @@ github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6Kllzaw
 github.com/valyala/bytebufferpool v1.0.0/go.mod h1:6bBcMArwyJ5K/AmCkWv1jt77kVWyCJ6HpOuEn7z0Csc=
 github.com/valyala/fasttemplate v1.2.2 h1:lxLXG0uE3Qnshl9QyaK6XJxMXlQZELvChBOCmQD0Loo=
 github.com/valyala/fasttemplate v1.2.2/go.mod h1:KHLXt3tVN2HBp8eijSv/kGJopbvo7S+qRAEEKiv+SiQ=
+gitlab.pg-poppay.com/company/shared/cdtc/go v0.0.0-20260810054158-27225c7fa75d h1:E9hxOgpxzXI5RjnXt8XBx47ctIo0wRrTgWmjisMsibQ=
+gitlab.pg-poppay.com/company/shared/cdtc/go v0.0.0-20260810054158-27225c7fa75d/go.mod h1:+r9WTSCObLhwF+a70MGIlZLrJfrTZWAvH+x+G48k6R0=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho v0.69.0 h1:p2oor9jp8aT5uqVuN9p0GCntXn5VX8qXdOH098hgLu4=

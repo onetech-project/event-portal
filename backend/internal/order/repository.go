@@ -230,6 +230,30 @@ func (r *Repository) UpdateOrderStatusIfPending(ctx context.Context, tx pgx.Tx, 
 	return affected > 0, nil
 }
 
+// UpdateOrderStatusFrom applies a transition only while the order is still in
+// the `from` status, reporting whether it actually applied.
+//
+// It exists for the settle-after-expiry path (spec 012 FR-019), which is the one
+// path that moves an order OUT of a released state — a gateway notification
+// redelivered after the order's deadline already released its seats.
+//
+// It is deliberately not a generalisation of UpdateOrderStatusIfPending. This one
+// can express any from→to move, so the payment domain is never handed it
+// directly: its adapter binds both statuses to EXPIRED → PAID at the call site,
+// which is what makes reviving a gateway-cancelled order (FR-019d) unreachable by
+// construction rather than by a caller remembering the rule.
+func (r *Repository) UpdateOrderStatusFrom(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, from, to string) (bool, error) {
+	affected, err := r.queries.WithTx(tx).UpdateOrderStatusFromReleased(ctx, ordersql.UpdateOrderStatusFromReleasedParams{
+		ID:         orderID,
+		Status:     to,
+		FromStatus: from,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update order status from %s: %w", from, err)
+	}
+	return affected > 0, nil
+}
+
 // SetEmailSent records that the ticket email was delivered. It is only called
 // after a successful send (Constitution Principle IV).
 func (r *Repository) SetEmailSent(ctx context.Context, orderID uuid.UUID) error {

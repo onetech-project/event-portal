@@ -205,18 +205,18 @@ func (r CheckoutFormsRequest) Validate(validGenders map[string]int16) error {
 	return nil
 }
 
-// CheckoutQRResponse is the 200 body of POST /ticket/checkout/:order_id (and
-// refresh-qr): everything the payment screen needs to render and time the QR.
+// CheckoutQRResponse is the 200 body of POST /ticket/checkout/:order_id:
+// everything the payment screen needs to render and time the QR.
 type CheckoutQRResponse struct {
-	OrderID   string    `json:"order_id"`
-	QRString  string    `json:"qr_string"`
+	OrderID  string `json:"order_id"`
+	QRString string `json:"qr_string"`
+	// ExpiresAt is the gateway's own deadline, adopted verbatim — one order, one
+	// code, one window. The mid-window refresh that used to shorten this is
+	// withdrawn, so there is no qr_refresh_after_seconds to serve alongside it.
 	ExpiresAt time.Time `json:"expires_at"`
 	// QRImageURL is our own render route — the browser never talks to the
 	// payment provider (FR-009).
 	QRImageURL string `json:"qr_image_url"`
-	// QRRefreshAfterSeconds is when the client swaps in a fresh QR (config
-	// QR_REFRESH_AFTER, served so the timer is server-owned).
-	QRRefreshAfterSeconds int `json:"qr_refresh_after_seconds"`
 }
 
 // TicketOrderSlot is one attendee slot on the guest order read

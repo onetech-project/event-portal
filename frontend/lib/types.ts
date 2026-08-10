@@ -208,13 +208,18 @@ export type TicketOrderDetail = {
   payment: PaymentInstruction | null;
 };
 
-/** POST /ticket/checkout/:order_id (and refresh-qr) 200 data. */
+/**
+ * POST /ticket/checkout/:order_id 200 data.
+ *
+ * `qr_refresh_after_seconds` is gone: one order gets one code for one window,
+ * and `expires_at` is now the gateway's own deadline rather than a figure this
+ * system computed and hoped the gateway would honour.
+ */
 export type CheckoutQRResponse = {
   order_id: string;
   qr_string: string;
   expires_at: string;
   qr_image_url: string;
-  qr_refresh_after_seconds: number;
 };
 
 /** One SSE frame from GET /ticket/checkout/:order_id/status (unenveloped). */
@@ -224,11 +229,39 @@ export type CheckoutStatusEvent = {
   expires_at?: string;
 };
 
-export type PaymentRefreshResponse = {
-  order_number: string;
-  status: OrderStatus;
-  changed: boolean;
-  checked_at: string;
+/**
+ * One row of GET /admin/payment/order/:order_id/notifications.
+ *
+ * Accepted and refused notifications both appear, newest first. A refused one is
+ * often the whole explanation, so a history that showed only what was accepted
+ * would hide the reason an order is stuck.
+ */
+export type PaymentNotification = {
+  id: string;
+  provider: string;
+  transaction_id: string;
+  /** The gateway's raw status, or one of this system's own markers. */
+  status: string;
+  /** Separates this system's own conclusions from what the gateway said. */
+  is_marker: boolean;
+  payment_type: string;
+  raw_payload: unknown;
+  received_at: string;
+};
+
+/**
+ * One row of GET /admin/payment/order/:order_id/holds — what the order holds of
+ * a ticket type against what that type has left.
+ *
+ * Both numbers matter: the top-up an operator needs before asking the gateway to
+ * resend is the difference, and `remaining` alone looks reassuring right up
+ * until it is smaller than `held`.
+ */
+export type PaymentOrderHold = {
+  ticket_type_id: string;
+  ticket_type_name: string;
+  held: number;
+  remaining: number;
 };
 
 export type PublicTicket = {

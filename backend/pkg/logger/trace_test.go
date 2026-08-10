@@ -69,13 +69,13 @@ func TestPlainLoggingStillWorks(t *testing.T) {
 
 func TestTraceFieldsSurviveWith(t *testing.T) {
 	var buf bytes.Buffer
-	log := logger.NewWithWriter(&buf, logger.LevelInfo).With("provider", "midtrans")
+	log := logger.NewWithWriter(&buf, logger.LevelInfo).With("provider", "manjo")
 
 	ctx := trace.ContextWithSpanContext(context.Background(), spanContext(t))
 	log.InfoContext(ctx, "webhook received")
 
 	entry := decode(t, &buf)
-	assert.Equal(t, "midtrans", entry["provider"])
+	assert.Equal(t, "manjo", entry["provider"])
 	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", entry["trace_id"])
 }
 

@@ -14,6 +14,10 @@ func setRequired(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5433/ticketing")
 	t.Setenv("JWT_SECRET", "a-secret-at-least-32-bytes-long!!")
+	// The gateway address and the callback token are required with no default
+	// (FR-026), so every test that expects a successful load must supply them.
+	t.Setenv("PG_BASE_URL", "http://localhost:10327")
+	t.Setenv("PG_CALLBACK_TOKEN", "a-callback-token")
 }
 
 func TestLoadReadsRequiredValues(t *testing.T) {
@@ -24,15 +28,80 @@ func TestLoadReadsRequiredValues(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://u:p@localhost:5433/ticketing", cfg.DatabaseURL)
 	assert.Equal(t, "a-secret-at-least-32-bytes-long!!", cfg.JWTSecret)
+	assert.Equal(t, "http://localhost:10327", cfg.PGBaseURL)
+	assert.Equal(t, "a-callback-token", cfg.PGCallbackToken)
 }
 
 func TestLoadFailsWhenRequiredValueIsMissing(t *testing.T) {
+	setRequired(t)
 	t.Setenv("DATABASE_URL", "")
-	t.Setenv("JWT_SECRET", "a-secret-at-least-32-bytes-long!!")
 
 	_, err := config.Load()
 
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DATABASE_URL")
+}
+
+// US4 / FR-026. Absent means refuse to start, naming what is missing — not fall
+// back to a compiled-in hostname, of which there are now none.
+func TestLoadRefusesWithoutGatewayAddress(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PG_BASE_URL", "")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PG_BASE_URL")
+}
+
+func TestLoadRefusesWithoutCallbackToken(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PG_CALLBACK_TOKEN", "")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PG_CALLBACK_TOKEN")
+}
+
+// FR-027. Present but unusable must also stop the deployment: configuration is
+// read once at startup, so there is no last-known-good to fall back to and the
+// only alternative to refusing here is failing on the first guest's checkout.
+func TestLoadRefusesUnusableGatewayAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"not a url at all", "not a url"},
+		{"no scheme", "localhost:10327"},
+		{"wrong scheme", "ftp://gateway.example"},
+		{"no host", "http://"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("PG_BASE_URL", tc.value)
+
+			_, err := config.Load()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "PG_BASE_URL")
+		})
+	}
+}
+
+// Every problem is reported at once rather than one per restart — an operator
+// fixing a bad deploy should not have to discover the faults serially.
+func TestLoadReportsEveryProblemTogether(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PG_BASE_URL", "")
+	t.Setenv("PG_CALLBACK_TOKEN", "")
+	t.Setenv("DATABASE_URL", "")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PG_BASE_URL")
+	assert.Contains(t, err.Error(), "PG_CALLBACK_TOKEN")
 	assert.Contains(t, err.Error(), "DATABASE_URL")
 }
 
@@ -44,38 +113,32 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "8080", cfg.AppPort)
 	assert.Equal(t, 12*time.Hour, cfg.JWTTTL)
-	assert.False(t, cfg.MidtransIsProduction, "sandbox is the default per PRD 1.2")
 	// spec FR-020: the public ticket lookup is rate limited per client IP.
 	assert.Positive(t, cfg.TicketLookupRateLimit)
 	assert.GreaterOrEqual(t, float64(cfg.TicketLookupBurst), cfg.TicketLookupRateLimit)
-	assert.Equal(t, 15*time.Minute, cfg.PaymentExpiry, "the provider's documented QRIS default")
 	assert.Equal(t, 30*time.Second, cfg.PaymentSweepInterval)
-	// 008: booking hold + server-owned payment window + client QR refresh point.
 	assert.Equal(t, time.Hour, cfg.BookingHold)
-	assert.Equal(t, 14*time.Minute, cfg.PaymentWindow)
-	assert.Equal(t, 7*time.Minute, cfg.QRRefreshAfter)
+	// No longer the deadline — the fallback basis and the expectation (FR-009b/d).
+	assert.Equal(t, 15*time.Minute, cfg.PaymentWindow)
+	// The credential pair is optional: the gateway checks presence, not privilege.
+	assert.Empty(t, cfg.PGServerKey)
+	assert.Empty(t, cfg.PGClientKey)
 }
 
-// The server-owned deadline must sit strictly inside the gateway-side QR
-// validity, and the refresh point strictly inside the window (research R2/R3).
-func TestLoadRejectsPaymentWindowNotInsidePaymentExpiry(t *testing.T) {
+// FR-030. The QR_REFRESH_AFTER < PAYMENT_WINDOW < PAYMENT_EXPIRY ordering is
+// gone, not loosened. A window longer than the retired PAYMENT_EXPIRY default
+// must now load cleanly — if it still fails, a check is comparing values that no
+// longer carry their old meaning.
+func TestLoadNoLongerEnforcesTheRetiredTimingOrder(t *testing.T) {
 	setRequired(t)
-	t.Setenv("PAYMENT_WINDOW", "15m") // equal to PAYMENT_EXPIRY default — invalid
+	t.Setenv("PAYMENT_WINDOW", "45m")
+	t.Setenv("PAYMENT_EXPIRY", "15m")   // retired; must be ignored entirely
+	t.Setenv("QR_REFRESH_AFTER", "40m") // retired; must be ignored entirely
 
-	_, err := config.Load()
+	cfg, err := config.Load()
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "PAYMENT_WINDOW")
-}
-
-func TestLoadRejectsQRRefreshAfterNotInsidePaymentWindow(t *testing.T) {
-	setRequired(t)
-	t.Setenv("QR_REFRESH_AFTER", "14m") // equal to PAYMENT_WINDOW default — invalid
-
-	_, err := config.Load()
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "QR_REFRESH_AFTER")
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Minute, cfg.PaymentWindow)
 }
 
 func TestLoadRejectsNonPositiveBookingHold(t *testing.T) {
@@ -88,57 +151,50 @@ func TestLoadRejectsNonPositiveBookingHold(t *testing.T) {
 	assert.Contains(t, err.Error(), "BOOKING_HOLD")
 }
 
+func TestLoadRejectsNonPositivePaymentWindow(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYMENT_WINDOW", "0s")
+
+	_, err := config.Load()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAYMENT_WINDOW")
+}
+
 func TestBookingTimersOverridableFromEnv(t *testing.T) {
 	setRequired(t)
 	t.Setenv("BOOKING_HOLD", "3m")
-	t.Setenv("PAYMENT_EXPIRY", "20m")
 	t.Setenv("PAYMENT_WINDOW", "10m")
-	t.Setenv("QR_REFRESH_AFTER", "1m")
 
 	cfg, err := config.Load()
 
 	require.NoError(t, err)
 	assert.Equal(t, 3*time.Minute, cfg.BookingHold)
 	assert.Equal(t, 10*time.Minute, cfg.PaymentWindow)
-	assert.Equal(t, time.Minute, cfg.QRRefreshAfter)
 }
 
 func TestLoadOverridesDefaultsFromEnv(t *testing.T) {
 	setRequired(t)
 	t.Setenv("APP_PORT", "9090")
 	t.Setenv("JWT_TTL", "30m")
-	t.Setenv("MIDTRANS_IS_PRODUCTION", "true")
 	t.Setenv("TICKET_LOOKUP_RATE_LIMIT", "2")
 	t.Setenv("TICKET_LOOKUP_BURST", "7")
 	t.Setenv("SMTP_PORT", "2525")
-	t.Setenv("PAYMENT_EXPIRY", "30m")
 	t.Setenv("PAYMENT_SWEEP_INTERVAL", "10s")
+	t.Setenv("PG_SERVER_KEY", "server-key")
+	t.Setenv("PG_CLIENT_KEY", "client-key")
 
 	cfg, err := config.Load()
 
 	require.NoError(t, err)
 	assert.Equal(t, "9090", cfg.AppPort)
 	assert.Equal(t, 30*time.Minute, cfg.JWTTTL)
-	assert.True(t, cfg.MidtransIsProduction)
 	assert.InDelta(t, 2.0, cfg.TicketLookupRateLimit, 0.001)
 	assert.Equal(t, 7, cfg.TicketLookupBurst)
 	assert.Equal(t, 2525, cfg.SMTPPort)
-	assert.Equal(t, 30*time.Minute, cfg.PaymentExpiry)
 	assert.Equal(t, 10*time.Second, cfg.PaymentSweepInterval)
-}
-
-// Below 15 minutes the provider stops expiring transactions reliably, so a code
-// could still be payable after the countdown we showed the guest reached zero.
-// Startup refuses rather than shipping that inconsistency.
-func TestLoadRejectsPaymentExpiryBelowProviderFloor(t *testing.T) {
-	setRequired(t)
-	t.Setenv("PAYMENT_EXPIRY", "5m")
-
-	_, err := config.Load()
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "PAYMENT_EXPIRY")
-	assert.Contains(t, err.Error(), "15m")
+	assert.Equal(t, "server-key", cfg.PGServerKey)
+	assert.Equal(t, "client-key", cfg.PGClientKey)
 }
 
 func TestLoadRejectsNonPositiveSweepInterval(t *testing.T) {
@@ -149,21 +205,6 @@ func TestLoadRejectsNonPositiveSweepInterval(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PAYMENT_SWEEP_INTERVAL")
-}
-
-// The SNAP endpoint is derived from the environment flag unless explicitly
-// overridden, which is what lets a local run point at a stub gateway.
-func TestMidtransBaseURLDefaultsToEmptyAndIsOverridable(t *testing.T) {
-	setRequired(t)
-
-	cfg, err := config.Load()
-	require.NoError(t, err)
-	assert.Empty(t, cfg.MidtransBaseURL)
-
-	t.Setenv("MIDTRANS_BASE_URL", "http://localhost:9999")
-	cfg, err = config.Load()
-	require.NoError(t, err)
-	assert.Equal(t, "http://localhost:9999", cfg.MidtransBaseURL)
 }
 
 func TestObservabilityDefaults(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
-	"github.com/manjo/ticketing/backend/pkg/sanitize"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/money"
+	"github.com/manjo/ticketing/backend/pkg/sanitize"
 )
 
 // --- Events ---------------------------------------------------------------
@@ -138,6 +138,14 @@ func (s *Service) DeleteEvent(ctx context.Context, id uuid.UUID) error {
 // views can label rows without reading this domain's tables directly.
 func (s *Service) TicketTypeNames(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
 	return s.repo.TicketTypeNamesByIDs(ctx, ids)
+}
+
+// TicketTypeQuotas reports how many seats each of the given ticket types has
+// left. Read-only, and outside any transaction: it informs an operator, it does
+// not guard a deduction — CheckAndDeductQuota is what makes overselling
+// impossible, and it does so under a row lock this cannot and must not hold.
+func (s *Service) TicketTypeQuotas(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeQuotaRecord, error) {
+	return s.repo.TicketTypeQuotasByIDs(ctx, ids)
 }
 
 // TicketTypeDisplays resolves ticket type ids to their display labels and owning

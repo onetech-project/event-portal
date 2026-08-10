@@ -48,6 +48,8 @@ func newSweepFixture(t *testing.T) (*payment.Service, *bytes.Buffer, *testsuppor
 		&stubGateway{},
 		orderAdapter{repo: order.NewRepository(pool)},
 		quotaAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		reserverAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		orderAdapter{repo: order.NewRepository(pool)},
 		&spyFulfiller{},
 		&spyFulfiller{},
 		logger.NewWithWriter(logBuf, logger.LevelInfo),

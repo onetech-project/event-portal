@@ -69,9 +69,13 @@ func TestLoadDotEnvReportsAMalformedFile(t *testing.T) {
 func TestLoadDotEnvFeedsLoad(t *testing.T) {
 	writeEnvFile(t, "DATABASE_URL=postgres://u:p@localhost:5433/db\n"+
 		"JWT_SECRET=a-secret-that-is-long-enough-ok\n"+
+		"PG_BASE_URL=http://localhost:10327\n"+
+		"PG_CALLBACK_TOKEN=a-callback-token\n"+
 		"TICKET_LOOKUP_RATE_LIMIT=3\n")
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("JWT_SECRET", "")
+	t.Setenv("PG_BASE_URL", "")
+	t.Setenv("PG_CALLBACK_TOKEN", "")
 	t.Setenv("TICKET_LOOKUP_RATE_LIMIT", "")
 
 	require.NoError(t, config.LoadDotEnv())

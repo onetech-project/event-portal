@@ -45,7 +45,7 @@ const PENDING: TicketOrderDetail = {
   server_time: "2026-08-01T10:03:00Z",
   payment: {
     method: "QRIS",
-    provider: "midtrans",
+    provider: "manjo",
     amount: "550000.00",
     expires_at: "2026-08-01T10:15:00Z",
     qr_image_path: "/api/v1/orders/ORD-20260801-A1B2C3D4/qris.png",
@@ -422,7 +422,6 @@ function registrationFetch(order: TicketOrderDetail) {
           qr_string: "QR",
           expires_at: "2026-08-01T10:17:00Z",
           qr_image_url: `/api/v1/ticket/order/${order.order_id}/qris.png`,
-          qr_refresh_after_seconds: 420,
         }),
       );
     }

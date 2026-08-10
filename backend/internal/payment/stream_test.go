@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/pgauto/cdtc/status"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -135,7 +136,7 @@ func TestStatusStreamCatchesADriftedTransitionWithoutAPublish(t *testing.T) {
 
 func TestStatusStreamClosesImmediatelyForASettledOrder(t *testing.T) {
 	f := newWebhookFixture(t)
-	require.NoError(t, f.notify(t, "settlement", ""))
+	require.NoError(t, f.notify(t, status.Completed))
 	e := streamAPI(t, f)
 
 	// No timeout: a terminal snapshot must close without waiting on anything.
@@ -170,7 +171,7 @@ func TestWebhookTransitionReachesAnOpenStream(t *testing.T) {
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		// The real path: a settlement notification publishes to the hub.
-		_ = f.notify(t, "settlement", "")
+		_ = f.notify(t, status.Completed)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

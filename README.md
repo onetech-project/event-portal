@@ -7,7 +7,9 @@ tickets at the door.
 The authoritative specifications live in [PRD.md](PRD.md),
 [ARCHITECTURE.md](ARCHITECTURE.md), [SCHEMA.md](SCHEMA.md), and
 [.specify/memory/constitution.md](.specify/memory/constitution.md), with per-feature
-specs under [specs/](specs/).
+specs under [specs/](specs/). First-time setup of the private shared contract
+dependency is in [CDTC_SETUP.md](CDTC_SETUP.md) — start there, nothing below builds
+without it.
 
 ## Layout
 
@@ -28,6 +30,19 @@ interface it needs from its neighbours, and `cmd/api/adapters.go` connects them.
 `cmd/api/architecture_test.go` enforces that automatically.
 
 ## Running it
+
+### First: access to the shared contract module
+
+`backend/` depends on **cdtc**, the shared struct/contract repo. It lives in a private
+GitLab subgroup and is wired in through a `replace` directive, so a plain `go build`
+cannot fetch it until credentials are configured. Do this once, before anything below:
+[CDTC_SETUP.md](CDTC_SETUP.md) covers the PAT, `GOPRIVATE`, and `GOAUTH`.
+
+On a fresh clone `backend/vendor/` does not exist — it is gitignored — so **both** run
+paths below need that access: the local one to fetch the module, and `docker compose
+up` because it builds the API image from source. Once you have run `go mod vendor`
+locally, the Docker build stops needing credentials: `vendor/` is part of the build
+context and the compile switches to vendor mode.
 
 Everything in containers:
 
@@ -189,15 +204,24 @@ apply.
 - **The webhook is idempotent.** An already-`PAID` order short-circuits, and every
   status change is guarded on the order still being `PENDING`, so a replayed
   notification cannot restore quota twice.
-- **Three paths can settle an order**, and they all go through that same guarded
-  transition: the provider webhook, the guest pressing "check payment status"
-  (which reconciles against the provider), and the in-process expiry sweeper. That
-  is what lets them race without restoring quota twice or issuing two sets of
-  tickets.
+- **Exactly one path can settle an order**: a notification from the gateway. The
+  in-process expiry sweeper can only *release* one, and every status change is
+  guarded on the status the caller saw, so the two can race without restoring
+  quota twice or issuing two sets of tickets. There is no third path — nothing in
+  this system records a payment on a person's word.
+- **A lost notification is recovered by asking the gateway to resend it.** The
+  gateway retries a failed callback three times over about thirty seconds and then
+  stops, so an outage inside that window strands a guest who genuinely paid. Ops
+  tops up the quota if the seats were resold and asks the gateway to redeliver
+  that transaction's notification; the redelivered one settles the order through
+  the ordinary path, taking its seats back in the same transaction. If the quota
+  cannot cover the whole order the settle is refused — 200 with a body naming the
+  shortfall, because a retry would fail identically.
 - **The guest never leaves the site to pay.** Checkout opens a QRIS charge and
   routes to `/events/{slug}/orders/{order_number}`, which renders the QR from the stored payload
-  on demand, counts down to the server's deadline, and polls until the status is
-  final.
+  on demand and counts down to the deadline the GATEWAY returned. The page does not
+  poll: it listens on the status stream and falls back to periodic reads only while
+  that stream is demonstrably failing.
 - **No object storage exists.** `tickets.qr_code_url` stays NULL and QR images are
   rendered on demand from `ticket_code`; `events.banner_url` is a plain URL an
   admin supplies.
@@ -208,19 +232,39 @@ apply.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MIDTRANS_BASE_URL` | derived from `MIDTRANS_IS_PRODUCTION` | **Core API** host — `https://api.sandbox.midtrans.com`, not the `app.sandbox` host SNAP used. Pointing it at `app.*` fails with a confusing 404. |
-| `PAYMENT_EXPIRY` | `15m` | How long a QRIS code stays payable. 15 minutes is the provider's own default *and* its documented floor: below it the provider's expiry scheduler is unreliable, so startup rejects the value. |
+| `PG_BASE_URL` | **none — required** | The Manjo gateway's address. There is no compiled-in hostname and no sandbox/production selector, so the deployment says where the gateway is or the process refuses to start. |
+| `PG_SERVER_KEY` / `PG_CLIENT_KEY` | empty | Sent in the session-open body as `ac.cr.{client_secret,client_id}`. The gateway checks they are present, not what they are. |
+| `PG_CALLBACK_TOKEN` | **none — required** | The bearer token the gateway presents on `POST /v1.0/callback/exec`. A mismatch is the only case where that endpoint answers non-200. |
+| `PAYMENT_WINDOW` | `15m` | **Not the payment deadline** — the gateway returns that (`qr_ea`) and it is adopted verbatim. This survives as two things: the fallback used when no usable expiry came back (which also raises a signal), and the expectation an adopted expiry is measured against. |
 | `PAYMENT_SWEEP_INTERVAL` | `30s` | How often abandoned orders past their deadline are expired and their quota returned. |
+
+`PAYMENT_EXPIRY` and `QR_REFRESH_AFTER` are **removed**, along with the startup check
+that enforced `QR_REFRESH_AFTER < PAYMENT_WINDOW < PAYMENT_EXPIRY`. None of the three
+still means what it did — the first is no longer sent, the second is no longer ours to
+decide, the third has nothing to drive — and a check comparing values that lost their
+old meaning is worse than no check, because it still looks like it is protecting
+something.
 
 ## Local end-to-end runs
 
-`MIDTRANS_BASE_URL` overrides the Core API endpoint, so the whole purchase flow —
-checkout, webhook, ticket generation, email — can be exercised against a stub
-gateway and a local SMTP catcher without touching the network.
+Pointing `PG_BASE_URL` at a stub is the ordinary way to run this system offline, not a
+special test mode: the whole purchase flow — checkout, callback, ticket generation,
+email — runs against a stub gateway and a local SMTP catcher without touching the
+network.
 
-Against the real sandbox, the provider cannot reach a webhook on `localhost`. Pay
-the transaction at the QRIS simulator
-(<https://simulator.sandbox.midtrans.com/qris/index>) and press **Check payment
-status** on the order page: it reconciles directly with the provider through the
-same code path the webhook uses, so the flow completes end to end without a public
-URL.
+The gateway cannot reach a callback on `localhost` either, so against a real
+environment post the notification yourself:
+
+```fish
+curl -X POST http://localhost:8080/v1.0/callback/exec \
+  -H "Authorization: Bearer $PG_CALLBACK_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"ri":"ORD-20260810-XXXXXX","nti":"A48593","s":5,"td":"2026-08-10T10:15:22+07:00","tt":0}'
+```
+
+There is no "check payment status" button any more. The gateway offers no call that
+reads a transaction's status, so nothing could answer it. A lost notification is
+recovered by asking the gateway to **resend** it: **Admin → Orders → Payment
+history** shows every notification recorded against an order and what it holds
+against what remains, which is what ops reads before requesting the resend and
+sizing any quota top-up.

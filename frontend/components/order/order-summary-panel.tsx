@@ -122,6 +122,25 @@ export function OrderSummaryPanel({
             ))}
           </ul>
         </div>
+        {/* Payment breakdown (spec 011 FR-016): Ticket Total then the frozen
+            per-fee rows (collectively the "Tax & Service Fee"). The
+            registration phase opts out entirely (showFeeBreakdown=false) and
+            orders that predate fees (null subtotal) have nothing to itemize —
+            both collapse to the grand total alone. */}
+        {showFeeBreakdown && order.subtotal !== null ? (
+          <dl className="space-y-1.5 pb-3 text-sm bg-slate-50 p-3 rounded-lg border-slate-500">
+            <div className="flex items-baseline justify-between">
+              <dt className="text-muted-foreground">Subtotal ({order.items.length} items)</dt>
+              <dd className="font-medium">{formatCurrency(order.subtotal)}</dd>
+            </div>
+            {order.fees.map((fee) => (
+              <div key={fee.name} className="flex items-baseline justify-between">
+                <dt className="text-muted-foreground">{fee.name}</dt>
+                <dd className="font-medium">{formatCurrency(fee.amount)}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
       </div>
 
       {/* The stub tear: a dashed rule notched into both edges of the panel,
@@ -134,27 +153,6 @@ export function OrderSummaryPanel({
 
       <div className="space-y-4 px-4.5 pb-4">
         {beforeTotal}
-
-        {/* Payment breakdown (spec 011 FR-016): Ticket Total then the frozen
-            per-fee rows (collectively the "Tax & Service Fee"). The
-            registration phase opts out entirely (showFeeBreakdown=false) and
-            orders that predate fees (null subtotal) have nothing to itemize —
-            both collapse to the grand total alone. */}
-        {showFeeBreakdown && order.subtotal !== null ? (
-          <dl className="space-y-1.5 border-b pb-3 text-sm">
-            <div className="flex items-baseline justify-between">
-              <dt className="text-muted-foreground">Ticket Total</dt>
-              <dd className="font-medium">{formatCurrency(order.subtotal)}</dd>
-            </div>
-            {order.fees.map((fee) => (
-              <div key={fee.name} className="flex items-baseline justify-between">
-                <dt className="text-muted-foreground">{fee.name}</dt>
-                <dd className="font-medium">{formatCurrency(fee.amount)}</dd>
-              </div>
-            ))}
-          </dl>
-        ) : null}
-
         <div className="flex items-baseline justify-between">
           <div>
             <p className="text-xs font-semibold uppercase text-muted-foreground">

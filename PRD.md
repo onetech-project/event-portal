@@ -17,7 +17,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   **Frontend:** Next.js (App Router), TypeScript, TailwindCSS, TanStack Query, React Hook Form, Zod
 *   **Backend:** Golang 1.24+, **Echo v4**, PostgreSQL, **sqlc** (for type-safe SQL queries)
 *   **Infrastructure:** Docker, Docker Compose (PostgreSQL)
-*   **Payment:** Payment Gateway Abstraction (Initial: Midtrans SNAP Sandbox)
+*   **Payment:** Payment Gateway Abstraction (concrete: Manjo gateway over plain HTTP REST, wire shapes from the shared `cdtc` contract module — no vendor SDK)
 *   **Email & PDF:** SMTP (`go-mail/mail` or `net/smtp`), PDF Generator (`maroto` or `gofpdf`), QR Generator (`go-qrcode`).
 
 ### 1.3. User Roles
@@ -55,12 +55,10 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   `POST /api/v1/ticket/book` (creates the PENDING order + 1h hold)
 *   `POST /api/v1/ticket/terms-condition/:order_id` (records the T&C agreement)
 *   `POST /api/v1/ticket/checkout/:order_id` (saves visitor forms, opens the QRIS charge)
-*   `POST /api/v1/ticket/checkout/:order_id/refresh-qr`
 *   `GET /api/v1/ticket/checkout/:order_id/status` (SSE)
 *   `GET /api/v1/ticket/order/:order_id` (+ `/qris.png`)
-*   `POST /api/v1/ticket/order/:order_id/payment/refresh`
 *   `POST /api/v1/ticket/resend-email` (`{order_id}` body)
-*   `POST /api/v1/payment/webhook/:provider`
+*   `POST /v1.0/callback/exec` (gateway notification; mounted at the root, not under `/api/v1` — the path is fixed by the gateway)
 *   `GET /api/v1/tickets/:code`
 
 **Admin APIs (JWT Protected)**

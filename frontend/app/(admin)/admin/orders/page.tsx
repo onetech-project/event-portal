@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { OrderPaymentPanel } from "@/components/admin/order-payment-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -32,6 +33,13 @@ const ALL = "__all__";
 export default function AdminOrdersPage() {
   const [status, setStatus] = useState(ALL);
   const [eventId, setEventId] = useState(ALL);
+  // The order whose payment story is open, if any. Reached by order number from
+  // this list, because that is what a guest hands support when they call.
+  const [inspecting, setInspecting] = useState<{
+    id: string;
+    number: string;
+    status: string;
+  } | null>(null);
 
   const { data: events } = useAdminEvents();
   const {
@@ -138,7 +146,19 @@ export default function AdminOrdersPage() {
                   <TableCell className="text-xs text-muted-foreground">
                     {formatDateTime(order.created_at)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() =>
+                        setInspecting({
+                          id: order.id,
+                          number: order.order_number,
+                          status: order.status,
+                        })
+                      }
+                    >
+                      Payment history
+                    </Button>
                     {/* Only a PAID order has tickets to resend. */}
                     {order.status === "PAID" ? (
                       <Button
@@ -155,6 +175,18 @@ export default function AdminOrdersPage() {
             </TableBody>
           </Table>
         </div>
+      ) : null}
+
+      {inspecting ? (
+        <OrderPaymentPanel
+          orderId={inspecting.id}
+          orderNumber={inspecting.number}
+          orderStatus={inspecting.status}
+          open
+          onOpenChange={(next) => {
+            if (!next) setInspecting(null);
+          }}
+        />
       ) : null}
     </main>
   );

@@ -115,7 +115,12 @@ func (g *fakeGateway) CreateTransaction(_ context.Context, req order.PaymentRequ
 		ProviderRef: "txn-" + req.OrderNumber,
 		QRString:    g.qrString,
 		QRImageURL:  g.url,
-		ExpiresAt:   g.expiresAt,
+		// The deadline is the gateway's, adopted verbatim. The adapter guarantees
+		// it is always set, substituting a fallback when the gateway returned
+		// nothing usable — so a stub that returns a zero time here would be
+		// modelling something the real adapter cannot produce.
+		ExpiresAt:         g.expiresAt,
+		ExpiryFromGateway: true,
 	}, nil
 }
 

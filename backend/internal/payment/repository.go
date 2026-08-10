@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -55,12 +56,48 @@ func (r *Repository) CreatePayment(ctx context.Context, log PaymentLog) error {
 	return nil
 }
 
-// CountReissuedQRs reports how many QR re-issues the order has logged, which
-// drives the next -R{n} suffix.
-func (r *Repository) CountReissuedQRs(ctx context.Context, orderID uuid.UUID) (int64, error) {
-	n, err := r.queries.CountReissuedQRs(ctx, orderID)
+// PaymentRecord is one row of the payments log, as staff read it.
+type PaymentRecord struct {
+	ID            uuid.UUID
+	OrderID       uuid.UUID
+	Provider      string
+	TransactionID string
+	PaymentType   string
+	// Status is either the gateway's raw status or one of this domain's own
+	// markers. Both live in the same column, which is what makes the sequence a
+	// single readable narrative rather than two interleaved ones.
+	Status      string
+	RawResponse []byte
+	CreatedAt   time.Time
+}
+
+// ListByOrder returns every row recorded against one order, newest first.
+func (r *Repository) ListByOrder(ctx context.Context, orderID uuid.UUID) ([]PaymentRecord, error) {
+	rows, err := r.queries.ListPaymentsByOrderID(ctx, orderID)
 	if err != nil {
-		return 0, fmt.Errorf("count reissued QRs: %w", err)
+		return nil, fmt.Errorf("list payments for order: %w", err)
 	}
-	return n, nil
+	return toPaymentRecords(rows), nil
+}
+
+func toPaymentRecords(rows []paymentsql.Payment) []PaymentRecord {
+	out := make([]PaymentRecord, 0, len(rows))
+	for _, row := range rows {
+		rec := PaymentRecord{
+			ID:            row.ID,
+			OrderID:       row.OrderID,
+			Provider:      row.Provider,
+			TransactionID: row.TransactionID,
+			Status:        row.Status,
+			RawResponse:   row.RawResponse,
+		}
+		if row.PaymentType != nil {
+			rec.PaymentType = *row.PaymentType
+		}
+		if row.CreatedAt != nil {
+			rec.CreatedAt = *row.CreatedAt
+		}
+		out = append(out, rec)
+	}
+	return out
 }

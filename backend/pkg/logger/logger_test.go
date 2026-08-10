@@ -42,12 +42,12 @@ func TestLoggerRespectsLevel(t *testing.T) {
 
 func TestWithAddsPersistentFields(t *testing.T) {
 	var buf bytes.Buffer
-	log := logger.NewWithWriter(&buf, logger.LevelInfo).With("provider", "midtrans")
+	log := logger.NewWithWriter(&buf, logger.LevelInfo).With("provider", "manjo")
 
 	log.Info("webhook received", "provider_status", "settlement")
 
 	entry := decode(t, &buf)
-	assert.Equal(t, "midtrans", entry["provider"])
+	assert.Equal(t, "manjo", entry["provider"])
 	assert.Equal(t, "settlement", entry["provider_status"])
 }
 

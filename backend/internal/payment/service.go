@@ -2,19 +2,16 @@ package payment
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/shopspring/decimal"
 
-	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/logger"
 )
@@ -22,11 +19,35 @@ import (
 // ErrOrderNotFound reports that a notification names an order we do not have.
 var ErrOrderNotFound = errors.New("payment: order not found")
 
-// ErrProviderHasNoRecord reports that the provider has never heard of an order
-// we do hold. It is deliberately distinct from ErrOrderNotFound: the guest is
-// looking at an order that exists, so answering "not found" would be a lie. The
-// honest answer is that we could not confirm anything.
-var ErrProviderHasNoRecord = errors.New("payment: provider has no record of this order")
+// Marker statuses written into payments.status alongside — never instead of —
+// the audit row for the payload that triggered them (FR-018).
+//
+// A marker records what was true at the moment a decision was taken: the order's
+// status when a contradiction arrived, the lines re-taken when a settle
+// succeeded, the shortfall when one was refused. None of that is recoverable
+// afterwards — quota moves on, statuses move on — so it is written here, where
+// the order's status is already loaded, rather than re-derived later by a query
+// that would have to JOIN payments to orders across a domain boundary
+// (Principle II).
+const (
+	// MarkerDisputed records a terminal-failure notification arriving for an
+	// order already PAID. The order is NOT moved (FR-016a) — this is a statement
+	// that two sources disagree, for a human to settle.
+	MarkerDisputed = "DISPUTED"
+	// MarkerSettledAfterExpiry records a redelivered Completed notification
+	// reviving an order this system had already expired (FR-019). It answers the
+	// question an oversold event provokes: why does this ticket type's issued
+	// count exceed the allocation it was given?
+	MarkerSettledAfterExpiry = "SETTLED_AFTER_EXPIRY"
+	// MarkerSettleRefusedNoQuota records a redelivered Completed notification
+	// that could not be honoured because the seats have been resold (FR-019c). It
+	// carries the shortfall per ticket type, which is the number an operator needs
+	// to size the top-up before asking for another resend.
+	MarkerSettleRefusedNoQuota = "SETTLE_REFUSED_NO_QUOTA"
+	// MarkerSessionDuplicate records a session-open refused as a duplicate
+	// reference — a code exists that this system will never hold.
+	MarkerSessionDuplicate = "SESSION_DUPLICATE"
+)
 
 // fulfillmentTimeout bounds the post-payment goroutine. Ticket generation, PDF
 // rendering, and an SMTP round-trip should take well under this; the bound stops a
@@ -39,17 +60,10 @@ type OrderRef struct {
 	OrderNumber string
 	Status      string
 	// PaymentExpiresAt is the deadline the payment stops being accepted at, or
-	// nil for an order that never had one. Past it, the order is expired no
-	// matter what the provider says.
+	// nil for an order that never had one. It is now the gateway's own expiry
+	// rather than a figure this system computed. Past it, the order is expired no
+	// matter what the gateway later says.
 	PaymentExpiresAt *time.Time
-	// TotalAmount and the buyer fields feed the provider request when a QR is
-	// re-issued (spec 008 FR-015); buyer fields are nil before checkout.
-	TotalAmount decimal.Decimal
-	BuyerName   *string
-	BuyerEmail  *string
-	BuyerPhone  *string
-	// PaymentStarted reports whether a QR payload is stamped on the order.
-	PaymentStarted bool
 }
 
 // QuotaHold is one ticket type's total reserved quantity for an order — how much
@@ -67,9 +81,13 @@ type QuotaHold struct {
 // OrderProvider is the contract this domain needs from the order domain, declared
 // here by its consumer (ARCHITECTURE.md §3.2).
 type OrderProvider interface {
-	// OrderByNumber resolves the provider's order_id echo, returning
+	// OrderByNumber resolves the gateway's reference echo, returning
 	// ErrOrderNotFound when there is no such order.
 	OrderByNumber(ctx context.Context, orderNumber string) (OrderRef, error)
+	// OrderByID resolves an order the payments log already points at. The admin
+	// read views work from payment rows, which carry order_id and not the order
+	// number.
+	OrderByID(ctx context.Context, orderID uuid.UUID) (OrderRef, error)
 	// QuotaHolds returns what the order actually holds per ticket type, with any
 	// package lines already expanded through their composition.
 	//
@@ -85,9 +103,6 @@ type OrderProvider interface {
 	// oldest first, capped at limit. It is what lets abandoned orders release
 	// their seats without anyone opening the page.
 	DueForExpiry(ctx context.Context, now time.Time, limit int32) ([]OrderRef, error)
-	// UpdatePaymentQR swaps the order's QR payload WITHOUT touching its
-	// deadline (spec 008 FR-015), guarded on the order still being PENDING.
-	UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error)
 }
 
 // QuotaRestorer is the contract this domain needs from the event domain.
@@ -115,6 +130,18 @@ type Service struct {
 	issuer    TicketIssuer
 	deliverer TicketDeliverer
 	log       *logger.Logger
+	// reserver and releaser back the settle path: a redelivered Completed
+	// notification reviving an expired order has to take its seats back
+	// (FR-019b). They are constructor arguments rather than optional extras
+	// because the callback path now depends on them — a deployment missing them
+	// would silently refuse a payment the gateway confirmed, on the path least
+	// likely to be exercised before it matters.
+	//
+	// Safety comes from what releaser CAN express, not from who holds it:
+	// SettleExpired moves an order out of EXPIRED and nowhere else, so no caller
+	// can revive one the gateway itself cancelled (FR-019d).
+	reserver QuotaReserver
+	releaser OrderReleaser
 	// now is injectable so expiry can be exercised without waiting out a
 	// deadline.
 	now func() time.Time
@@ -135,13 +162,16 @@ func NewService(
 	gateway Gateway,
 	orders OrderProvider,
 	quota QuotaRestorer,
+	reserver QuotaReserver,
+	releaser OrderReleaser,
 	issuer TicketIssuer,
 	deliverer TicketDeliverer,
 	log *logger.Logger,
 ) *Service {
 	return &Service{
 		pool: pool, repo: repo, gateway: gateway, orders: orders,
-		quota: quota, issuer: issuer, deliverer: deliverer, log: log,
+		quota: quota, reserver: reserver, releaser: releaser,
+		issuer: issuer, deliverer: deliverer, log: log,
 		now: time.Now,
 		hub: NewStreamHub(),
 	}
@@ -156,46 +186,81 @@ func (s *Service) WaitForFulfillment() {
 	s.fulfillment.Wait()
 }
 
-// HandleNotification processes one provider notification.
+// HandleNotification processes one gateway notification.
 //
-// Only a signature failure is reported as an error (the handler turns it into a
-// 401). Every authenticated notification is acknowledged with 200 — including ones
-// for unknown orders and unrecognized statuses — because a non-2xx answer makes
-// the provider retry a notification we can never process. Anything anomalous is
-// logged loudly instead.
-func (s *Service) HandleNotification(ctx context.Context, provider string, payload []byte, signature string) error {
-	result, err := s.gateway.VerifyWebhook(payload, signature)
+// Only an authentication failure is reported as an error (the handler turns it
+// into a non-200). Every authenticated notification is acknowledged with 200 —
+// including ones for unknown orders, non-deposit transaction types, and
+// unrecognised statuses — because the gateway retries any other answer three
+// times, ten seconds apart, with no dead-letter (FR-012c). Retrying cannot change
+// any of those outcomes, so a refusal would buy nothing and cost four deliveries.
+// Anything anomalous is signalled loudly instead.
+func (s *Service) HandleNotification(ctx context.Context, provider string, payload []byte, token string) error {
+	result, err := s.gateway.VerifyWebhook(payload, token)
 	if err != nil {
-		s.log.WarnContext(ctx, "rejected unverified payment notification", "provider", provider, "error", err.Error())
+		s.log.WarnContext(ctx, "rejected unauthenticated payment notification", "provider", provider, "error", err.Error())
 		return err
 	}
 
-	// A re-issued QR lives under a suffixed provider reference
-	// ({orderNumber}-R{n}); strip it so every session of the same order feeds
-	// the identical idempotent settlement path — first settlement wins.
-	orderNumber := stripReissueSuffix(result.OrderNumber)
+	// A withdrawal is not a payment for one of our orders. Record it, signal it,
+	// change nothing, and still answer 200 — a retry would deliver the same
+	// irrelevant fact again (FR-020).
+	if !result.IsDeposit {
+		s.log.ErrorContext(ctx, "notification is not a deposit; recorded without changing any order",
+			"provider", provider, "reference", result.OrderNumber, "trx_type", result.TransactionType)
+		s.recordOrphanNotification(ctx, provider, result, "non-deposit transaction type")
+		return nil
+	}
 
-	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
+	// The reference is the order number, unmodified. There is no suffix to strip
+	// and no normalisation between the two: the re-issue machinery that made the
+	// reference differ from the order number is withdrawn, and one order now has
+	// exactly one session (FR-010b).
+	ord, err := s.orders.OrderByNumber(ctx, result.OrderNumber)
 	if errors.Is(err, ErrOrderNotFound) {
+		// Loud rather than quiet: a reference we do not recognise means either the
+		// gateway is misconfigured against another tenant, or an order vanished.
+		// Both need a human, and neither is fixed by a retry (FR-013).
 		s.log.ErrorContext(ctx, "notification names an unknown order; acknowledging without processing",
-			"provider", provider, "order_number", result.OrderNumber)
+			"provider", provider, "reference", result.OrderNumber)
+		s.recordOrphanNotification(ctx, provider, result, "unknown order reference")
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
-	_, err = s.applyProviderResult(ctx, ord, provider, "webhook", result)
+	_, err = s.applyProviderResult(ctx, ord, provider, "callback", result)
 	return err
 }
 
-// applyProviderResult is the single path every provider answer travels, whether
-// it arrived as a notification or was fetched by a reconciliation.
+// recordOrphanNotification preserves a notification that names no order of ours,
+// or names a transaction type we do not process.
 //
-// Sharing it is what makes reconciliation exactly as safe as a webhook: the same
-// audit row, the same already-paid short-circuit, the same status mapping, and
-// the same guarded transition — so two paths arriving at once still move the
-// order (and its quota) exactly once. It reports whether the order actually
+// It cannot go in `payments` — that table's order_id is NOT NULL and there is no
+// order to point it at — so the audit record here is the log line plus the raw
+// payload. FR-018's "record every notification" is met for everything that
+// resolves to an order; this is the honest boundary of that promise, stated
+// rather than hidden.
+func (s *Service) recordOrphanNotification(ctx context.Context, provider string, result *WebhookResult, reason string) {
+	s.log.ErrorContext(ctx, "unattributable payment notification",
+		"provider", provider,
+		"reason", reason,
+		"reference", result.OrderNumber,
+		"transaction_id", result.TransactionID,
+		"provider_status", result.TransactionStatus,
+		"raw_payload", string(result.RawPayload))
+}
+
+// applyProviderResult is the single path every gateway answer travels, whether
+// it is a first delivery, one of the gateway's automatic retries, or a
+// redelivery an operator asked for to rescue a lost notification.
+//
+// Sharing it is what makes recovery exactly as safe as an ordinary payment: the
+// same audit row, the same already-paid short-circuit, the same status mapping,
+// and the same guarded transition — so two deliveries arriving at once still
+// move the order (and its quota) exactly once. There is no separate replay path
+// to get right, which is the point. It reports whether the order actually
 // changed.
 func (s *Service) applyProviderResult(
 	ctx context.Context,
@@ -208,11 +273,10 @@ func (s *Service) applyProviderResult(
 		"source", source,
 		"order_number", ord.OrderNumber,
 		"provider_status", result.TransactionStatus,
-		"fraud_status", result.FraudStatus,
 	)
 
 	// Log first: the payments row is the audit trail, and it must exist even for
-	// answers that change nothing.
+	// answers that change nothing — including ones this system refuses (FR-018).
 	if err := s.repo.CreatePayment(ctx, PaymentLog{
 		OrderID:       ord.ID,
 		Provider:      provider,
@@ -224,29 +288,78 @@ func (s *Service) applyProviderResult(
 		return false, err
 	}
 
-	// Idempotency short-circuit: a paid order is final, so a replay does no work
-	// and cannot re-trigger ticket generation or a second email.
+	outcome := MapProviderStatus(result.Status)
+
+	// Idempotency short-circuit: PAID is terminal for every automated path
+	// (FR-016a). Nothing below moves a paid order — only the attributable staff
+	// action does.
 	if ord.Status == OrderStatusPaid {
-		log.InfoContext(ctx, "order is already paid; provider result acknowledged as a no-op")
+		// A repeat of the recorded outcome passes quietly. At-least-once delivery
+		// makes this the *normal* case, not an anomaly, so signalling it would bury
+		// the contradiction below in routine noise (FR-016).
+		if outcome.OrderStatus == OrderStatusPaid {
+			log.InfoContext(ctx, "notification repeats the recorded outcome; acknowledged as a no-op")
+			return false, nil
+		}
+		// A contradiction is different in kind: the gateway now says this order
+		// failed, and we have already issued tickets against it. Nothing is
+		// reversed automatically — the seats are gone and the buyer holds valid
+		// tickets — but it raises a signal distinguishable from retry traffic and
+		// leaves a marker on the order's own record, so anyone who looks the order
+		// up sees it without being told to look (FR-016b, FR-016c, FR-016d).
+		if outcome.IsTerminalFailure() {
+			log.ErrorContext(ctx, "notification contradicts a settled payment; order left PAID for manual review",
+				"marker", MarkerDisputed)
+			s.writeMarker(ctx, ord, provider, MarkerDisputed, result, map[string]any{
+				"order_status_at_arrival": ord.Status,
+				"contradicting_status":    result.TransactionStatus,
+			})
+			return false, nil
+		}
+		log.InfoContext(ctx, "order is already paid; notification acknowledged as a no-op")
 		return false, nil
 	}
 
-	outcome := MapProviderStatus(result.TransactionStatus, result.FraudStatus)
 	if !outcome.Handled {
-		log.ErrorContext(ctx, "unrecognized provider status; order left unchanged and acknowledged")
+		// Obscure, or a value this build has never seen. Either may be a status
+		// that should have released quota, so it must not pass as a quiet no-op
+		// (FR-014).
+		log.ErrorContext(ctx, "unrecognised gateway status; order left unchanged and acknowledged")
 		return false, nil
 	}
 	if !outcome.ChangesOrder() {
-		log.InfoContext(ctx, "provider result is a legitimate no-op; order left pending")
+		log.InfoContext(ctx, "notification is a legitimate no-op; order left pending")
 		return false, nil
 	}
 
-	// A success for an order that has already been expired or cancelled is a real
-	// discrepancy: the guest may have been charged for seats we have released.
-	// The order is deliberately NOT flipped back — that would resurrect quota we
-	// no longer hold — but it must be loud enough for an admin to find.
+	// A completion for an order that is no longer pending splits in two, and the
+	// split is the whole of FR-019/FR-019d. Both orders look identical here — a
+	// released order with money against it — but only one of them holds a verdict
+	// this system is entitled to reverse.
 	if outcome.OrderStatus == OrderStatusPaid && ord.Status != OrderStatusPending {
-		log.ErrorContext(ctx, "provider reports a successful payment for an order that is no longer pending; needs manual reconciliation",
+		if ord.Status == OrderStatusExpired {
+			// Expiry is OUR verdict, reached on the deadline alone because a
+			// notification never came. A redelivered one says the verdict was wrong,
+			// so it is reversed: seats taken back, tickets issued, through the
+			// ordinary path (FR-019).
+			//
+			// This deliberately does NOT fall through to applyOutcome below. That
+			// path's only primitive is UpdateStatusIfPending, which would match zero
+			// rows for an expired order and log a skipped transition at info level —
+			// turning a settle into a silent drop.
+			if err := s.settleExpiredOrder(ctx, ord, provider, result); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+
+		// Cancellation is the GATEWAY's verdict, or the consequence of a code that
+		// never reached the guest (FR-007f). Reversing it would contradict the source
+		// of payment truth this design rests on, so the order stands and a person
+		// decides what to do about the money. No marker: applyProviderResult has
+		// already written the audit row carrying this payload, and that row sits on
+		// the order's own record, which is where anyone looking it up will find it.
+		log.ErrorContext(ctx, "gateway reports a successful payment for a cancelled order; not revived, recorded for review",
 			"order_status", ord.Status)
 		return false, nil
 	}
@@ -268,6 +381,116 @@ func (s *Service) applyProviderResult(
 		s.fulfillAsync(ctx, ord)
 	}
 	return true, nil
+}
+
+// writeMarker records a second statement about a notification that has already
+// been logged: what this system concluded about it, on the order's own record.
+//
+// It never replaces the audit row (FR-018) — the raw payload stays on its own
+// row exactly as it arrived, and this one carries the interpretation. A failure
+// to write it is logged and swallowed: the caller is on the callback path with a
+// five-second budget, and losing an annotation must not turn a recorded outcome
+// into a retried delivery.
+func (s *Service) writeMarker(
+	ctx context.Context,
+	ord OrderRef,
+	provider, marker string,
+	result *WebhookResult,
+	detail map[string]any,
+) {
+	envelope := map[string]any{
+		"marker":         marker,
+		"raised_at":      s.now().UTC().Format(time.RFC3339),
+		"payload":        json.RawMessage(validJSONOrNull(result.RawPayload)),
+		"transaction_id": result.TransactionID,
+	}
+	for k, v := range detail {
+		envelope[k] = v
+	}
+
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		s.log.ErrorContext(ctx, "could not encode payment marker",
+			"order_number", ord.OrderNumber, "marker", marker, "error", err.Error())
+		return
+	}
+
+	// transaction_id is NOT NULL, so a marker with no gateway id of its own falls
+	// back to the order's own reference rather than writing an empty string that
+	// would read as a real, blank gateway id.
+	transactionID := result.TransactionID
+	if transactionID == "" {
+		transactionID = ord.OrderNumber
+	}
+
+	if err := s.repo.CreatePayment(ctx, PaymentLog{
+		OrderID:       ord.ID,
+		Provider:      provider,
+		TransactionID: transactionID,
+		PaymentType:   result.PaymentType,
+		Status:        marker,
+		RawResponse:   encoded,
+	}); err != nil {
+		s.log.ErrorContext(ctx, "could not record payment marker",
+			"order_number", ord.OrderNumber, "marker", marker, "error", err.Error())
+	}
+}
+
+// validJSONOrNull keeps a marker envelope encodable when the payload that
+// triggered it is not itself JSON. raw_response is JSONB, so embedding an
+// unparseable body verbatim would fail the insert and lose the marker entirely —
+// the one outcome worse than losing the body's exact bytes, which the audit row
+// written alongside still holds.
+func validJSONOrNull(raw []byte) []byte {
+	if len(raw) > 0 && json.Valid(raw) {
+		return raw
+	}
+	return []byte("null")
+}
+
+// ReleaseDuplicateSession handles a session-open the gateway refused because it
+// had already issued a code for this reference.
+//
+// The seats are released now rather than held to the deadline (FR-007e). That is
+// not impatience: no call returns an existing code, so the guest will never be
+// shown anything to scan, and holding their seats for the full window cannot end
+// in a payment — it only keeps them from anyone who could actually buy them.
+func (s *Service) ReleaseDuplicateSession(ctx context.Context, orderNumber string, cause error) error {
+	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
+	if err != nil {
+		return err
+	}
+
+	applied, restored, err := s.applyOutcome(ctx, ord, Outcome{
+		OrderStatus: OrderStatusCancelled, RestoreQuota: true, Handled: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	detail := map[string]any{"order_status_at_arrival": ord.Status, "quota_released": applied}
+	if cause != nil {
+		detail["gateway_error"] = cause.Error()
+	}
+	// FR-007f: a payment that somehow arrives for this order still has to reach a
+	// person, so the marker goes on the order's record whether or not the release
+	// applied.
+	s.writeMarker(ctx, ord, s.gateway.Name(), MarkerSessionDuplicate, &WebhookResult{
+		OrderNumber: ord.OrderNumber,
+		PaymentType: "qris",
+	}, detail)
+
+	lines := make([]string, 0, len(restored))
+	for _, hold := range restored {
+		lines = append(lines, fmt.Sprintf("%s:+%d", hold.TicketTypeID, hold.Quantity))
+	}
+	s.log.ErrorContext(ctx, "gateway refused a duplicate reference; order released without a payable code",
+		"order_number", ord.OrderNumber,
+		"quota_released", applied,
+		"restored_quota", strings.Join(lines, ","),
+		"marker", MarkerSessionDuplicate)
+
+	return nil
 }
 
 // expiryBatchSize bounds one sweep. A backlog is drained over successive ticks
@@ -306,186 +529,6 @@ func (s *Service) ExpireDueOrders(ctx context.Context) (int, error) {
 	return expired, nil
 }
 
-// reissueSuffix matches the -R{n} tail a re-issued QR's provider reference
-// carries (contracts/booking-flow.md §4).
-var reissueSuffix = regexp.MustCompile(`-R\d+$`)
-
-// stripReissueSuffix maps any session reference back onto its order number.
-func stripReissueSuffix(reference string) string {
-	return reissueSuffix.ReplaceAllString(reference, "")
-}
-
-// ReissuedQR is what a 7-minute refresh hands back: a fresh payload under the
-// same, untouched deadline.
-type ReissuedQR struct {
-	OrderNumber string
-	QRString    string
-	// ExpiresAt is the order's existing payment deadline — re-issuing never
-	// extends the 14-minute window (FR-015).
-	ExpiresAt time.Time
-}
-
-// ReissueQR opens a fresh provider session for an order mid-payment and swaps
-// the stored QR payload, leaving the deadline untouched (FR-015; spec 008
-// research R3 — a QRIS payload's practical scan-life is shorter than the
-// payment window, so the screen refreshes it at the 7-minute mark).
-//
-//	guards  PENDING ∧ payment started (else 409005) ∧ unexpired (else 410001)
-//	network Gateway.CreateTransaction("{orderNumber}-R{n}", same total) — no TX
-//	write   swap payment_url + payment_qr_string; deadline NOT touched
-//
-// n is derived from the payments log, where every re-issue is recorded — the
-// audit trail that also lets support match a provider reference back to its
-// order. A gateway failure leaves the old QR in place (client keeps showing it).
-func (s *Service) ReissueQR(ctx context.Context, orderNumber string) (ReissuedQR, error) {
-	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
-	if errors.Is(err, ErrOrderNotFound) {
-		return ReissuedQR{}, apperr.NotFound(apperr.CodeOrderNotFound, "Order not found.")
-	}
-	if err != nil {
-		return ReissuedQR{}, err
-	}
-
-	if ord.Status != OrderStatusPending ||
-		(ord.PaymentExpiresAt != nil && s.now().After(*ord.PaymentExpiresAt)) {
-		return ReissuedQR{}, apperr.New(http.StatusGone, apperr.CodeOrderExpired,
-			"This order can no longer be paid. Please book again.")
-	}
-	if !ord.PaymentStarted {
-		return ReissuedQR{}, apperr.Conflict(apperr.CodePaymentNotStarted,
-			"Payment for this order has not started yet.")
-	}
-
-	prior, err := s.repo.CountReissuedQRs(ctx, ord.ID)
-	if err != nil {
-		return ReissuedQR{}, err
-	}
-	reference := fmt.Sprintf("%s-R%d", ord.OrderNumber, prior+1)
-
-	req := TransactionRequest{
-		OrderNumber: reference,
-		GrossAmount: ord.TotalAmount,
-		Items: []TransactionItem{{
-			ID: ord.OrderNumber, Name: "Order " + ord.OrderNumber,
-			Price: ord.TotalAmount, Quantity: 1,
-		}},
-	}
-	if ord.BuyerName != nil {
-		req.CustomerName = *ord.BuyerName
-	}
-	if ord.BuyerEmail != nil {
-		req.CustomerEmail = *ord.BuyerEmail
-	}
-	if ord.BuyerPhone != nil {
-		req.CustomerPhone = *ord.BuyerPhone
-	}
-
-	session, err := s.gateway.CreateTransaction(ctx, req)
-	if err != nil {
-		s.log.ErrorContext(ctx, "QR re-issue failed; old QR remains live",
-			"order_number", ord.OrderNumber, "reference", reference, "error", err.Error())
-		return ReissuedQR{}, apperr.Wrap(err, http.StatusBadGateway, apperr.CodePaymentInitiationFailed,
-			"We could not refresh the payment code. The previous code may still work.")
-	}
-
-	swapped, err := s.orders.UpdatePaymentQR(ctx, ord.ID, session.QRImageURL, session.QRString)
-	if err != nil {
-		return ReissuedQR{}, err
-	}
-	if !swapped {
-		// The order settled or expired between the guard and the swap.
-		return ReissuedQR{}, apperr.New(http.StatusGone, apperr.CodeOrderExpired,
-			"This order can no longer be paid.")
-	}
-
-	// The audit row is what makes n monotonic and the suffixed reference
-	// traceable back to its order.
-	if err := s.repo.CreatePayment(ctx, PaymentLog{
-		OrderID:       ord.ID,
-		Provider:      s.gateway.Name(),
-		TransactionID: reference,
-		PaymentType:   "qris",
-		Status:        "QR_REISSUED",
-		RawResponse:   []byte(fmt.Sprintf(`{"reference":%q,"provider_ref":%q}`, reference, session.ProviderRef)),
-	}); err != nil {
-		// The swap already happened; a lost audit row must not fail the guest.
-		s.log.ErrorContext(ctx, "could not record QR re-issue",
-			"order_number", ord.OrderNumber, "reference", reference, "error", err.Error())
-	}
-
-	s.log.InfoContext(ctx, "payment QR re-issued",
-		"order_number", ord.OrderNumber, "reference", reference)
-
-	expiresAt := time.Time{}
-	if ord.PaymentExpiresAt != nil {
-		expiresAt = ord.PaymentExpiresAt.UTC()
-	}
-	return ReissuedQR{OrderNumber: ord.OrderNumber, QRString: session.QRString, ExpiresAt: expiresAt}, nil
-}
-
-// RefreshResult reports what a reconciliation found.
-type RefreshResult struct {
-	OrderNumber string
-	Status      string
-	// Changed reports whether this call actually moved the order, so the guest
-	// can be told "confirmed" versus "still waiting" rather than nothing at all.
-	Changed bool
-}
-
-// RefreshStatus reconciles one order against the payment provider.
-//
-// It backs the guest's "check payment status" button. A button that only re-read
-// our own database would be useless in exactly the situation it exists for — a
-// notification that is delayed, lost, or (locally) undeliverable — so this asks
-// the provider directly and applies the answer through the same path a webhook
-// takes.
-func (s *Service) RefreshStatus(ctx context.Context, orderNumber string) (RefreshResult, error) {
-	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-
-	// A settled order cannot change again; do not spend a provider round-trip on
-	// it, and do not let a repeated press cost anything.
-	if ord.Status != OrderStatusPending {
-		return RefreshResult{OrderNumber: ord.OrderNumber, Status: ord.Status}, nil
-	}
-
-	// Past its deadline the order is expired whatever the provider says, and the
-	// guest deserves that answer now rather than at the next sweep.
-	if expired, err := s.expireIfDue(ctx, ord); err != nil {
-		return RefreshResult{}, err
-	} else if expired {
-		return RefreshResult{OrderNumber: ord.OrderNumber, Status: OrderStatusExpired, Changed: true}, nil
-	}
-
-	result, err := s.gateway.FetchStatus(ctx, orderNumber)
-	if errors.Is(err, ErrOrderNotFound) {
-		// We hold the order but the provider does not, so there is nothing to
-		// reconcile against. Translated here so the handler cannot mistake it for
-		// "no such order" and tell the guest their own order does not exist.
-		s.log.ErrorContext(ctx, "provider has no record of an order we hold",
-			"order_number", orderNumber)
-		return RefreshResult{}, ErrProviderHasNoRecord
-	}
-	if err != nil {
-		return RefreshResult{}, err
-	}
-
-	changed, err := s.applyProviderResult(ctx, ord, s.gateway.Name(), "refresh", result)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-
-	// Re-read rather than infer: the winning path may have been a webhook that
-	// landed a moment ago.
-	current, err := s.orders.OrderByNumber(ctx, orderNumber)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	return RefreshResult{OrderNumber: current.OrderNumber, Status: current.Status, Changed: changed}, nil
-}
-
 // expiredOutcome is the transition an order past its deadline takes: expired,
 // with its reserved seats returned to the pool.
 var expiredOutcome = Outcome{OrderStatus: OrderStatusExpired, RestoreQuota: true, Handled: true}
@@ -493,9 +536,9 @@ var expiredOutcome = Outcome{OrderStatus: OrderStatusExpired, RestoreQuota: true
 // expireIfDue expires an order whose payment deadline has passed, reporting
 // whether it actually applied the transition.
 //
-// It runs the same guarded transaction every other path runs, so the sweeper,
-// a reconciliation, and a provider `expire` notification racing each other still
-// restore the quota exactly once.
+// It runs the same guarded transaction every other path runs, so the sweeper and
+// a gateway `expire` notification racing each other still restore the quota
+// exactly once.
 func (s *Service) expireIfDue(ctx context.Context, ord OrderRef) (bool, error) {
 	if ord.Status != OrderStatusPending {
 		return false, nil
@@ -559,8 +602,8 @@ func (s *Service) applyOutcome(ctx context.Context, ord OrderRef, outcome Outcom
 	})
 
 	if err == nil && applied {
-		// Open payment screens learn the transition live (SSE); the webhook,
-		// the sweeper, and reconciliation all pass through here.
+		// Open payment screens learn the transition live (SSE). The callback, the
+		// sweeper, and the settle-after-expiry path all pass through here.
 		s.hub.Publish(ord.OrderNumber, StatusEvent{
 			OrderID: ord.OrderNumber, Status: outcome.OrderStatus,
 			ExpiresAt: ord.PaymentExpiresAt,

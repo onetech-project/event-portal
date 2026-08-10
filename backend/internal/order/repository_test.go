@@ -164,7 +164,7 @@ func TestUpdatePaymentDetailsStampsTheWholePaymentInstruction(t *testing.T) {
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
 			PaymentURL: "https://pay.example.com/x",
-			Provider:   "midtrans",
+			Provider:   "manjo",
 			QRString:   "00020101021226620014COM.EXAMPLE",
 			ExpiresAt:  expiresAt,
 		})
@@ -176,7 +176,7 @@ func TestUpdatePaymentDetailsStampsTheWholePaymentInstruction(t *testing.T) {
 	require.NotNil(t, got.PaymentURL)
 	assert.Equal(t, "https://pay.example.com/x", *got.PaymentURL)
 	require.NotNil(t, got.PaymentProvider)
-	assert.Equal(t, "midtrans", *got.PaymentProvider)
+	assert.Equal(t, "manjo", *got.PaymentProvider)
 	require.NotNil(t, got.PaymentQRString)
 	assert.Equal(t, "00020101021226620014COM.EXAMPLE", *got.PaymentQRString)
 	require.NotNil(t, got.PaymentExpiresAt)
@@ -194,7 +194,7 @@ func TestUpdatePaymentDetailsLeavesEmptyInstructionFieldsNull(t *testing.T) {
 	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
 			PaymentURL: "https://pay.example.com/x",
-			Provider:   "midtrans",
+			Provider:   "manjo",
 		})
 	})
 

@@ -21,7 +21,7 @@ func TestCreatePaymentAppendsARowPerNotification(t *testing.T) {
 
 	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
 		OrderID:       ord.ID,
-		Provider:      "midtrans",
+		Provider:      "manjo",
 		TransactionID: "tx-1",
 		PaymentType:   "bank_transfer",
 		Status:        "pending",
@@ -29,7 +29,7 @@ func TestCreatePaymentAppendsARowPerNotification(t *testing.T) {
 	}))
 	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
 		OrderID:       ord.ID,
-		Provider:      "midtrans",
+		Provider:      "manjo",
 		TransactionID: "tx-1",
 		PaymentType:   "bank_transfer",
 		Status:        "settlement",
@@ -54,7 +54,7 @@ func TestCreatePaymentPreservesTheRawProviderStatus(t *testing.T) {
 	for _, status := range []string{"deny", "failure"} {
 		require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
 			OrderID:       ord.ID,
-			Provider:      "midtrans",
+			Provider:      "manjo",
 			TransactionID: "tx-" + status,
 			Status:        status,
 			RawResponse:   []byte(`{"transaction_status":"` + status + `"}`),
@@ -83,7 +83,7 @@ func TestCreatePaymentStoresTheFullPayloadAsJSONB(t *testing.T) {
 	raw := []byte(`{"transaction_status":"settlement","fraud_status":"accept","gross_amount":"300000.00"}`)
 
 	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
-		OrderID: ord.ID, Provider: "midtrans", TransactionID: "tx-9",
+		OrderID: ord.ID, Provider: "manjo", TransactionID: "tx-9",
 		Status: "settlement", RawResponse: raw,
 	}))
 
@@ -105,7 +105,7 @@ func TestCreatePaymentAcceptsAMissingPaymentType(t *testing.T) {
 	ord := testsupport.SeedOrder(t, pool, "ORD-NOTYPE", "PENDING")
 
 	err := repo.CreatePayment(ctx, payment.PaymentLog{
-		OrderID: ord.ID, Provider: "midtrans", TransactionID: "tx-x",
+		OrderID: ord.ID, Provider: "manjo", TransactionID: "tx-x",
 		Status: "expire", RawResponse: []byte(`{}`),
 	})
 

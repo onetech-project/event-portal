@@ -1330,6 +1330,44 @@ func (q *Queries) ListTicketTypeNamesByIDs(ctx context.Context, ids []uuid.UUID)
 	return items, nil
 }
 
+const listTicketTypeQuotasByIDs = `-- name: ListTicketTypeQuotasByIDs :many
+SELECT id, name, quota FROM ticket_types WHERE id = ANY($1::uuid[])
+`
+
+type ListTicketTypeQuotasByIDsRow struct {
+	ID    uuid.UUID
+	Name  string
+	Quota int32
+}
+
+// Remaining quota per ticket type. `quota` is the REMAINING counter (constitution,
+// Critical Data Flow Rules), not the original allocation.
+//
+// The payment domain reads this to size the shortfall when a redelivered
+// notification cannot settle an expired order (FR-019c), and to show an operator
+// what an order holds against what is left before they request a resend
+// (FR-022e). It is deliberately NOT the sold-count shown on the ticket-type
+// editor, which counts released orders and so overstates what has been sold.
+func (q *Queries) ListTicketTypeQuotasByIDs(ctx context.Context, ids []uuid.UUID) ([]ListTicketTypeQuotasByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listTicketTypeQuotasByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTicketTypeQuotasByIDsRow{}
+	for rows.Next() {
+		var i ListTicketTypeQuotasByIDsRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.Quota); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTicketTypesAdmin = `-- name: ListTicketTypesAdmin :many
 
 SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at

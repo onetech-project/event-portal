@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	"github.com/manjo/ticketing/backend/internal/payment"
 	"github.com/manjo/ticketing/backend/internal/ticket"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/logger"
 )
 
 // This file is the only place where two domains meet.
@@ -93,11 +95,23 @@ func (a eventProviderAdapter) CurrentTerms(ctx context.Context, eventID uuid.UUI
 
 // --- order.PaymentGateway: checkout's view of the payment provider ---------
 
-type gatewayAdapter struct{ gateway payment.Gateway }
+type gatewayAdapter struct {
+	gateway payment.Gateway
+	// payments is set after the payment service exists, because the two are
+	// mutually dependent: checkout needs the gateway, and a duplicate-reference
+	// refusal needs the payment service to release the order and record it.
+	//
+	// The back-reference lives here rather than inside either domain precisely
+	// because this file is where domains are allowed to know about each other. A
+	// nil value degrades to "translate the error but release nothing", which is
+	// wrong but not silent — the log line below says so.
+	payments *payment.Service
+	log      *logger.Logger
+}
 
-func (a gatewayAdapter) Name() string { return a.gateway.Name() }
+func (a *gatewayAdapter) Name() string { return a.gateway.Name() }
 
-func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.PaymentRequest) (order.PaymentSession, error) {
+func (a *gatewayAdapter) CreateTransaction(ctx context.Context, req order.PaymentRequest) (order.PaymentSession, error) {
 	items := make([]payment.TransactionItem, 0, len(req.Items))
 	for _, item := range req.Items {
 		items = append(items, payment.TransactionItem{
@@ -113,16 +127,32 @@ func (a gatewayAdapter) CreateTransaction(ctx context.Context, req order.Payment
 		CustomerPhone: req.CustomerPhone,
 		Items:         items,
 	})
+	if errors.Is(err, payment.ErrDuplicateReference) {
+		// Release the seats now and record why on the order's own history, then
+		// translate onto the order domain's own sentinel so checkout can tell the
+		// guest to start again rather than offering a retry that cannot work.
+		if a.payments != nil {
+			if releaseErr := a.payments.ReleaseDuplicateSession(ctx, req.OrderNumber, err); releaseErr != nil {
+				a.log.ErrorContext(ctx, "could not release an order refused as a duplicate reference; its seats stay held until the sweeper",
+					"order_number", req.OrderNumber, "error", releaseErr.Error())
+			}
+		} else {
+			a.log.ErrorContext(ctx, "duplicate reference with no payment service wired; seats stay held until the sweeper",
+				"order_number", req.OrderNumber)
+		}
+		return order.PaymentSession{}, fmt.Errorf("%w: %w", order.ErrGatewaySessionDuplicate, err)
+	}
 	if err != nil {
 		return order.PaymentSession{}, err
 	}
 
 	return order.PaymentSession{
-		ProviderRef: session.ProviderRef,
-		QRString:    session.QRString,
-		QRImageURL:  session.QRImageURL,
-		ExpiresAt:   session.ExpiresAt,
-		RedirectURL: session.RedirectURL,
+		ProviderRef:       session.ProviderRef,
+		QRString:          session.QRString,
+		QRImageURL:        session.QRImageURL,
+		ExpiresAt:         session.ExpiresAt,
+		ExpiryFromGateway: session.ExpiryFromGateway,
+		RedirectURL:       session.RedirectURL,
 	}, nil
 }
 
@@ -143,12 +173,34 @@ func (a paymentOrderAdapter) OrderByNumber(ctx context.Context, orderNumber stri
 		OrderNumber:      rec.OrderNumber,
 		Status:           rec.Status,
 		PaymentExpiresAt: rec.PaymentExpiresAt,
-		TotalAmount:      rec.TotalAmount,
-		BuyerName:        rec.BuyerName,
-		BuyerEmail:       rec.BuyerEmail,
-		BuyerPhone:       rec.BuyerPhone,
-		PaymentStarted:   rec.PaymentQRString != nil && *rec.PaymentQRString != "",
 	}, nil
+}
+
+func (a paymentOrderAdapter) OrderByID(ctx context.Context, orderID uuid.UUID) (payment.OrderRef, error) {
+	rec, err := a.orders.GetOrderByID(ctx, orderID)
+	if errors.Is(err, order.ErrNotFound) {
+		return payment.OrderRef{}, payment.ErrOrderNotFound
+	}
+	if err != nil {
+		return payment.OrderRef{}, err
+	}
+	return payment.OrderRef{
+		ID:               rec.ID,
+		OrderNumber:      rec.OrderNumber,
+		Status:           rec.Status,
+		PaymentExpiresAt: rec.PaymentExpiresAt,
+	}, nil
+}
+
+// SettleExpired backs the settle path: a redelivered notification reviving an
+// order this system had already expired (FR-019).
+//
+// Both statuses are fixed here rather than passed in. The underlying query can
+// express any from→to move, and binding it at the composition root is what makes
+// FR-019d unreachable by construction: no caller in the payment domain can ask
+// for a CANCELLED order to be revived, because the method has nowhere to say it.
+func (a paymentOrderAdapter) SettleExpired(ctx context.Context, tx pgx.Tx, orderID uuid.UUID) (bool, error) {
+	return a.orders.UpdateOrderStatusFrom(ctx, tx, orderID, payment.OrderStatusExpired, payment.OrderStatusPaid)
 }
 
 func (a paymentOrderAdapter) DueForExpiry(ctx context.Context, now time.Time, limit int32) ([]payment.OrderRef, error) {
@@ -189,8 +241,42 @@ func (a paymentOrderAdapter) UpdateStatusIfPending(ctx context.Context, tx pgx.T
 	return a.orders.UpdateOrderStatusIfPending(ctx, tx, orderID, status)
 }
 
-func (a paymentOrderAdapter) UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error) {
-	return a.orders.UpdatePaymentQRByID(ctx, orderID, url, qrString)
+// --- payment.QuotaReserver: the settle path's view of the event domain -------
+
+// quotaReserverAdapter exists separately from the QuotaRestorer the event
+// service already satisfies, because taking quota back is a capability only the
+// settle path needs — every other path in the payment domain releases it. It
+// translates the event domain's insufficient-quota error onto the payment
+// domain's own, so the refusal reads as "these seats are gone" rather than as an
+// internal fault.
+type quotaReserverAdapter struct{ events *event.Service }
+
+func (a quotaReserverAdapter) ReserveQuota(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID, qty int32) error {
+	err := a.events.CheckAndDeductQuota(ctx, tx, ticketTypeID, qty)
+	if errors.Is(err, event.ErrInsufficientQuota) {
+		return payment.ErrQuotaUnavailable
+	}
+	return err
+}
+
+// RemainingQuota reports what each ticket type has left, so a refused settle can
+// name the shortfall an operator has to top up (FR-019c) and the holds view can
+// show held against remaining (FR-022e).
+//
+// It reads through the event service rather than joining ticket_types from the
+// payment domain, which is what keeps Principle II intact for a figure that
+// belongs to another domain's tables.
+func (a quotaReserverAdapter) RemainingQuota(ctx context.Context, ticketTypeIDs []uuid.UUID) (map[uuid.UUID]payment.TicketTypeQuota, error) {
+	records, err := a.events.TicketTypeQuotas(ctx, ticketTypeIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[uuid.UUID]payment.TicketTypeQuota, len(records))
+	for id, rec := range records {
+		out[id] = payment.TicketTypeQuota{Name: rec.Name, Remaining: rec.Remaining}
+	}
+	return out, nil
 }
 
 // --- notification.OrderProvider: delivery's view of the order domain -------

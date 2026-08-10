@@ -12,19 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const countReissuedQRs = `-- name: CountReissuedQRs :one
-SELECT COUNT(*) FROM payments WHERE order_id = $1 AND status = 'QR_REISSUED'
-`
-
-// How many times the order's QR has been re-issued (spec 008 FR-015). Drives
-// the -R{n} suffix on the provider reference.
-func (q *Queries) CountReissuedQRs(ctx context.Context, orderID uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countReissuedQRs, orderID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createPayment = `-- name: CreatePayment :one
 INSERT INTO payments (order_id, provider, transaction_id, payment_type, status, raw_response)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -50,10 +37,15 @@ type CreatePaymentRow struct {
 	CreatedAt     *time.Time
 }
 
-// One row per notification received. `status` stores the provider's RAW
+// One row per notification received. `payments.status` stores the provider's RAW
 // transaction_status (so `deny` stays distinguishable from `failure` even though
-// both fold into orders.status = 'CANCELLED'), and raw_response keeps the full
+// both fold into the order's CANCELLED status), and raw_response keeps the full
 // payload for audit.
+//
+// Deliberately untouched by migration 0013: this is the provider's own status
+// string, a different column with a different meaning from the order's status,
+// which became a reference to the order-status master list. No query in this
+// file reads or writes the `orders` table at all.
 func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (CreatePaymentRow, error) {
 	row := q.db.QueryRow(ctx, createPayment,
 		arg.OrderID,
@@ -74,4 +66,43 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (C
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listPaymentsByOrderID = `-- name: ListPaymentsByOrderID :many
+SELECT id, order_id, provider, transaction_id, payment_type, status, raw_response, created_at
+FROM payments
+WHERE order_id = $1
+ORDER BY created_at DESC
+`
+
+// Every notification recorded against one order, accepted or refused, newest
+// first (FR-022c). Marker rows appear alongside the payloads that triggered
+// them, which is the point: the sequence IS the audit trail.
+func (q *Queries) ListPaymentsByOrderID(ctx context.Context, orderID uuid.UUID) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listPaymentsByOrderID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Payment{}
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderID,
+			&i.Provider,
+			&i.TransactionID,
+			&i.PaymentType,
+			&i.Status,
+			&i.RawResponse,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

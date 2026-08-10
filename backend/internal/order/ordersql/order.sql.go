@@ -1305,6 +1305,43 @@ func (q *Queries) UpdateOrderBuyer(ctx context.Context, arg UpdateOrderBuyerPara
 	return result.RowsAffected(), nil
 }
 
+const updateOrderStatusFromReleased = `-- name: UpdateOrderStatusFromReleased :execrows
+UPDATE orders
+SET status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = $2),
+    updated_at = now()
+WHERE orders.id = $1
+  AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = $3)
+`
+
+type UpdateOrderStatusFromReleasedParams struct {
+	ID         uuid.UUID
+	Status     string
+	FromStatus string
+}
+
+// Settle-after-expiry only (FR-019): move an order out of a RELEASED state into
+// PAID because the gateway redelivered a notification saying it was paid.
+//
+// The query can express any from→to move; the payment domain cannot ask for one.
+// Its adapter binds both statuses at the call site to EXPIRED → PAID, which is
+// what makes FR-019d — never revive an order the gateway itself cancelled —
+// unreachable by construction rather than by a caller remembering the rule.
+//
+// Guarded on the order still being in the state the caller saw, for the same
+// reason UpdateOrderStatusIfPending is guarded on PENDING: two deliveries of the
+// same resend must produce one transition, not two, or the re-deduction that
+// accompanies it would run twice and oversell.
+//
+// Nothing here is reachable by a person asserting a payment. FR-022d forbids that
+// outright, and there is no endpoint, service method, or interface that offers it.
+func (q *Queries) UpdateOrderStatusFromReleased(ctx context.Context, arg UpdateOrderStatusFromReleasedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateOrderStatusFromReleased, arg.ID, arg.Status, arg.FromStatus)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateOrderStatusIfPending = `-- name: UpdateOrderStatusIfPending :execrows
 UPDATE orders
 SET status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = $2),
@@ -1400,28 +1437,6 @@ func (q *Queries) UpdatePaymentDetailsIfUnstarted(ctx context.Context, arg Updat
 		arg.PaymentQrString,
 		arg.PaymentExpiresAt,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const updatePaymentQR = `-- name: UpdatePaymentQR :execrows
-UPDATE orders
-SET payment_url = $2, payment_qr_string = $3, updated_at = now()
-WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING')
-`
-
-type UpdatePaymentQRParams struct {
-	ID              uuid.UUID
-	PaymentUrl      *string
-	PaymentQrString *string
-}
-
-// QR re-issue (7-minute refresh): swaps the payload WITHOUT touching the
-// deadline — the 14-minute window never extends (FR-015).
-func (q *Queries) UpdatePaymentQR(ctx context.Context, arg UpdatePaymentQRParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updatePaymentQR, arg.ID, arg.PaymentUrl, arg.PaymentQrString)
 	if err != nil {
 		return 0, err
 	}

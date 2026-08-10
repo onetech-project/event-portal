@@ -72,9 +72,14 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-local}
       SERVICE_VERSION: ${SERVICE_VERSION:-dev}
-      MIDTRANS_SERVER_KEY: ${MIDTRANS_SERVER_KEY:-}
-      MIDTRANS_CLIENT_KEY: ${MIDTRANS_CLIENT_KEY:-}
-      MIDTRANS_IS_PRODUCTION: ${MIDTRANS_IS_PRODUCTION:-false}
+      # Payment gateway. PG_BASE_URL and PG_CALLBACK_TOKEN have no default here
+      # on purpose — the API refuses to start without them, which is the whole
+      # point of FR-026. A `:-` fallback would substitute a value the operator
+      # never chose and turn a boot failure into a live misdirection.
+      PG_BASE_URL: ${PG_BASE_URL}
+      PG_SERVER_KEY: ${PG_SERVER_KEY:-}
+      PG_CLIENT_KEY: ${PG_CLIENT_KEY:-}
+      PG_CALLBACK_TOKEN: ${PG_CALLBACK_TOKEN}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_FROM: ${SMTP_FROM:-tickets@example.com}

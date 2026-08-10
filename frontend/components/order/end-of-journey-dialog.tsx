@@ -62,8 +62,8 @@ export function EndOfJourneyDialog({
 
         <DialogDescription className="pt-2 text-sm leading-5">
           {expired
-            ? "Sorry, your payment time has expired. The tickets have been released back on sale."
-            : "This order was cancelled. Your tickets were released back on sale."}
+            ? "Sorry, your payment time has expired. Please repeat your order."
+            : "This order was cancelled. Please repeat your order."}
         </DialogDescription>
 
         {/* Exactly one action (FR-024). The old "Repeat Order" link into the
