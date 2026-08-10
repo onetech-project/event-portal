@@ -16,7 +16,8 @@ The goal of this MVP is validation, not scalability. High availability, microser
 ### 1.2. Tech Stack
 *   **Frontend:** Next.js (App Router), TypeScript, TailwindCSS, TanStack Query, React Hook Form, Zod
 *   **Backend:** Golang 1.24+, **Echo v4**, PostgreSQL, **sqlc** (for type-safe SQL queries)
-*   **Infrastructure:** Docker, Docker Compose (PostgreSQL)
+*   **Infrastructure:** Docker, Docker Compose (PostgreSQL, Redis)
+*   **Cache:** Redis (single node) — read cache for the event list, ticket_type list, and order lists only, refreshed on every committed write. See Constitution Principle VII.
 *   **Payment:** Payment Gateway Abstraction (Initial: Midtrans SNAP Sandbox)
 *   **Email & PDF:** SMTP (`go-mail/mail` or `net/smtp`), PDF Generator (`maroto` or `gofpdf`), QR Generator (`go-qrcode`).
 
@@ -79,7 +80,9 @@ The goal of this MVP is validation, not scalability. High availability, microser
 A package request that carries any quota-like field (`quota`, `stock`, `inventory`, `remaining`, `capacity`) is **rejected**, not silently ignored: ignoring it would teach clients that packages hold stock.
 
 ### 1.6. Out of Scope
-Microservices (deployment), Kafka/RabbitMQ, Redis, Kubernetes, CQRS, Event Sourcing, Loyalty Points, Leaderboard, Multi-Organizer, Refunds, Coupons, Promotions, Waiting Room, Queue System, Seat Selection, Multi-Currency, Multi-Language.
+Microservices (deployment), Kafka/RabbitMQ, Kubernetes, CQRS, Event Sourcing, Loyalty Points, Leaderboard, Multi-Organizer, Refunds, Coupons, Promotions, Waiting Room, Queue System, Seat Selection, Multi-Currency, Multi-Language.
+
+Redis is in scope **only** as the single-node read cache described in §1.2 (Constitution Principle VII). Redis as a primary or sole store, and Redis-backed queues, sessions, distributed locks, and pub/sub, remain out of scope.
 
 **Packages (bundles) are in scope and are not "Promotions".** A promotion is a rule that alters the price of a purchase; a package is a sellable product with its own identity, price, and sales window that draws down the quota of the ticket types it contains. The out-of-scope ban on promotions still stands: there are no discount codes, percentage-off rules, or price-modifying engines.
 
