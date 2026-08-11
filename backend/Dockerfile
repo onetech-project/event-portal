@@ -3,26 +3,38 @@
 # ---- Stage 1: build ---------------------------------------------------------
 FROM golang:1.26-alpine AS builder
 
+# The base image ships no git, and `cdtc` is replaced by a VCS path
+# (gitlab.pg-poppay.com/...) whose pseudo-version can only be resolved by a git
+# subprocess. Vendored builds never reach that code path, but a fresh clone does.
+RUN apk add --no-cache git
+
 WORKDIR /src
 
-# Dependencies are copied and downloaded first so this layer is reused whenever
-# only application code changes.
-COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
-
+# Everything is copied in one step because dependency resolution depends on
+# whether vendor/ is present, which is only knowable after the copy. The module
+# and build caches below carry across builds regardless, so splitting the layer
+# would buy little.
 COPY . .
 
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
+# With backend/vendor/ in the build context (the normal case — .dockerignore does
+# not exclude it) the compile runs in vendor mode: no network, no credentials.
+# Without it, the private cdtc module has to be fetched, which needs GOPRIVATE so
+# Go skips the proxy and sumdb, and a netrc mounted as a build secret so both the
+# ?go-get=1 discovery and the git fetch authenticate. See CDTC_SETUP.md.
+#
 # CGO_ENABLED=0 produces a static binary, which is what lets the final stage be a
 # scratch-based distroless image with no libc.
 # -trimpath and the ldflags strip local paths, the symbol table, and DWARF, which
 # both shrinks the binary and keeps build-host paths out of the image.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=secret,id=netrc,target=/root/.netrc \
+    export GOPRIVATE='gitlab.pg-poppay.com/*' GOAUTH=netrc && \
+    if [ ! -d vendor ]; then go mod download; fi && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/api ./cmd/api && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

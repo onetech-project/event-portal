@@ -309,30 +309,42 @@ works after a local `go mod vendor`.
 On a **fresh clone or CI checkout** there is no `vendor/` (it's gitignored), so the
 compile has to fetch the private module and fails without credentials.
 
-> Note that `go mod download` at `backend/Dockerfile:12` is *not* the step that
-> breaks — at that layer only `go.mod` and `go.sum` have been copied, there are no
-> packages to resolve, and Go's pruned module graph downloads nothing at all. The
-> failure surfaces later, at the `go build` on `Dockerfile:25`.
+> **Two separate failures hide here, and the first one bites even when credentials
+> are present.** `golang:1.26-alpine` ships **no `git`**, and the `replace` directive
+> points at a VCS path whose pseudo-version can only be resolved by a git subprocess.
+> That produced
+> `unable to resolve git version: failed to execute git version: exec: "git": executable file not found in $PATH`
+> from `go mod download` — so the builder stage now installs git with `apk add`.
+>
+> The dependency layer also used to run `go mod download` *before* `COPY . .`, which
+> forced module-mode resolution of `cdtc` even on machines that had a perfectly good
+> `vendor/` tree sitting in the context. The Dockerfile now copies the source first
+> and only downloads when `vendor/` is absent.
 
 **Simplest fix — commit the vendor tree.** Drop `vendor/` from the root `.gitignore`
 and check `backend/vendor/` in. No credentials anywhere in the build, and the image is
 reproducible from the repo alone.
 
-**Otherwise, mount a netrc as a build secret** on the build step (not the download
-step), which keeps it out of the image layers:
+**Otherwise, mount a netrc as a build secret**, which keeps it out of the image
+layers. This is what `backend/Dockerfile` does today:
 
 ```dockerfile
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=secret,id=netrc,target=/root/.netrc \
+    export GOPRIVATE='gitlab.pg-poppay.com/*' GOAUTH=netrc && \
+    if [ ! -d vendor ]; then go mod download; fi && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    GOPRIVATE='gitlab.pg-poppay.com/*' GOFLAGS=-mod=mod \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/api ./cmd/api
 ```
 
 ```fish
 docker build --secret id=netrc,src=$HOME/.netrc .
 ```
+
+The secret is optional to BuildKit (`required=false` is the default), so a vendored
+build needs no `--secret` flag at all. `scripts/deploy.sh` passes it automatically
+when `backend/vendor/` is missing, and fails loudly if neither is available.
 
 In GitLab CI, write the secret from a masked variable rather than mounting `$HOME`.
 
