@@ -500,3 +500,125 @@ they are what would have made it a five-minute diagnosis.
 **Guard**: `apiFetch`'s contract (`body?: unknown`, stringified internally) makes the mistake easy to
 repeat and impossible to see at the call site. A test asserting the wire body of the resend request
 parses to an object with `order_id` pins the behaviour where it actually broke.
+
+---
+
+## R16. The callback endpoint answers in the envelope, and the refusal needs a registered 200-band code
+
+**Trigger** (clarification 2026-08-11): the callback endpoint answers a successful notification with
+no body at all, while the one path that *does* answer with a body — the FR-019c settle refusal —
+writes a bare object outside the envelope. Three paths, three shapes.
+
+**Finding, and it narrows the work considerably**: the error paths are *already* correct.
+`apperr.Error.Response()` renders `Body{Code: Numeric(status, code), Message, Data}` — the same
+`{code, message, data}` envelope successes use — and `httpx.ErrorHandler` writes it for every returned
+error. So the authentication refusal, the unreadable-body refusal, and the internal fault already
+satisfy FR-012e without a line changing. Only two writes deviate, both in `payment/handler.go`:
+
+| Line | Today | Required |
+| --- | --- | --- |
+| `c.NoContent(http.StatusOK)` | 200, no body | 200, `{code: 200000, message: "Success", data: null}` (FR-012f) |
+| `c.JSON(200, toSettleRefusedResponse(refused))` | bare object, no envelope | 200, `{code: 200001, message: …, data: {shortfall}}` (FR-019e) |
+
+**Decision — render the refusal through `apperr`, not through a second envelope writer.** Register
+`CodeTicketsUnavailable = "TICKETS_UNAVAILABLE"` and add one arm to `apperr.Numeric`:
+
+```
+case CodeTicketsUnavailable:
+    return 200001
+```
+
+then have the handler return `apperr.New(http.StatusOK, apperr.CodeTicketsUnavailable, msg).WithData(shortfall)`.
+
+**Rationale**: `Numeric` is the single place a numeric envelope code is derived, and FR-019e's whole
+point is that the code is what discriminates. Routing the refusal around it would create a second
+derivation site and the invariant would hold only by everyone remembering. The shared handler also
+emits the `request rejected` warn line for free, which is wanted here — a refused settle is exactly
+what an operator should be able to find in the logs.
+
+**The trap this closes, which is the reason the code must be *registered* rather than left to the
+default.** `Numeric`'s fallback is `status * 1000`. An `apperr` carrying HTTP 200 and any unregistered
+code therefore renders `200000` — byte-identical to `httpx.SuccessCode`. A refusal would announce
+itself as a success and no test asserting on the status line would catch it, because the status line
+is 200 in both cases by design (FR-019c). `200001` is free: no 200-band sub-code exists today, and the
+scheme's `status × 1000 + sub-code` shape is preserved, so no envelope code contradicts the status it
+sits behind.
+
+**Alternatives considered**:
+
+| Alternative | Rejected because |
+| --- | --- |
+| A new `httpx.RespondWithCode(c, status, code, …)` writing the envelope directly | A second place numeric codes are chosen, competing with `Numeric`. The registry is the thing that makes FR-019e checkable. |
+| Keep `200000` and put the refusal only in `data` | Makes the refusal indistinguishable from an acknowledgement to anything reading the code, on a status line that is 200 either way. Defeats FR-019e outright. |
+| Reuse `400002 INSUFFICIENT_QUOTA` inside the 200 | An envelope code whose leading digits contradict the status line — the per-endpoint quirk the envelope exists to prevent. |
+| Report the applied outcome in `data` on every acknowledgement | Rejected at clarification (FR-012f). It duplicates what FR-018 records and FR-022c serves, in a transient body that can drift from the durable one. |
+
+**Consequence for the `SettleRefusedResponse` DTO**: it loses `order_number`, `error`, and `message`
+— the envelope's `code` and `message` now carry the last two, and the order number is already the
+notification's own `ri`. What survives as `data` is the shortfall list, which is the part an operator
+cannot derive from anywhere else (FR-022e).
+
+**Watch item, not a blocker**: returning a non-nil error with a 200 status is unusual, and anything
+that counts handler errors as failures — span status, an error-rate metric — will count this one. No
+such middleware exists in this build today. If one is added, this path needs an explicit exemption
+rather than a silent reclassification.
+
+---
+
+## R17. The signalled anomalies name themselves; the uneventful ones do not
+
+**Trigger** (observed 2026-08-11, on a live server): a notification for `ORD-20260811-S8HsD72`
+matched no order. The server logged it twice at ERROR — `unattributable payment notification`,
+`unknown order reference` — and answered `{"code":200000,"message":"Success","data":null}`. A
+notification that matched nothing reported success.
+
+**What R16 got wrong.** FR-012f made *every* 200 identical, reasoning that the durable record
+(FR-018) is the account of what happened and a transient body could drift from it. That reasoning
+survives for the uneventful outcomes and fails for the anomalies: it made "we applied your payment"
+and "we have no idea what order this is" the same bytes, so the only way to discover the second was
+to go reading logs — which is exactly the position the resend defect of Increment 2 left an operator
+in, for the same reason.
+
+**Decision**: the line is the **operational signal**, not whether the order moved. Five outcomes raise
+a signal and now name themselves in the envelope's code; everything else stays `200000`.
+
+| Outcome | Code | Signal? |
+| --- | --- | --- |
+| Payment applied, pending, repeat of a recorded outcome | `200000` | no — routine |
+| Settle refused, quota short (FR-019c) | `200001` | yes |
+| Unknown reference (FR-013) | `200002` | yes |
+| Not a deposit (FR-020) | `200003` | yes |
+| Indeterminate/unrecognised status (FR-014) | `200004` | yes |
+| Contradiction of a paid order (FR-016b) | `200005` | yes |
+| Completion for a gateway-cancelled order (FR-019d) | `200006` | yes |
+
+**Why the signal is the right line.** It already exists, and it already encodes the judgement "a
+person should know about this" — FR-014's table has the column. Reusing it means one rule rather than
+a per-case argument, and it keeps the repeat delivery quiet: at-least-once makes a duplicate the
+*normal* case (FR-012c guarantees up to four), so flagging it would bury the five that matter in the
+noise those retries generate. That is the same trap FR-016b already names for alerting, applied to
+the response body.
+
+**Mechanism**: the service returns sentinel errors (`ErrNotificationUnknownOrder` and four siblings);
+the handler maps them to codes. Sentinels rather than a transport-shaped type keep `apperr` out of
+the service, and they are what the service tests assert on — twelve existing assertions changed from
+`require.NoError` to `require.ErrorIs`, which is the honest reading of what those tests always meant.
+
+**Precedence**, which the live check surfaced and which is worth stating because more than one code
+can apply: deposit check → order lookup → status mapping. An unknown reference carrying `s:99`
+answers `200002`, not `200004`. The order is not arbitrary — a status cannot be mapped onto an order
+that was never found.
+
+**Messages carry no order-specific detail.** The endpoint is authenticated, so this is not the
+enumeration concern governing the resend endpoint (FR-021l). It is that the durable record is the
+account of what happened, and a response restating it could drift. What the caller gets is the *kind*
+of problem — enough to tell a misconfigured gateway from a vanished order without a log search.
+
+**Alternatives considered**:
+
+| Alternative | Rejected because |
+| --- | --- |
+| Report only the unknown reference | The observed case, but withdrawal and unrecognised-status are the same defect a day later. "Always send the error" reads as a rule, not a patch. |
+| Report anything that changed no order | Sweeps in pending and the duplicate retry. Retries are guaranteed and routine; flagging them is how the five that matter get buried. |
+| Distinguish by HTTP status | Forbidden by FR-012c — a non-200 costs four deliveries and still loses the notification. |
+| Put the detail in `data` | Duplicates the durable record in a transient body, the objection R16 raised and which still holds. The code names the kind; the record holds the specifics. |

@@ -12,6 +12,8 @@ Three capabilities are withdrawn because the new contract cannot support them or
 
 The whole feature is additive-and-subtractive within `internal/payment` plus a thin frontend change. **It requires no database migration**: gateway configuration moves to environment variables, and what this system concludes about a notification rides on marker rows in the existing `payments` audit table — the same technique the retired `QR_REISSUED` marker already used.
 
+**Late addition (clarification 2026-08-11, second part)**: the callback endpoint answers in the same `{code, message, data}` envelope as the rest of the API. It currently speaks three shapes across its paths — an empty 200 on success, a bare object on the FR-019c refusal, and the proper envelope on errors (FR-012e). The error paths turn out to be already correct (`apperr.Error.Response()` renders that envelope and the shared handler writes it), so the change is two writes in `payment/handler.go` plus one registry arm in `pkg/apperr`. An acknowledgement carries **no data** (FR-012f) — what a notification did is recorded under FR-018 and read through the per-order history, not echoed back — which leaves the envelope's numeric code as the only thing separating a refusal from an acknowledgement, since both leave on a 200 status line. That makes `200001`/`TICKETS_UNAVAILABLE` load-bearing rather than cosmetic: `Numeric`'s fallback would render an unregistered code on a 200 as `200000`, identical to success. See [research.md R16](./research.md). No migration.
+
 **Late addition (clarification 2026-08-11)**: the confirmation screen's ticket-email resend gains a cooldown the guest can see. The endpoint belongs to spec 008; what is built here is the contract that makes its limit legible — the remaining seconds on every answer, a validation refusal for a body that cannot be keyed, a log line per attempt, and a countdown that re-arms itself. It reaches `internal/notification` and `pkg/httpx` rather than `internal/payment`, and it carries a one-line frontend bug fix that must land ahead of it: the resend body is currently double-encoded, so the endpoint has been answering "accepted" while sending nothing. Still no migration.
 
 ## Technical Context
@@ -54,6 +56,10 @@ The whole feature is additive-and-subtractive within `internal/payment` plus a t
 
 Re-evaluated after design: **all gates still pass**, one of them only after an amendment. The design decision that could have broken Principle II — reading an order's payment history and what it holds — was resolved by recording conclusions at detection time and taking order and quota details through the provider interfaces, rather than deriving either from a cross-domain JOIN. Principle IV needed genuine extension rather than reinterpretation, and got it (3.1.0). No new violation appeared.
 
+Re-checked after the 2026-08-11 callback-response clarification: **still all pass, no amendment needed, and one gate is satisfied more literally than before.** Principle IV already anticipated this shape — "the handler still answers `200 OK` (a body may carry the refusal; the status code may not, because a retry would fail identically)". The constitution granted the refusal a body; what the clarification adds is how that body identifies itself, which the principle left open. FR-019e fills the gap in the direction the principle points.
+
+Principle III (DTO Isolation) is the other one touched, and the change moves toward it: the refusal stops being a bare domain-shaped object on the wire and becomes the envelope every other endpoint returns, while the acknowledgement needs no DTO at all. No sqlc struct crosses the wire, no domain boundary is crossed, no table moves. Worth stating rather than assuming: modelling a deliberate 200 as an `*apperr.Error` does not weaken Principle IV's idempotency guarantees — the refusal is the branch where *nothing* was applied, so there is no effect to duplicate, and it is reached only after the notification is durably recorded.
+
 Re-checked again after the 2026-08-11 clarification: **still all pass, no amendment needed.** The cooldown is transport state in a shared helper and a handler decision in `notification`; it crosses no domain boundary, adds no table, and changes no order lifecycle. The one thing worth stating rather than assuming: moving the limit out of middleware and into the handler does not weaken it. The window is consulted before the order lookup, so every attempt past the body check still spends it (FR-021m), and the key is the order number exactly as before — what changes is that a request the server cannot key now costs nobody anything instead of costing everybody a window.
 
 ## Project Structure
@@ -82,9 +88,12 @@ backend/
 │                                       #          build the resend Cooldown, drop its route group
 ├── pkg/config/config.go                # CHANGED: PG_* vars; drop IS_PRODUCTION, QR_REFRESH_AFTER;
 │                                       #          collapse PAYMENT_EXPIRY + PAYMENT_WINDOW
+├── pkg/apperr/apperr.go                # CHANGED: + CodeTicketsUnavailable; Numeric → 200001 (R16)
 ├── pkg/httpx/
 │   ├── cooldown.go                     # NEW: keyed bucket reporting its own remaining time
 │   ├── cooldown_test.go                # NEW: seconds on both answers; eviction > window
+│   ├── envelope.go                     # UNCHANGED — Respond(c, 200, nil) is the acknowledgement
+│   ├── error_handler.go                # UNCHANGED — already envelopes every error path
 │   └── rate_limit.go                   # CHANGED: RateLimitPerBodyField + bodyField DELETED
 ├── internal/notification/
 │   ├── handler.go                      # CHANGED: bind → 400; cooldown → 429; log every outcome
@@ -98,8 +107,11 @@ backend/
 │   ├── status.go                       # CHANGED: map cdtc status enum, not Midtrans strings
 │   ├── service.go                      # CHANGED: retry+duplicate handling, contradiction markers,
 │   │                                   #          settle-on-expiry routing; drop ReissueQR/RefreshStatus
-│   ├── handler.go                      # CHANGED: /v1.0/callback/exec; drop refresh + reissue routes
+│   ├── handler.go                      # CHANGED: /v1.0/callback/exec; drop refresh + reissue routes;
+│   │                                   #          NoContent → enveloped ack; refusal via apperr
 │   ├── reconcile.go                    # NEW: settle-after-expiry + the two admin read views
+│   ├── reconcile_dto.go                # CHANGED: SettleRefusedResponse reduced to the shortfall list
+│   │                                   #          (code + message move onto the envelope)
 │   ├── repository.go / queries/        # CHANGED: marker queries; drop CountReissuedQRs
 │   ├── midtrans.go + midtrans_test.go  # DELETED
 │   ├── refresh_test.go, reissue_test.go# DELETED

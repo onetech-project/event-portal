@@ -46,17 +46,23 @@ type OrderHoldResponse struct {
 	Remaining      int32     `json:"remaining"`
 }
 
-// SettleRefusedResponse is the body of a 200 answering a redelivered
-// notification that could not settle its order (FR-019c).
+// SettleRefusedMessage is the human-readable half of the refusal, carried by the
+// envelope's message field rather than by the payload below.
+const SettleRefusedMessage = "Tickets are no longer available. Add quota and resend."
+
+// SettleRefusedResponse is the envelope's `data` payload on a 200 answering a
+// redelivered notification that could not settle its order (FR-019c).
 //
 // The status code is 200 because a retry would fail identically and the gateway
-// would exhaust its budget on it. The body is what carries the refusal — for our
-// own record and for an operator reading it, since the gateway does not read
-// response bodies at all.
+// would exhaust its budget on it. That leaves the status line unable to carry the
+// refusal, so the envelope's numeric code does — 200001 / TICKETS_UNAVAILABLE
+// (FR-019e). This struct holds only what the code and message cannot: which
+// ticket types are short and by how much, which is what an operator needs to size
+// the top-up before requesting the next resend (FR-022e).
+//
+// The order number is deliberately not echoed. It is the notification's own `ri`,
+// so the only caller that can reach this response is the one that just sent it.
 type SettleRefusedResponse struct {
-	OrderNumber string `json:"order_number"`
-	Error       string `json:"error"`
-	Message     string `json:"message"`
 	// Shortfall names each ticket type that cannot cover the order's hold, and by
 	// how much, so the top-up can be sized without guessing.
 	Shortfall []QuotaShortfallResponse `json:"shortfall"`
@@ -110,10 +116,5 @@ func toSettleRefusedResponse(err *SettleRefusedError) SettleRefusedResponse {
 			Remaining:      s.Remaining,
 		})
 	}
-	return SettleRefusedResponse{
-		OrderNumber: err.OrderNumber,
-		Error:       "TICKETS_UNAVAILABLE",
-		Message:     "The tickets for this order are no longer available, so the payment could not be settled. Add quota and request the notification again.",
-		Shortfall:   short,
-	}
+	return SettleRefusedResponse{Shortfall: short}
 }

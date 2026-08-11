@@ -138,6 +138,7 @@ happens.
 - [X] T109 [US6] Complete the success path in `backend/internal/payment/reconcile.go` (FR-019, FR-019a): write a `SETTLED_AFTER_EXPIRY` marker carrying the prior status and the quota lines re-taken, raise an operational signal because settling an order the deadline already released is not routine traffic, publish the paid status to the order's stream, and hand off to `fulfillAsync` so tickets and email leave by the same route a first-time notification uses
 - [X] T110 [US6] Confirm the settle is idempotent under redelivery in `backend/internal/payment/service.go` (US6 scenario 5, FR-012d): a second delivery meets the existing already-`PAID` short-circuit *before* reaching the settle path, so no second tickets, no second email, no second deduction. Two concurrent redeliveries are separated by `SettleExpired`'s guarded `UPDATE` — one applies, the other reports not-applied and returns quietly. Verify both rather than assume; this is the guarantee the whole recovery flow rests on
 - [X] T111 [US6] Carry the refusal out to the wire: `Service.HandleNotification` must report the quota refusal distinguishably, and `Handler.callback` in `backend/internal/payment/handler.go` must answer **200 with a body naming the unavailability** instead of the current bare `c.NoContent(http.StatusOK)` (FR-019c). Every other outcome keeps its empty 200. A non-200 here would spend the gateway's whole retry budget on an attempt guaranteed to fail identically
+  > **Partly superseded by Increment 3** (FR-012e/f, FR-019e). The refusal-carries-a-body decision stands and is unchanged; the two details that do not are "a body" — it is now the standard envelope with the shortfall in `data` (T148, T149) — and "every other outcome keeps its empty 200", which FR-012f reverses: no answer is empty. Left checked because it was completed as written; see T147–T151.
 
 ### The two read views an operator needs before requesting a resend
 
@@ -563,3 +564,161 @@ path could produce it against a current server too. `ResendRow` now falls back t
 (`FALLBACK_COOLDOWN_SECONDS`, 5s) whenever the server names no wait — on the acceptance as well as the
 refusal. Recorded as **FR-021j-i**, with two tests. The floor is deliberately far shorter than any
 real window: it stops a burst without inventing a deadline a guest could be stranded behind.
+
+---
+
+# Increment 3 — the callback endpoint answers in the envelope (2026-08-11)
+
+**Trigger**: an observed gap, not a planned one. `POST /v1.0/callback/exec` returns no body at all on
+the ordinary path, while the one path that does answer with a body — the FR-019c settle refusal —
+writes a bare object outside the envelope every other endpoint speaks. Three shapes across three
+paths. Clarification session 2026-08-11 turned that into FR-012e, FR-012f, FR-019e, SC-025, SC-026,
+one edge case, and two acceptance scenarios on User Story 2.
+
+**Story labels**: `[US2]` for the acknowledgement (FR-012e/f, US2 scenarios 12–13) and `[US6]` for the
+refusal (FR-019e, US6 scenario 3). Unlike Increment 2 this work does map onto real user stories, so it
+borrows no label it has not earned.
+
+**Baseline**: T126–T144 complete. This increment is T145–T155.
+
+**Read first**: [research.md](./research.md) R16, [contracts/api.md](./contracts/api.md)
+"`POST /v1.0/callback/exec`", [contracts/gateway.md](./contracts/gateway.md) §2 Response,
+[data-model.md](./data-model.md) "Callback response shapes", [quickstart.md](./quickstart.md)
+Scenarios 2 and 6.
+
+**Smaller than it looks.** The error paths are already correct: `apperr.Error.Response()` renders the
+same `{code, message, data}` envelope and `httpx.ErrorHandler` writes it for every returned error, so
+authentication failure, unreadable body, and internal fault already satisfy FR-012e untouched. Two
+writes in `payment/handler.go` deviate, and one registry arm is missing.
+
+---
+
+## Phase 20: Foundational — register the code before anything can emit it
+
+**Purpose**: `apperr.Numeric`'s fallback is `status * 1000`. Until `TICKETS_UNAVAILABLE` is registered,
+an `apperr` carrying HTTP 200 renders `200000` — byte-identical to `httpx.SuccessCode`. Wiring the
+handler first would ship a refusal that announces itself as a success, and no test asserting on the
+status line would catch it, because 200 is correct in both cases by design.
+
+**⚠️ CRITICAL**: T145 must land before T148.
+
+- [X] T145 [US6] Register the refusal code in `backend/pkg/apperr/apperr.go`: add `CodeTicketsUnavailable = "TICKETS_UNAVAILABLE"` to the const block (beside the other payment codes, ~line 29), and add `case CodeTicketsUnavailable: return 200001` to `Numeric` (~line 78). Note in a comment why the 200 band exists at all — FR-019c requires a refusal that must not be retried to travel on a 200, so this is the first envelope code whose status is a success; the sub-code is what carries the disagreement
+- [X] T146 [P] [US6] Test the registry in `backend/pkg/apperr/apperr_test.go`: `Numeric(200, CodeTicketsUnavailable)` is `200001`, and — the assertion that matters — `Numeric(200, "ANYTHING_UNREGISTERED")` is `200000`, equal to `httpx.SuccessCode`. The second is not a curiosity: it pins the collision this task exists to avoid, so a future 200-band code added without a registry arm fails here rather than silently reporting success (research R16)
+
+**Checkpoint**: A 200-status error can name itself without colliding with success.
+
+---
+
+## Phase 21: The callback's two writes
+
+**Goal**: One shape across every path, and a refusal that is tellable from an acknowledgement by the
+envelope code alone.
+
+**Independent Test**: Post an unknown reference, a withdrawal (`tt:1`), an unrecognised `s`, and a
+repeat against a paid order. All four return byte-identical
+`{"code":200000,"message":"Success","data":null}`. Then post a completed payment against an expired
+order whose quota is short: still `200`, but `code` is `200001` and `data.shortfall` names the gap.
+
+- [X] T147 [US2] Replace `c.NoContent(http.StatusOK)` at the end of `Handler.callback` in `backend/internal/payment/handler.go` (line ~111) with `httpx.Respond(c, http.StatusOK, nil)`, which writes `{"code":200000,"message":"Success","data":null}` (FR-012e, FR-012f). `pkg/httpx/envelope.go` needs no change — `Respond` with a nil payload already produces exactly this. Update the function's doc comment: it currently explains only *which status* each outcome gets, and the response rule now also governs the body
+- [X] T148 [US6] Render the refusal through `apperr` in `backend/internal/payment/handler.go` (lines ~97–100). Replace `c.JSON(http.StatusOK, toSettleRefusedResponse(refused))` with `return apperr.New(http.StatusOK, apperr.CodeTicketsUnavailable, <the existing message>).WithData(toSettleRefusedResponse(refused))`. The shared error handler writes the envelope and emits a `request rejected` warn line carrying the code — wanted here, because a refused settle is exactly what an operator should be able to find in the logs. Keep the comment explaining why this is a 200; extend it to say the code is now what distinguishes it (FR-019e)
+- [X] T149 [US6] Reduce `SettleRefusedResponse` in `backend/internal/payment/reconcile_dto.go` (lines ~49–71) to the `data` payload it now is: drop `OrderNumber`, `Error`, and `Message` — the envelope's `code` and `message` carry the latter two, and the order number is the notification's own `ri`, echoed back to a caller that already sent it. Keep `Shortfall []QuotaShortfallResponse` under `json:"shortfall"`, so the body reads `"data": {"shortfall": [...]}` per [contracts/api.md](./contracts/api.md). `toSettleRefusedResponse` keeps its name and returns the reduced struct; the message string it built moves to T148's call site
+- [X] T150 [US6] Update the quota-shortfall case in `backend/internal/payment/handler_test.go` (lines ~150–170) to decode `apperr.Body` rather than a bare `payment.SettleRefusedResponse`: assert `body.Code == 200001` alongside the existing `http.StatusOK`, and read the shortfall from `body.Data`. State in a comment that the status assertion alone is insufficient — it passes on a plain acknowledgement too, which is the whole reason FR-019e puts the discriminator in the code
+- [X] T151 [P] [US2] Add an acknowledgement-uniformity case to `backend/internal/payment/handler_test.go`: drive the four outcomes FR-012c answers 200 without acting on — unknown `ri`, `tt:1` withdrawal, unrecognised `s`, and a repeat against an already-paid order — and assert all four produce **byte-identical** response bodies equal to `{"code":200000,"message":"Success","data":null}`. This is the FR-012f guarantee and nothing today would catch its erosion; it is the same shape of assertion as Increment 2's identical-answer test, for the same reason
+
+**Checkpoint**: Every callback answer parses as the envelope, and the refusal is distinguishable without reading `data`.
+
+---
+
+## Phase 22: Polish & Cross-Cutting Concerns
+
+- [X] T152 [P] [US6] Sync `ARCHITECTURE.md` (line ~52, Quota Re-deduction): "answers 200 with a body naming the shortfall" is still true but no longer complete — name the envelope code that separates it from an acknowledgement. `README.md` needs no change; its `PG_CALLBACK_TOKEN` row already says a mismatch is the only non-200 and stays correct
+- [X] T153 [US2] Walk [quickstart.md](./quickstart.md) Scenario 2 against a running stack, including the `jq -e '.code'` check on every call and the four-outcome uniformity comparison, then Scenario 6 steps 4–5 confirming `200001` then `200000` on the same endpoint with the same status line
+  > **Walked against a purpose-built binary on port 8090**, not the stack already on 8080 — that process could not be identified and predates these changes, which is the stale-binary trap the Increment 2 follow-up recorded. Verified live: the `jq -e '.code'` gate (which an empty body fails outright), byte-identical `{"code":200000,"message":"Success","data":null}` across unknown-reference, withdrawal, unrecognised-status and pending, and `{"code":401001,…}` on a missing token. **Not walked live: Scenario 6 steps 4–5**, which need a seeded expired order with short quota; the `200001` refusal is instead covered by `TestCallbackEndpointAnswers200WithAReasonWhenTheSeatsAreGone` against the same Postgres through the same handler and error handler.
+- [X] T154 [P] [US2] Run the regression grep: `rg "NoContent" backend/internal/payment/ --glob '!vendor'` must return nothing. A reintroduced empty answer is invisible to any test asserting only on status
+- [X] T155 [US2] Run `go test ./...` in `backend/`. The frontend is untouched by this increment — no `queries.ts`, `types.ts`, or component change — so the Vitest suite needs re-running only to confirm the two pre-existing `selection-summary.test.tsx` failures have not grown
+
+---
+
+## Increment 3 — Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Phase 20 (T145–T146)** — blocks Phase 21. T145 specifically blocks T148; emitting an unregistered
+  200-band code renders `200000` and the refusal becomes indistinguishable from success.
+- **Phase 21 (T147–T151)** — T147 and T148 touch the same function in the same file and are strictly
+  sequential. T149 must precede T148's call site compiling. T150 follows T149 (it decodes the reduced
+  shape); T151 is independent of both.
+- **Phase 22 (T152–T155)** — all follow Phase 21. T153 needs a running stack.
+
+### Critical Path
+
+T145 → T149 → T148 → T150 → T153 → T155
+
+T147 can land any time after T145 and is independently shippable: it fixes the empty acknowledgement
+without touching the refusal at all.
+
+### Parallel Opportunities
+
+- T146 runs alongside T147 — different files, no shared symbol.
+- T151 runs alongside T150 — same file, different test function; sequence them only if the repo's
+  convention is one editor per file.
+- T152 and T154 are documentation and a grep; both run any time after Phase 21.
+
+---
+
+## Increment 3 — Implementation Strategy
+
+### MVP scope
+
+**T145 + T147 alone close the reported gap.** The endpoint stops returning nothing, and every
+acknowledgement becomes the envelope. That is the whole of what was observed. T148–T151 fix the
+second, unreported inconsistency found while reading the handler — the refusal writing a bare object
+outside the envelope — and they are worth doing in the same change precisely because the endpoint
+having *one* shape is the requirement, not having a better one on the common path.
+
+### What is deliberately not in this list
+
+- **No change to what the acknowledgement reports.** FR-012f settles this: `data` is null, and what a
+  notification did is read from the `payments` record through the per-order history endpoint. A
+  response naming the outcome would be a second, transient account of something already recorded
+  durably, and the two could disagree.
+- **No frontend work.** Nothing in the browser reads this endpoint; the gateway is its only caller.
+- **No change to the status codes.** FR-012c is untouched — the 200/non-200 rule is exactly as before,
+  and this increment only gives each answer a body.
+
+### Watch item, carried forward
+
+Returning a non-nil error with a 200 status is unusual, and anything that counts handler errors as
+failures — span status, an error-rate metric — will count the refusal. No such middleware exists in
+this build. If one is added, this path needs an explicit exemption rather than a silent
+reclassification into the failure count.
+
+---
+
+# Increment 4 — signalled anomalies name themselves (2026-08-11)
+
+**Trigger**: observed on a live server. A notification whose reference matched no order logged twice
+at ERROR and answered `{"code":200000,"message":"Success","data":null}`. Reported as "if the order is
+not found it didn't send the response message, it should — keep the status but the error should
+always be sent."
+
+**Scope decision**: not just the unknown reference. Every outcome that raises an operational signal
+names itself in the envelope's code (FR-012g); the uneventful ones stay uniform (FR-012f). See
+[research.md](./research.md) R17 for why the signal is the line.
+
+**Baseline**: T145–T155 complete. This increment is T156–T161.
+
+- [X] T156 [US2] Add five sentinel errors to `backend/internal/payment/service.go` — `ErrNotificationUnknownOrder`, `ErrNotificationNotDeposit`, `ErrNotificationUnknownStatus`, `ErrNotificationContradiction`, `ErrNotificationOrderCancelled` — and return them from the five branches that previously returned nil: the non-deposit guard and the unknown-order guard in `HandleNotification`, and the contradiction, unrecognised-status and cancelled-order branches in `applyProviderResult`. Both functions have exactly one caller, so the change is contained
+- [X] T157 [US2] Extend the 200 band in `backend/pkg/apperr/apperr.go` with `CodeNotificationOrderUnknown` → `200002`, `CodeNotificationNotDeposit` → `200003`, `CodeNotificationStatusUnknown` → `200004`, `CodeNotificationContradiction` → `200005`, `CodeNotificationOrderCancelled` → `200006`, each registered in `Numeric` for the reason T145 records — the fallback renders `200000` and would report an anomaly as success
+- [X] T158 [US2] Map the sentinels to codes in `backend/internal/payment/handler.go` via a `notificationNotice` helper, applied before the generic `if err != nil` so none of them becomes a 500. Keep the mapping in the handler rather than the service: the domain reports what happened, the transport decides how to say it
+- [X] T159 [US2] Narrow `TestCallbackEndpointAnswersEveryAcknowledgementIdentically` in `backend/internal/payment/handler_test.go` to the genuinely uneventful outcomes — payment applied, pending, repeat on a paid order — and add `TestCallbackEndpointNamesEverySignalledAnomaly` covering all five with their codes, asserting each keeps a 200, carries a non-empty message, carries null data, and does not act on the order
+- [X] T160 [US2] Update the twelve `require.NoError` assertions in `backend/internal/payment/service_test.go` and `backend/internal/payment/reconcile_test.go` that covered these branches to `require.ErrorIs` against the matching sentinel. They asserted "this is not an error" where the code always meant "this changed nothing and someone should know"
+- [X] T161 [US2] Sync the artifacts: FR-012f narrowed and FR-012g added in [spec.md](./spec.md) with SC-027, the response tables in [contracts/gateway.md](./contracts/gateway.md) and [contracts/api.md](./contracts/api.md), the code table in [data-model.md](./data-model.md), [quickstart.md](./quickstart.md) Scenario 2, and R17 in [research.md](./research.md)
+
+**Verified**: full backend suite, 16 packages, zero skips against the test database. Then live against
+a rebuilt binary on a spare port — the reported payload now answers `200002` with a readable message,
+a withdrawal answers `200003`, and the status line stays `200` throughout so the gateway still never
+retries. Auth failure remains the only non-200.
+
+**Precedence worth remembering**: deposit check → order lookup → status mapping. An unknown reference
+carrying `s:99` answers `200002`, not `200004` — a status cannot be mapped onto an order never found.

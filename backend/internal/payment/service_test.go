@@ -373,7 +373,8 @@ func TestTerminalFailureAfterPaidLeavesTheOrderPaidAndRaisesADispute(t *testing.
 			f := newWebhookFixture(t)
 
 			require.NoError(t, f.notify(t, status.Completed))
-			require.NoError(t, f.notify(t, s))
+			require.ErrorIs(t, f.notify(t, s), payment.ErrNotificationContradiction,
+				"a contradiction names itself in the response (FR-012g)")
 
 			assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID),
 				"nothing but an attributable staff action may leave PAID")
@@ -391,7 +392,7 @@ func TestADisputeKeepsTheAuditRowForTheContradictingPayload(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, f.notify(t, status.Completed))
-	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
 
 	var raw int
 	require.NoError(t, f.pool.QueryRow(ctx,
@@ -415,7 +416,8 @@ func TestCompletedForACancelledOrderIsNotRevived(t *testing.T) {
 	f := newWebhookFixture(t)
 
 	require.NoError(t, f.notify(t, status.Cancel))
-	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled,
+		"a completion for a cancelled order is reported, never silently dropped (FR-012g)")
 
 	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
@@ -435,7 +437,7 @@ func TestCompletedForACancelledOrderKeepsItsAuditRow(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, f.notify(t, status.Cancel))
-	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled)
 
 	var raw int
 	require.NoError(t, f.pool.QueryRow(ctx,
@@ -494,7 +496,7 @@ func TestCancelAfterPaidDoesNotRestoreQuota(t *testing.T) {
 	f := newWebhookFixture(t)
 
 	require.NoError(t, f.notify(t, status.Completed))
-	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
@@ -566,7 +568,8 @@ func TestPendingLeavesTheOrderAndQuotaUntouched(t *testing.T) {
 func TestObscureHoldsTheOrderAndIsAcknowledged(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, status.Obscure))
+	require.ErrorIs(t, f.notify(t, status.Obscure), payment.ErrNotificationUnknownStatus,
+		"an indeterminate status is reported to the caller (FR-012g)")
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
@@ -578,7 +581,8 @@ func TestAnUnrecognisedStatusChangesNothingButIsAcknowledged(t *testing.T) {
 
 	err := f.notify(t, status.Status(99))
 
-	require.NoError(t, err, "the gateway is acknowledged so it stops retrying")
+	require.ErrorIs(t, err, payment.ErrNotificationUnknownStatus,
+		"still a 200 to the gateway, but the caller is told what was wrong (FR-012g)")
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
@@ -590,7 +594,8 @@ func TestANotificationForAnUnknownReferenceIsAcknowledged(t *testing.T) {
 
 	err := f.deliver(t, notification("ORD-DOES-NOT-EXIST", status.Completed))
 
-	require.NoError(t, err, "acknowledging stops the gateway retrying something we can never process")
+	require.ErrorIs(t, err, payment.ErrNotificationUnknownOrder,
+		"still acknowledged so the gateway stops retrying, but no longer silently (FR-012g)")
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 }
 
@@ -603,7 +608,8 @@ func TestANonDepositNotificationChangesNothingAndIsAcknowledged(t *testing.T) {
 	result.IsDeposit = false
 	result.TransactionType = "WITHDRAW"
 
-	require.NoError(t, f.deliver(t, result))
+	require.ErrorIs(t, f.deliver(t, result), payment.ErrNotificationNotDeposit,
+		"a withdrawal on a deposit-only endpoint is reported (FR-012g)")
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	issued, _ := f.fulfiller.counts()
@@ -640,7 +646,7 @@ func TestAPaymentArrivingAfterADuplicateReleaseDoesNotSettleTheOrder(t *testing.
 
 	require.NoError(t, f.svc.ReleaseDuplicateSession(
 		ctx, "ORD-WEBHOOK", payment.ErrDuplicateReference))
-	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled)
 
 	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Zero(t, f.markerCount(t, payment.MarkerSettledAfterExpiry))
@@ -673,7 +679,7 @@ func TestADisputeIsReadableOnTheOrdersOwnHistory(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, f.notify(t, status.Completed))
-	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
 
 	records, err := f.svc.OrderNotifications(ctx, f.orderID)
 	require.NoError(t, err)

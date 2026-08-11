@@ -19,6 +19,48 @@ import (
 // ErrOrderNotFound reports that a notification names an order we do not have.
 var ErrOrderNotFound = errors.New("payment: order not found")
 
+// Notifications this system records but deliberately does not act on, in a way a
+// person should know about.
+//
+// Each is an error because something is wrong — but none may become a non-200.
+// The gateway retries any other answer three times, ten seconds apart, with no
+// dead-letter, so refusing one of these costs four deliveries and still ends in
+// the notification being lost (FR-012c). They are answered 200 carrying their own
+// envelope code, which is what tells them apart from an acknowledgement on an
+// identical status line (FR-012g).
+//
+// The set is exactly the set that raises an operational signal. That is the rule
+// rather than a coincidence: if an outcome is worth telling a human about, the
+// caller is told too. Outcomes that are merely uneventful — a payment applied, a
+// pending notification, a duplicate retry repeating an outcome already
+// recorded — stay plain successes, because at-least-once delivery makes them the
+// normal case and flagging them would bury these five in routine noise.
+var (
+	// ErrNotificationUnknownOrder: the reference matches no order of ours. Either
+	// the gateway is misconfigured against another tenant or an order vanished;
+	// both need a human and neither is fixed by a retry (FR-013).
+	ErrNotificationUnknownOrder = errors.New("payment: notification names no order of ours")
+
+	// ErrNotificationNotDeposit: a withdrawal arrived on an endpoint that only
+	// ever expects deposits (FR-020).
+	ErrNotificationNotDeposit = errors.New("payment: notification is not a deposit")
+
+	// ErrNotificationUnknownStatus: Obscure, or a value this build has never seen.
+	// Either may be a status that should have released quota (FR-014).
+	ErrNotificationUnknownStatus = errors.New("payment: gateway status not recognised")
+
+	// ErrNotificationContradiction: the gateway now reports a failure for an order
+	// already paid, whose tickets are already issued. Nothing is reversed
+	// automatically; a person chooses between refunding and honouring the ticket
+	// (FR-016b, FR-016d).
+	ErrNotificationContradiction = errors.New("payment: notification contradicts a settled payment")
+
+	// ErrNotificationOrderCancelled: a completed payment for an order the gateway
+	// itself rejected or cancelled. Not the lost-notification case, so it is never
+	// revived — the money is real and needs a person (FR-019d, FR-007f).
+	ErrNotificationOrderCancelled = errors.New("payment: completed payment for a cancelled order")
+)
+
 // Marker statuses written into payments.status alongside — never instead of —
 // the audit row for the payload that triggered them (FR-018).
 //
@@ -209,7 +251,7 @@ func (s *Service) HandleNotification(ctx context.Context, provider string, paylo
 		s.log.ErrorContext(ctx, "notification is not a deposit; recorded without changing any order",
 			"provider", provider, "reference", result.OrderNumber, "trx_type", result.TransactionType)
 		s.recordOrphanNotification(ctx, provider, result, "non-deposit transaction type")
-		return nil
+		return ErrNotificationNotDeposit
 	}
 
 	// The reference is the order number, unmodified. There is no suffix to strip
@@ -224,7 +266,7 @@ func (s *Service) HandleNotification(ctx context.Context, provider string, paylo
 		s.log.ErrorContext(ctx, "notification names an unknown order; acknowledging without processing",
 			"provider", provider, "reference", result.OrderNumber)
 		s.recordOrphanNotification(ctx, provider, result, "unknown order reference")
-		return nil
+		return ErrNotificationUnknownOrder
 	}
 	if err != nil {
 		return err
@@ -314,7 +356,7 @@ func (s *Service) applyProviderResult(
 				"order_status_at_arrival": ord.Status,
 				"contradicting_status":    result.TransactionStatus,
 			})
-			return false, nil
+			return false, ErrNotificationContradiction
 		}
 		log.InfoContext(ctx, "order is already paid; notification acknowledged as a no-op")
 		return false, nil
@@ -325,7 +367,7 @@ func (s *Service) applyProviderResult(
 		// that should have released quota, so it must not pass as a quiet no-op
 		// (FR-014).
 		log.ErrorContext(ctx, "unrecognised gateway status; order left unchanged and acknowledged")
-		return false, nil
+		return false, ErrNotificationUnknownStatus
 	}
 	if !outcome.ChangesOrder() {
 		log.InfoContext(ctx, "notification is a legitimate no-op; order left pending")
@@ -361,7 +403,7 @@ func (s *Service) applyProviderResult(
 		// the order's own record, which is where anyone looking it up will find it.
 		log.ErrorContext(ctx, "gateway reports a successful payment for a cancelled order; not revived, recorded for review",
 			"order_status", ord.Status)
-		return false, nil
+		return false, ErrNotificationOrderCancelled
 	}
 
 	applied, _, err := s.applyOutcome(ctx, ord, outcome)

@@ -16,10 +16,38 @@ the root, **not** under `/api/v1`, because the path is fixed by the caller.
 | Property | Value |
 | --- | --- |
 | Auth | `Authorization: Bearer {PG_CALLBACK_TOKEN}`, constant-time comparison |
-| Success | `200`, empty body |
-| Auth failure | non-200; nothing processed, attempt recorded |
+| Success | `200`, `{"code": 200000, "message": "Success", "data": null}` |
+| Settle refused (FR-019c) | `200`, `{"code": 200001, "message": …, "data": {"shortfall": [...]}}` |
+| Signalled anomaly (FR-012g) | `200`, `{"code": 200002-200006, "message": …, "data": null}` |
+| Auth failure | non-200, standard error envelope; nothing processed, attempt recorded |
 | Body cap | as today's webhook — bounded read, a malformed body must not consume unbounded memory |
 | Budget | must answer within 5 s (SC-011) |
+
+**Every answer carries a body, in the one `{code, message, data}` envelope the rest of this API speaks
+(FR-012e).** There is no empty-body response and no body outside the envelope — an earlier revision of
+this contract specified `200, empty body`, which is withdrawn.
+
+An acknowledgement carries **no data**, and the *uneventful* outcomes answer identically (FR-012f):
+the payment applied, a pending notification, and a repeat restating an outcome already recorded. What
+such a notification did is recorded under FR-018 and read through the per-order history endpoint
+below, not reported here, so there is one account of an outcome rather than a durable one and a
+transient one that can disagree.
+
+**Everything that raises an operational signal names itself in the code** (FR-012g) — an unrecognised
+reference, a non-deposit, an unrecognised status, a contradiction of a paid order, a completion for a
+gateway-cancelled order, and the settle refusal. All of them keep a 200 status per FR-012c, so **the
+envelope code is the only thing that separates them from an acknowledgement** and from each other.
+The rule is the signal, not whether the order moved: an outcome worth telling a human about is worth
+telling the caller about, while flagging the uneventful ones would bury these in the retry noise
+FR-012c guarantees.
+
+Only the settle refusal carries `data` — the per-ticket-type shortfall an operator needs to size the
+quota top-up before requesting the next resend (FR-019e, FR-022e). The others carry `null`: the
+message names the kind of problem, and the durable record holds the specifics.
+
+The gateway reads none of this; it acts on the status line alone. The body exists for the stub gateway
+FR-008a requires, for an operator reading a captured response, and for tests — which must therefore
+assert on the **code**, never on the status, since 200 is correct in both cases.
 
 ### `GET /api/v1/admin/payment/order/:order_id/notifications` — an order's payment history
 

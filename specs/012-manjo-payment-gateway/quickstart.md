@@ -78,13 +78,36 @@ curl -X POST http://localhost:8080/v1.0/callback/exec \
   -d '{"ri":"ORD-20260810-XXXXXX","nti":"A48593…","s":5,"td":"2026-08-10T10:15:22+07:00","tt":0}'
 ```
 
-Expect: `200` **within 5 seconds**, order → `PAID`, tickets issued once, one email, and the open page
-flips to the paid state with no reload.
+Expect: `200` **within 5 seconds**, body `{"code":200000,"message":"Success","data":null}`, order →
+`PAID`, tickets issued once, one email, and the open page flips to the paid state with no reload.
 
 Time the response — exceeding 5 s guarantees a duplicate delivery in production even when everything
 else is correct.
 
-**Authentication** — each must change nothing:
+**The body is never empty** (FR-012e). Pipe every call in this scenario through `jq -e '.code'` — a
+`204`-style empty answer or a bare object outside the envelope fails that outright, and neither is
+visible if you check only the status line.
+
+**The uneventful outcomes look identical** (FR-012f). Send a pending notification (`s:0`) and a
+repeat against an already-paid order. Both must return exactly
+`{"code":200000,"message":"Success","data":null}` — the same bytes as the successful call above. What
+each did is read from the per-order notification history (Scenario 6, step 3), not from the response.
+
+**Every signalled anomaly names itself** (FR-012g). Each keeps a `200` status — assert the code:
+
+```fish
+# unknown reference → 200002
+curl -s -X POST … -d '{"ri":"ORD-NOT-REAL","nti":"X","s":5,"tt":0}' | jq -e '.code == 200002'
+# withdrawal → 200003
+curl -s -X POST … -d '{"ri":"ORD-NOT-REAL","nti":"X","s":5,"tt":1}' | jq -e '.code == 200003'
+```
+
+The remaining three need a real order: an unrecognised `s` against a pending order (`200004`), a
+`Reject` against a paid one (`200005`), and a `Completed` against a cancelled one (`200006`).
+**Precedence when several could apply**: the deposit check runs first, then the order lookup, then the
+status mapping — so an unknown reference carrying `s:99` answers `200002`, not `200004`.
+
+**Authentication** — each must change nothing, and each must still answer in the envelope:
 
 ```fish
 # no token, wrong token
@@ -92,8 +115,12 @@ curl -X POST … -d '{…}'
 curl -X POST … -H 'Authorization: Bearer wrong' -d '{…}'
 ```
 
+Expect a non-200 whose body is the standard error envelope, code `401001`. This path needs no new
+code — the shared error handler already renders it — so it is a regression check rather than a new
+behaviour.
+
 **Idempotency** — replay the successful call 10 times. Exactly one set of tickets, one email, `200`
-every time (SC-004).
+with `code: 200000` every time (SC-004).
 
 ## Scenario 3 — Status mapping and quota (User Story 3)
 
@@ -152,13 +179,19 @@ a payment happened. The gateway settles the order; ops only makes it possible.
    against it (including refused ones) with the gateway's transaction id, raw status and arrival
    time, and **what the order holds against what remains** — the figure needed to size the top-up
    (FR-022c, FR-022e).
-4. Replay the notification (`s:5`). Expect: **`200` with a body naming the unavailability**, status
-   unchanged, no tickets, no quota movement, and a `SETTLE_REFUSED_NO_QUOTA` marker carrying the
-   shortfall per ticket type (FR-019c). A non-200 here would be the bug: the gateway would spend its
-   whole retry budget on an attempt guaranteed to fail identically.
-5. Top the ticket type's quota up by the shortfall, then replay again. Expect: order `PAID`, seats
-   deducted again, tickets issued **once**, email sent **once**, and a `SETTLED_AFTER_EXPIRY` marker
-   recording the prior status and the lines re-taken (FR-019, FR-019b).
+4. Replay the notification (`s:5`). Expect: **`200` carrying envelope code `200001`**, with the
+   per-ticket-type shortfall in `data`, status unchanged, no tickets, no quota movement, and a
+   `SETTLE_REFUSED_NO_QUOTA` marker (FR-019c, FR-019e). A non-200 here would be the bug: the gateway
+   would spend its whole retry budget on an attempt guaranteed to fail identically.
+
+   **Assert the code, not the status.** This answer and the successful one in step 5 are both `200`;
+   `jq -e '.code == 200001'` is what tells them apart, and a test checking `200` alone passes on
+   either. Size the step-5 top-up straight from `.data.shortfall` rather than from the ticket-type
+   editor's sold count, which counts released orders and understates what is needed.
+5. Top the ticket type's quota up by the shortfall, then replay again. Expect: `200` with code
+   `200000` and null `data`, order `PAID`, seats deducted again, tickets issued **once**, email sent
+   **once**, and a `SETTLED_AFTER_EXPIRY` marker recording the prior status and the lines re-taken
+   (FR-019, FR-019b).
 6. Replay a third time. Expect nothing further — no second tickets, no second email, no second
    deduction (US6 scenario 5, FR-012d).
 

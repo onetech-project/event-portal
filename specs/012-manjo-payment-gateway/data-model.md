@@ -139,6 +139,44 @@ contract boundary — FR-009a is carried by the type. The zero value is the catc
 decodes to a valid year-1 timestamp rather than to nothing, so the missing case must be detected by an
 explicit zero check, not inferred from it looking expired (FR-009b).
 
+### Callback response shapes (`internal/payment`, `pkg/apperr`)
+
+Transport only — nothing here is stored, and no schema moves.
+
+**`SettleRefusedResponse` is reduced to its `data` payload.** Under the envelope, three of its four
+fields are carried by the envelope itself or already known to the caller:
+
+| Field today | Becomes |
+| --- | --- |
+| `error: "TICKETS_UNAVAILABLE"` | the envelope's numeric `code` — `200001` |
+| `message` | the envelope's `message` |
+| `order_number` | dropped — it is the notification's own `ri`, echoed back to nobody who lacks it |
+| `shortfall[]` | **survives as the envelope's `data`** — the one thing not derivable elsewhere (FR-022e) |
+
+**`pkg/apperr` gains the 200 band** (R16, R17):
+
+| Code | Numeric | Raised by |
+| --- | --- | --- |
+| `CodeTicketsUnavailable` | `200001` | settle refused, quota short (FR-019c) |
+| `CodeNotificationOrderUnknown` | `200002` | reference matches no order (FR-013) |
+| `CodeNotificationNotDeposit` | `200003` | withdrawal on a deposit-only endpoint (FR-020) |
+| `CodeNotificationStatusUnknown` | `200004` | indeterminate or unrecognised status (FR-014) |
+| `CodeNotificationContradiction` | `200005` | terminal failure against an order already paid (FR-016b) |
+| `CodeNotificationOrderCancelled` | `200006` | completion for a gateway-cancelled order (FR-019d) |
+
+The domain reports these as sentinel errors — `ErrNotificationUnknownOrder`, `ErrNotificationNotDeposit`,
+`ErrNotificationUnknownStatus`, `ErrNotificationContradiction`, `ErrNotificationOrderCancelled` — which
+the handler maps to the codes above. The mapping lives in the handler so the transport code stays out
+of the service, and the sentinels are what the service tests assert on.
+
+Registering it is load-bearing rather than tidy: `Numeric`'s fallback is `status * 1000`, so an
+unregistered code on a 200 renders `200000` — byte-identical to `httpx.SuccessCode`. The refusal would
+then announce itself as a success, on a status line that is 200 in both cases by design.
+
+**The acknowledgement has no DTO.** `data` is null (FR-012f), so there is no shape to define, no
+struct to keep in sync, and nothing that can drift from the `payments` record that holds the real
+outcome.
+
 ## State transitions
 
 **One transition is added** to the lifecycle this feature otherwise leaves alone: `EXPIRED → PAID`,
@@ -190,7 +228,9 @@ Three invariants the diagram encodes:
 | Already `PAID` + same outcome ⇒ quiet no-op, 200 | FR-016 | service |
 | Already `PAID` + terminal failure ⇒ `DISPUTED`, 200 | FR-016b | service |
 | `EXPIRED` + `Completed` + quota covers the hold ⇒ `PAID`, seats re-taken, tickets issued | FR-019, FR-019b | service |
-| `EXPIRED` + `Completed` + quota short ⇒ unchanged, recorded, signalled, 200 with an error body | FR-019c | service |
+| `EXPIRED` + `Completed` + quota short ⇒ unchanged, recorded, signalled, 200 carrying code `200001` | FR-019c, FR-019e | service → handler |
+| Every callback answer is the `{code, message, data}` envelope; no empty body, none outside it | FR-012e | handler + shared error handler |
+| An acknowledgement carries `data: null`, identically for acted-on and deliberately-not-acted-on | FR-012f | handler |
 | `CANCELLED` + `Completed` ⇒ never revived; recorded, signalled, 200 | FR-019d | service |
 
 ## Domain types (Go) — resend cooldown

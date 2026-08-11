@@ -94,9 +94,27 @@ func (h *Handler) callback(c echo.Context) error {
 	// three retries on an attempt guaranteed to fail identically, and the
 	// notification would be lost at the end of it. The body is for our record and
 	// for the operator who asked for the resend — the gateway does not read it.
+	//
+	// Because the status line is 200 here and 200 on every acknowledgement below,
+	// the status cannot be what distinguishes them. The envelope's numeric code is
+	// (FR-019e): 200001 here, 200000 there. Rendering it through apperr rather than
+	// writing the envelope directly keeps apperr.Numeric the single place a numeric
+	// code is derived, and earns the shared handler's "request rejected" log line —
+	// wanted, because a refused settle is exactly what an operator goes looking for.
 	var refused *SettleRefusedError
 	if errors.As(err, &refused) {
-		return c.JSON(http.StatusOK, toSettleRefusedResponse(refused))
+		return apperr.New(http.StatusOK, apperr.CodeTicketsUnavailable, SettleRefusedMessage).
+			WithData(toSettleRefusedResponse(refused))
+	}
+
+	// The other outcomes this system records but deliberately does not act on.
+	// Each is answered 200 for the same reason as the refusal above — a retry
+	// cannot change any of them — and each names itself in the envelope's code so
+	// the caller learns what the operational signal already tells an operator
+	// (FR-012g). The set is exactly the set that raises a signal; anything merely
+	// uneventful falls through to the plain acknowledgement below.
+	if notice, ok := notificationNotice(err); ok {
+		return apperr.Wrap(err, http.StatusOK, notice.code, notice.message)
 	}
 
 	if err != nil {
@@ -108,7 +126,48 @@ func (h *Handler) callback(c echo.Context) error {
 	// Acknowledged immediately, before any post-payment work runs
 	// (ARCHITECTURE.md §3.4). Ticket generation and the email happen in a
 	// goroutine precisely so they cannot spend the five-second budget.
-	return c.NoContent(http.StatusOK)
+	//
+	// The body carries no data (FR-012f). Every outcome that reaches this line
+	// answers identically — the payment applied, a pending notification, a
+	// duplicate retry repeating an outcome already recorded — because what a
+	// notification did is recorded (FR-018) and read back per order (FR-022c). A
+	// second account of it here could drift from the durable one, and the gateway
+	// would not read it either way.
+	return httpx.Respond(c, http.StatusOK, nil)
+}
+
+// notice is the code and message a deliberate no-op answers with.
+type notice struct {
+	code    string
+	message string
+}
+
+// notificationNotice maps a deliberate no-op onto the code and message the
+// callback answers with.
+//
+// The messages are short and carry no order-specific detail. Not for secrecy —
+// the endpoint is authenticated, so the enumeration concern shaping the resend
+// endpoint does not apply here — but because the durable record is the account
+// of what happened (FR-018, FR-022c), and a response restating it could drift
+// from it. The caller gets the *kind* of problem, which is enough to tell a
+// misconfigured gateway from a vanished order without a log search.
+//
+// Nothing says "recorded and acknowledged" either: that is true of every one of
+// them, and it is what the 200 already means.
+func notificationNotice(err error) (notice, bool) {
+	switch {
+	case errors.Is(err, ErrNotificationUnknownOrder):
+		return notice{apperr.CodeNotificationOrderUnknown, "No order matches this reference."}, true
+	case errors.Is(err, ErrNotificationNotDeposit):
+		return notice{apperr.CodeNotificationNotDeposit, "Not a deposit."}, true
+	case errors.Is(err, ErrNotificationUnknownStatus):
+		return notice{apperr.CodeNotificationStatusUnknown, "Unrecognised gateway status."}, true
+	case errors.Is(err, ErrNotificationContradiction):
+		return notice{apperr.CodeNotificationContradiction, "Order is already paid; nothing reversed."}, true
+	case errors.Is(err, ErrNotificationOrderCancelled):
+		return notice{apperr.CodeNotificationOrderCancelled, "Order was cancelled; not revived."}, true
+	}
+	return notice{}, false
 }
 
 // RegisterAdminRoutes mounts the two order-scoped read views on the

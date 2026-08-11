@@ -282,7 +282,7 @@ func TestOrderNotificationsIncludeRefusedOnesAndMarkers(t *testing.T) {
 	f := newWebhookFixture(t)
 
 	require.NoError(t, f.notify(t, status.Completed))
-	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
 
 	records, err := f.svc.OrderNotifications(context.Background(), f.orderID)
 	require.NoError(t, err)

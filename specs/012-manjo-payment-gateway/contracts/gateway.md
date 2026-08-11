@@ -162,12 +162,27 @@ only because these are dynamic QRs carrying the amount at tag `54`, so the payer
 
 ### Response
 
-| Case | Status | Why |
-| --- | --- | --- |
-| Authenticated and durably recorded — including deliberate no-ops | **200** | anything else triggers 3 pointless retries (FR-012c) |
-| Unknown reference, non-deposit type, unknown status, already-final order | **200** | retrying cannot change any of these |
-| Missing or wrong bearer token | non-200 | the only correct refusal (FR-012) |
-| Transient internal fault where a retry genuinely helps | non-200 | |
+| Case | Status | Envelope code | Data | Why |
+| --- | --- | --- | --- | --- |
+| Payment applied; pending; a repeat of an outcome already recorded | **200** | `200000` | `null` | uneventful — at-least-once makes the repeat the normal case (FR-012f) |
+| Settle refused — quota no longer covers the hold (FR-019c) | **200** | `200001` | shortfall per ticket type | a retry would fail identically; the code marks it not-a-success (FR-019e) |
+| Unknown reference (FR-013) | **200** | `200002` | `null` | retrying cannot make the order exist |
+| Not a deposit (FR-020) | **200** | `200003` | `null` | a withdrawal on a deposit-only endpoint |
+| Indeterminate or unrecognised status (FR-014) | **200** | `200004` | `null` | may be a status that should have released quota |
+| Contradicts an order already paid (FR-016b) | **200** | `200005` | `null` | nothing reversed; a person decides |
+| Completion for a gateway-cancelled order (FR-019d) | **200** | `200006` | `null` | never revived; not the lost-notification case |
+| Missing or wrong bearer token | non-200 | `401001` | `null` | the only correct refusal (FR-012) |
+| Transient internal fault where a retry genuinely helps | non-200 | `500000` | `null` | |
+
+Every row carries a body in the `{code, message, data}` envelope — there is no empty-body answer
+(FR-012e). **Every 200 row is indistinguishable by status, so the envelope code is the discriminator**
+and is what anything asserting on this endpoint has to read.
+
+The line between `200000` and the rest is the **operational signal**, not whether the order moved
+(FR-012g): everything that raises a signal names itself to the caller, everything merely uneventful
+does not. Precedence matters when more than one could apply — the deposit check runs first, then the
+order lookup, then the status mapping — so an unknown reference carrying an unrecognised status
+answers `200002`, not `200004`.
 
 ### Delivery guarantees
 
@@ -187,6 +202,11 @@ only because these are dynamic QRs carrying the amount at tag `54`, so the payer
 The response body is not read; only the status code matters. A refusal that must not be retried is
 therefore expressed as a 200 whose body explains itself (FR-019c) — the body is for our own record
 and for an operator reading it, not for the gateway.
+
+That the gateway ignores the body is *why* the body can be shaped for us rather than for it, not a
+reason to omit it (FR-012e). The consequence worth stating: since a refusal and an acknowledgement
+are both 200, a stub gateway or a test that checks only the status line will pass on either. The
+envelope code is what has to be asserted.
 
 ---
 
