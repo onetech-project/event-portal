@@ -111,6 +111,38 @@ export type EventTerms = {
   updated_at: string | null;
 };
 
+/**
+ * One refusal from POST /ticket/availability, addressed to the line that caused
+ * it. `item_index` is null for an order-level reason — today only
+ * `TERMS_MISSING`, which is a property of the event, not of any one line.
+ *
+ * `code` is the server's STABLE STRING code, not the numeric envelope code:
+ * the numeric registry renders TICKET_TYPE_NOT_ON_SALE, PACKAGE_NOT_ON_SALE and
+ * VALIDATION_ERROR all as 400001, so branching on numbers here could not tell
+ * those apart.
+ */
+export type AvailabilityReason = {
+  item_index: number | null;
+  ticket_type_id: string | null;
+  package_id: string | null;
+  code: string;
+  message: string;
+};
+
+/**
+ * POST /ticket/availability 200 data — whether the selection can be bought
+ * right now, asked before the Terms & Conditions gate opens.
+ *
+ * Advisory: it reserves nothing, and `available: true` is already a statement
+ * about the past by the time this arrives. Booking stays the only authority.
+ * A refusal is still a 200 — the question was well formed and correctly
+ * answered — so it never surfaces as an ApiError.
+ */
+export type AvailabilityDecision = {
+  available: boolean;
+  reasons: AvailabilityReason[];
+};
+
 /** POST /ticket/book 201 data — the held order (1-hour hold, no payment yet). */
 export type BookResponse = {
   /** The public order number, used in every later /ticket/... path. */

@@ -163,11 +163,17 @@ than the admin ones and the ticket lookup is rate limited per IP.
 flowchart TD
     A["Guest opens the event grid at /"] --> B["GET /api/v1/event, then the detail<br/>at /event/:slug; the selection page reads<br/>GET /ticket/:slug + /packages/:slug —<br/>cache: no-store, so quota is never stale"]
     B --> C["Pick ticket types and bundles"]
-    C --> D["Agree to the T&C in the booking dialog<br/>(GET /ticket/terms-condition/:slug)"]
+    C --> C2["Press Buy Ticket →<br/>POST /api/v1/ticket/availability<br/>(spec 013: advisory, locks nothing)"]
+
+    C2 --> C3{"available?"}
+    C3 -- no --> C4["200 available:false, every offending<br/>line named — the T&C never opens"]
+    C4 --> C
+
+    C3 -- yes --> D["Agree to the T&C in the booking dialog<br/>(GET /ticket/terms-condition/:slug)"]
     D --> E["POST /api/v1/ticket/book, then<br/>POST /ticket/terms-condition/:order_id"]
 
     E --> F{"Terms authored, on sale,<br/>and enough quota?"}
-    F -- no --> G["409001 no authored terms,<br/>400 not-on-sale or insufficient quota"]
+    F -- no --> G["409001 no authored terms,<br/>400 not-on-sale or insufficient quota.<br/>Still reachable: the check reserves nothing,<br/>so the seats can go between the two calls"]
     G --> C
     F -- yes --> H["TX-B commits: quota deducted,<br/>order + items + EMPTY attendee slots,<br/>status = PENDING, 1-hour hold"]
 
@@ -207,7 +213,22 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant MT as Midtrans Core API
 
-    G->>FE: Choose tickets, agree to the T&C
+    G->>FE: Choose tickets, press Buy Ticket
+
+    rect rgb(245, 240, 250)
+    Note over FE,DB: The availability gate (spec 013) — in FRONT of the T&C.<br/>Read-only: no UPDATE, no FOR UPDATE, no order. It takes no<br/>row lock, so it can never serialize concurrent buyers.
+    FE->>API: POST /api/v1/ticket/availability
+    API->>OS: EvaluateAvailability(req)
+    OS->>EV: TicketTypeForCheckout / PackageForCheckout (snapshot tx)
+    EV->>DB: SELECT price, sales window, quota
+    OS->>OS: Reuse expandItem per line, COLLECTING refusals<br/>rather than failing fast, then aggregate demand<br/>per ticket type and compare against quota
+    OS->>EV: CurrentTerms(eventID) — order-level TERMS_MISSING
+    OS-->>FE: 200 { available, reasons[] } — a refusal is a 200
+    end
+
+    Note over FE,G: Only available:true opens the dialog. The answer is<br/>ADVISORY and binds nothing: the seats can still go<br/>before Agree lands, which is why every check below stays.
+
+    G->>FE: Agree to the T&C
     FE->>API: POST /api/v1/ticket/book
     API->>OS: Book(req)
     OS->>OS: req.Validate() — reject before any I/O opens a transaction

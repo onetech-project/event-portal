@@ -34,6 +34,17 @@ type TicketTypeInfo struct {
 	Price      decimal.Decimal
 	SalesStart time.Time
 	SalesEnd   time.Time
+	// QuotaRemaining is ticket_types.quota — REMAINING seats, never an original
+	// allocation — read under NO lock, for the advisory availability check only.
+	//
+	// It must never gate a sale. Booking's authority over quota is the atomic,
+	// row-locked UPDATE in CheckAndDeductQuota (Constitution Principle IV);
+	// Principle VII says the same of any non-authoritative availability figure:
+	// it "MUST NOT gate, authorize, or short-circuit a sale". Reading this field
+	// inside bookOnce as a cheap pre-check would reintroduce exactly the oversell
+	// that lock exists to prevent, and would do it silently — the happy path
+	// would look identical. TestConcurrentBookingCannotOversell guards it.
+	QuotaRemaining int32
 }
 
 // PackageInfo is the slice of a bundle checkout needs: the authoritative price,

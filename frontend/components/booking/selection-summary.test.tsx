@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render as rtlRender, screen } from "@testing-library/react";
+import { render as rtlRender, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactElement, ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SelectionSummary } from "./selection-summary";
-import type { SelectionLine } from "@/lib/types";
+import type { AvailabilityReason, SelectionLine } from "@/lib/types";
 
 // The nested TermsDialog reaches for the router and the query client; neither
 // affects what this suite asserts, so both are the thinnest possible stand-ins.
@@ -43,6 +44,53 @@ const bundle: SelectionLine = {
   quantity: 1,
 };
 
+/** Envelope-shaped fetch stub for POST /ticket/availability. */
+function stubAvailability(
+  decision: { available: boolean; reasons: AvailabilityReason[] },
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async () =>
+    new Response(JSON.stringify({ code: 200000, message: "OK", data: decision }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function refusal(overrides: Partial<AvailabilityReason> = {}): AvailabilityReason {
+  return {
+    item_index: 0,
+    ticket_type_id: DAY1,
+    package_id: null,
+    code: "INSUFFICIENT_QUOTA",
+    message: "Only fewer than 2 ticket(s) remain.",
+    ...overrides,
+  };
+}
+
+function renderSelection(lines: SelectionLine[] = [day1]) {
+  return render(
+    <SelectionSummary
+      lines={lines}
+      eventId="11111111-0000-0000-0000-000000000000"
+      eventSlug="jive-2026"
+      eventName="Jive Indonesia 2026"
+    />,
+  );
+}
+
+const pressBuyTicket = () =>
+  userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("SelectionSummary", () => {
   it("shows its placeholder and disables Buy Ticket when empty", () => {
     render(
@@ -78,7 +126,7 @@ describe("SelectionSummary", () => {
   it("totals two individually selected days", () => {
     render(<SelectionSummary lines={[day1, day2]} eventId="11111111-0000-0000-0000-000000000000" eventSlug="jive-2026" eventName="Jive Indonesia 2026" />);
 
-    expect(screen.getByText("Total 2 Ticket")).toBeTruthy();
+    expect(screen.getByText("Total 2 Tickets")).toBeTruthy();
     expect(screen.getByText(/Rp\s?70[.,]000/)).toBeTruthy();
   });
 
@@ -107,7 +155,187 @@ describe("SelectionSummary", () => {
 
     // 3 × Rp50.000, as both the line subtotal and the grand total.
     expect(screen.getAllByText(/Rp\s?150[.,]000/)).toHaveLength(2);
-    expect(screen.getByText("3 Bundle")).toBeTruthy();
-    expect(screen.getByText("Total 3 Ticket")).toBeTruthy();
+    // Every line counts in "Ticket(s)", bundles included, and the count is
+    // pluralised — 69cb500 dropped the separate "Bundle" unit label without
+    // updating these assertions, leaving them red on main until now.
+    expect(screen.getByText("3 Tickets")).toBeTruthy();
+    expect(screen.getByText("Total 3 Tickets")).toBeTruthy();
+  });
+});
+
+/**
+ * Spec 013. Buy Ticket asks the server whether the selection can still be
+ * bought, and the Terms & Conditions gate opens only on a clean answer.
+ */
+describe("SelectionSummary availability gate", () => {
+  it("opens the terms only after the check comes back available", async () => {
+    const fetchMock = stubAvailability({ available: true, reasons: [] });
+    renderSelection();
+
+    expect(screen.queryByText(/i agree to terms/i)).toBeNull();
+
+    await pressBuyTicket();
+
+    await waitFor(() => expect(screen.getByText(/i agree to terms/i)).toBeTruthy());
+    expect(fetchMock.mock.calls[0][0]).toContain("/ticket/availability");
+  });
+
+  it("refuses without opening the terms, and says why", async () => {
+    stubAvailability({ available: false, reasons: [refusal()] });
+    renderSelection();
+
+    await pressBuyTicket();
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i }).textContent).toContain(
+        "Only fewer than 2 ticket(s) remain.",
+      ),
+    );
+    // The whole point: the guest never reaches the document.
+    expect(screen.queryByText(/i agree to terms/i)).toBeNull();
+  });
+
+  it("reports every offending line, not just the first", async () => {
+    stubAvailability({
+      available: false,
+      reasons: [
+        refusal(),
+        refusal({
+          item_index: 1,
+          ticket_type_id: DAY2,
+          code: "TICKET_TYPE_NOT_ON_SALE",
+          message: 'Ticket type "Jive (Day 2) - 27 Apr 2026" is not currently on sale.',
+        }),
+      ],
+    });
+    renderSelection([day1, day2]);
+
+    await pressBuyTicket();
+
+    await waitFor(() => expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy());
+    const alert = screen.getByRole("alert", { name: /why this selection cannot be bought/i }).textContent ?? "";
+    expect(alert).toContain("Only fewer than 2 ticket(s) remain.");
+    expect(alert).toContain("is not currently on sale");
+  });
+
+  it("leaves the selection untouched when refused", async () => {
+    stubAvailability({ available: false, reasons: [refusal()] });
+    renderSelection([{ ...day1, quantity: 2 }]);
+
+    await pressBuyTicket();
+    await waitFor(() => expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy());
+
+    // Still the guest's own choice, to adjust as they see fit (FR-007).
+    expect(screen.getByText("2 Tickets")).toBeTruthy();
+    expect(screen.getByText("Total 2 Tickets")).toBeTruthy();
+  });
+
+  it("drops the refusal as soon as the guest changes the selection", async () => {
+    stubAvailability({ available: false, reasons: [refusal()] });
+    const { rerender } = renderSelection([day1]);
+
+    await pressBuyTicket();
+    await waitFor(() =>
+      expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy(),
+    );
+
+    // The guest edits the selection. The message described the old one.
+    rerender(
+      <SelectionSummary
+        lines={[{ ...day1, quantity: 2 }]}
+        eventId="11111111-0000-0000-0000-000000000000"
+        eventSlug="jive-2026"
+        eventName="Jive Indonesia 2026"
+      />,
+    );
+
+    expect(
+      screen.queryByRole("alert", { name: /why this selection cannot be bought/i }),
+    ).toBeNull();
+  });
+
+  it("does not resurrect a refusal after the selection is emptied and rebuilt", async () => {
+    stubAvailability({ available: false, reasons: [refusal()] });
+    const { rerender } = renderSelection([day1]);
+
+    await pressBuyTicket();
+    await waitFor(() =>
+      expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy(),
+    );
+
+    const show = (lines: SelectionLine[]) =>
+      rerender(
+        <SelectionSummary
+          lines={lines}
+          eventId="11111111-0000-0000-0000-000000000000"
+          eventSlug="jive-2026"
+          eventName="Jive Indonesia 2026"
+        />,
+      );
+
+    // Remove every row: the panel returns to its placeholder, which merely
+    // stops RENDERING the refusal...
+    show([]);
+    expect(screen.getByText(/selected ticket will appear here/i)).toBeTruthy();
+
+    // ...and pressing Add again must not bring the old message back with it.
+    show([day1]);
+    expect(
+      screen.queryByRole("alert", { name: /why this selection cannot be bought/i }),
+    ).toBeNull();
+  });
+
+  it("issues no second check while one is in flight", async () => {
+    let release: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    renderSelection();
+
+    await pressBuyTicket();
+    await waitFor(() => expect(screen.getByRole("button", { name: /checking/i })).toBeTruthy());
+
+    // The button is busy, so the press cannot land again (FR-008).
+    expect(screen.queryByRole("button", { name: /buy ticket/i })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    release(
+      new Response(JSON.stringify({ code: 200000, message: "OK", data: { available: true, reasons: [] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await waitFor(() => expect(screen.getByText(/i agree to terms/i)).toBeTruthy());
+  });
+
+  it("checks again on every press rather than reusing the last answer", async () => {
+    const fetchMock = stubAvailability({ available: false, reasons: [refusal()] });
+    renderSelection();
+
+    await pressBuyTicket();
+    await waitFor(() => expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy());
+
+    await pressBuyTicket();
+
+    // FR-009: a decision describes one instant, and is never carried forward.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("treats a check that never answered as unknown, not as permission", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("network down");
+    }));
+    renderSelection();
+
+    await pressBuyTicket();
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i }).textContent).toContain("could not check availability"),
+    );
+    // A failed check is not a passing one.
+    expect(screen.queryByText(/i agree to terms/i)).toBeNull();
   });
 });

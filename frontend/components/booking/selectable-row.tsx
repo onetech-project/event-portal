@@ -5,6 +5,7 @@ import { formatCurrency } from "@/lib/format";
 import { availabilityOf, maxQuantityFor, nameOf, noticeOf, priceOf } from "@/lib/selection";
 import type { SelectableItem } from "@/lib/types";
 import { Info, Minus, Plus } from "lucide-react";
+import { Button } from "../ui/button";
 
 /**
  * One row of the booking list, drawn as a ticket stub: dashed rules with a notch
@@ -88,15 +89,15 @@ export function SelectableRow({
         {selected ? (
           <Stepper name={name} quantity={quantity} max={max} onChange={onChange} />
         ) : (
-          <button
+          <Button
             type="button"
             disabled={!availability.available}
             onClick={() => onChange(1)}
             aria-label={`Add ${name}`}
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-bold text-brand-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-50"
+            className="rounded-lg bg-brand px-4 text-sm font-bold text-brand-foreground transition-opacity hover:opacity-90 hover:bg-brand disabled:pointer-events-none disabled:opacity-50"
           >
             Add <span aria-hidden>+</span>
-          </button>
+          </Button>
         )}
       </div>
     </article>
@@ -123,18 +124,19 @@ function Stepper({
   onChange: (quantity: number) => void;
 }) {
   const button =
-    "inline-flex size-8 items-center justify-center rounded-xl border border-brand transition-opacity hover:opacity-70 disabled:pointer-events-none disabled:opacity-40";
+    "aspect-square bg-transparent rounded-lg border border-brand hover:bg-brand hover:text-brand-foreground transition-all disabled:pointer-events-none disabled:opacity-40";
 
   return (
     <div className="flex items-center">
-      <button
+      <Button
         type="button"
+        variant="outline"
         aria-label={`Decrease ${name}`}
         onClick={() => onChange(quantity - 1)}
         className={button}
       >
         <Minus size={20} />
-      </button>
+      </Button>
 
       <span
         aria-live="polite"
@@ -144,15 +146,16 @@ function Stepper({
         {quantity}
       </span>
 
-      <button
+      <Button
         type="button"
         aria-label={`Increase ${name}`}
+        variant="outline"
         disabled={quantity >= max}
         onClick={() => onChange(quantity + 1)}
         className={button}
       >
         <Plus size={20} />
-      </button>
+      </Button>
     </div>
   );
 }

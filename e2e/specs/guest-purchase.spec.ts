@@ -3,8 +3,14 @@ import { expect, test } from "@playwright/test";
 import {
   adminLogin,
   adminOrders,
+  bookAsAnotherGuest,
+  createEvent,
   createSellableEvent,
+  createTicketType,
+  isoDaysFromNow,
   publicTicketTypes,
+  putTerms,
+  updateTicketTypeWindow,
 } from "../support/api";
 import {
   attendeeCountFor,
@@ -211,6 +217,165 @@ test.describe("Guest purchase, end to end", () => {
     expect(status).toBe(401);
     expect(await orderStatusOf(orderNumber)).toBe("PENDING");
     expect(await ticketCodesFor(orderNumber)).toHaveLength(0);
+  });
+
+  /**
+   * Spec 013. The guest chose while the seats were there and pressed Buy Ticket
+   * after they were gone.
+   *
+   * Before the availability gate this was only caught inside the booking
+   * transaction, fired by Agree — so the guest read the entire Terms &
+   * Conditions document, ticked the box, and was refused one press from
+   * finishing. The gate has to catch it at the button.
+   */
+  test("a selection that sold out while choosing is refused before the terms", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-sold-out-gate",
+      quota: 2,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+
+    // Selected while the seats genuinely existed — this is the whole point. A
+    // row that already read "Sold out" could not have been selected at all, so
+    // seeding an exhausted quota up front would test nothing.
+    await guest.selectQuantity(ticketType.name, 2);
+
+    // Somebody else takes them, through the real booking path.
+    await bookAsAnotherGuest(event.id, ticketType.id, 2);
+    expect(await quotaOf(ticketType.id)).toBe(0);
+
+    await guest.buyTicket();
+
+    // Assert the refusal is SHOWN before asserting the dialog is not: a bare
+    // toBeHidden() would pass on the first poll if it happened to run before the
+    // dialog rendered, which is a false green on precisely the bug under test.
+    await expect(guest.refusals()).toContainText(/remain/i);
+    await expect(page.getByRole("dialog")).toBeHidden();
+
+    // Nothing was held: the check reserves nothing, and the guest never reached
+    // the call that would have.
+    expect(await quotaOf(ticketType.id)).toBe(0);
+  });
+
+  /**
+   * The same gate, a different reason. An admin closing a sale window while the
+   * guest is mid-selection is indistinguishable, from the guest's side, from the
+   * seats running out — and both have to be caught at the button.
+   */
+  test("a ticket whose sales window closed while choosing is refused before the terms", async ({
+    page,
+  }) => {
+    const event = await createEvent(token, {
+      slug: "uat-window-gate",
+      name: "UAT Window Gate",
+    });
+    await putTerms(token, event.id, "<p>terms</p>");
+    const open = await createTicketType(token, {
+      eventId: event.id,
+      name: "Regular",
+      price: "150000.00",
+      quota: 10,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(open.name, 1);
+
+    // The window shuts behind them — a full replace, as the endpoint requires.
+    await updateTicketTypeWindow(token, open.id, {
+      eventId: event.id,
+      name: open.name,
+      price: "150000.00",
+      quota: 10,
+      salesStart: isoDaysFromNow(-3),
+      salesEnd: isoDaysFromNow(-1),
+    });
+
+    await guest.buyTicket();
+
+    await expect(guest.refusals()).toContainText(/not currently on sale/i);
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  /**
+   * An event with no authored Terms & Conditions has nothing to agree to.
+   * Booking already refused it (409001), but only after the guest had been shown
+   * a dialog whose body read "not available yet" and whose Agree button could
+   * never usefully be pressed. The check stops that dialog existing.
+   */
+  test("an event with no authored terms is refused before an empty dialog can render", async ({
+    page,
+  }) => {
+    const event = await createEvent(token, {
+      slug: "uat-no-terms-gate",
+      name: "UAT No Terms Gate",
+    });
+    const ticketType = await createTicketType(token, {
+      eventId: event.id,
+      name: "Regular",
+      price: "150000.00",
+      quota: 10,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    await guest.buyTicket();
+
+    await expect(guest.refusals()).toContainText(/terms & conditions/i);
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  /**
+   * Spec 013 User Story 2. An early refusal is worth little if it is a dead end:
+   * the guest keeps their selection, adjusts the offending line, and goes on to
+   * a paid ticket without reloading or starting over.
+   */
+  test("a refused guest can adjust the quantity and complete the purchase", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-refusal-recovery",
+      quota: 3,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 3);
+
+    // Another buyer leaves exactly one seat, so 3 no longer fits but 1 does.
+    await bookAsAnotherGuest(event.id, ticketType.id, 2);
+    expect(await quotaOf(ticketType.id)).toBe(1);
+
+    await guest.buyTicket();
+    await expect(guest.refusals()).toContainText(/remain/i);
+
+    // The selection survived the refusal — this is the recovery, not a restart.
+    await guest.setQuantity(ticketType.name, 1);
+
+    const orderNumber = await guest.agreeToTermsAndBook();
+    expect(orderNumber).toMatch(/^ORD-/);
+    expect(await quotaOf(ticketType.id)).toBe(0);
+
+    await guest.fillHolder(0, defaultHolder);
+    await guest.payWithQris();
+    await guest.expectAwaitingPayment();
+
+    const order = await orderRow(orderNumber);
+    const grossAmount = String(Math.trunc(Number(order.total_amount)));
+    expect(await settleOrder(orderNumber, grossAmount)).toBe(200);
+
+    await guest.expectConfirmation();
+    const codes = await waitFor(
+      () => ticketCodesFor(orderNumber),
+      (c) => c.length === 1,
+      { what: "the recovered purchase's ticket to be issued" },
+    );
+    expect(codes).toHaveLength(1);
   });
 
   test("a replayed settlement is idempotent", async ({ page }) => {

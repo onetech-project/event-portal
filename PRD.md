@@ -54,6 +54,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   `GET /api/v1/ticket/:event_slug` (sellable ticket types, live quota)
 *   `GET /api/v1/packages/:event_slug`
 *   `GET /api/v1/ticket/terms-condition/:event_slug`
+*   `POST /api/v1/ticket/availability` (spec 013 — confirms the selection is still buyable before the T&C gate opens; advisory, reserves nothing)
 *   `POST /api/v1/ticket/book` (creates the PENDING order + 1h hold)
 *   `POST /api/v1/ticket/terms-condition/:order_id` (records the T&C agreement)
 *   `POST /api/v1/ticket/checkout/:order_id` (saves visitor forms, opens the QRIS charge)

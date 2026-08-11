@@ -56,7 +56,7 @@ export type SeededTicketType = {
   quota: number;
 };
 
-function isoDaysFromNow(days: number): string {
+export function isoDaysFromNow(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
@@ -156,7 +156,15 @@ export async function putTerms(token: string, eventId: string, content: string):
 
 export async function createTicketType(
   token: string,
-  options: { eventId: string; name: string; price: string; quota: number },
+  options: {
+    eventId: string;
+    name: string;
+    price: string;
+    quota: number;
+    /** Defaults to a window that is open now; override to close it. */
+    salesStart?: string;
+    salesEnd?: string;
+  },
 ): Promise<SeededTicketType> {
   const { status, data } = await request<SeededTicketType>("/admin/ticket-types", {
     method: "POST",
@@ -166,13 +174,74 @@ export async function createTicketType(
       name: options.name,
       price: options.price,
       quota: options.quota,
-      sales_start: isoDaysFromNow(-1),
-      sales_end: isoDaysFromNow(29),
+      sales_start: options.salesStart ?? isoDaysFromNow(-1),
+      sales_end: options.salesEnd ?? isoDaysFromNow(29),
     }),
   });
 
   if (status !== 201) {
     throw new Error(`create ticket type failed with ${status}: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+/**
+ * Replaces a ticket type, so a scenario can shut its sales window under a guest
+ * who is mid-selection. The endpoint is a full replace, so every field is sent.
+ */
+export async function updateTicketTypeWindow(
+  token: string,
+  ticketTypeId: string,
+  options: {
+    eventId: string;
+    name: string;
+    price: string;
+    quota: number;
+    salesStart: string;
+    salesEnd: string;
+  },
+): Promise<void> {
+  const { status, data } = await request(`/admin/ticket-types/${ticketTypeId}`, {
+    method: "PUT",
+    token,
+    body: JSON.stringify({
+      event_id: options.eventId,
+      name: options.name,
+      price: options.price,
+      quota: options.quota,
+      sales_start: options.salesStart,
+      sales_end: options.salesEnd,
+    }),
+  });
+  if (status !== 200) {
+    throw new Error(`update ticket type failed with ${status}: ${JSON.stringify(data)}`);
+  }
+}
+
+/**
+ * Books against the public API as somebody else — the other buyer who takes the
+ * seats while our guest is still choosing.
+ *
+ * Deliberately the real booking endpoint rather than an UPDATE on
+ * `ticket_types.quota`: this is the call that holds the quota AND invalidates
+ * the cached list, so a scenario arranged through it races the guest exactly
+ * the way a second real guest would. Writing the quota directly would leave the
+ * cache advertising seats that no longer exist and prove nothing.
+ */
+export async function bookAsAnotherGuest(
+  eventId: string,
+  ticketTypeId: string,
+  quantity: number,
+): Promise<{ order_id: string }> {
+  const { status, data } = await request<{ order_id: string }>("/ticket/book", {
+    method: "POST",
+    body: JSON.stringify({
+      event_id: eventId,
+      items: [{ ticket_type_id: ticketTypeId, quantity }],
+    }),
+  });
+  if (status !== 201) {
+    throw new Error(`book failed with ${status}: ${JSON.stringify(data)}`);
   }
   return data;
 }

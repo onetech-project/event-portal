@@ -50,6 +50,69 @@ type BookResponse struct {
 	ExpiresAt   time.Time   `json:"expires_at"`
 }
 
+// AvailabilityRequest is the body of POST /ticket/availability (spec 013): the
+// selection the guest is about to buy, asked about before the Terms &
+// Conditions gate opens.
+//
+// Deliberately the same shape as BookRequest. The client sends one object to
+// both calls, so the check cannot approve a selection booking never saw.
+type AvailabilityRequest struct {
+	EventID uuid.UUID      `json:"event_id"`
+	Items   []CheckoutItem `json:"items"`
+}
+
+// Validate rejects what can be decided without I/O. A malformed request has no
+// availability answer — it is a 400, not a decision.
+func (r AvailabilityRequest) Validate() error {
+	if r.EventID == uuid.Nil {
+		return apperr.BadRequest(apperr.CodeValidation, "event_id is required.")
+	}
+	_, err := validateItemLines(r.Items)
+	return err
+}
+
+// AvailabilityDecision is the 200 body of POST /ticket/availability: the
+// server's answer about one selection at one instant.
+//
+// It is advisory and transient — nothing is reserved, nothing is stored, and a
+// true answer confers no right to book. Between this decision and the guest's
+// Agree click another buyer can take the last seat, which is why every refusal
+// path inside bookOnce stays exactly where it is.
+//
+// "Not available" is a successful answer to a well-formed question, so it comes
+// back 200 with envelope code 200000, not as an error.
+type AvailabilityDecision struct {
+	// Available is true if and only if Reasons is empty.
+	Available bool `json:"available"`
+	// Reasons carries EVERY refusal found, not the first: a guest fixing their
+	// selection one rejected line per attempt is the experience this endpoint
+	// exists to remove.
+	Reasons []AvailabilityReason `json:"reasons"`
+}
+
+// AvailabilityReason is one refusal, addressed to the line that caused it.
+type AvailabilityReason struct {
+	// ItemIndex is the 0-based index into the request's items. Nil for an
+	// order-level reason — today only TERMS_MISSING, which is a property of the
+	// event rather than of any one line.
+	ItemIndex *int `json:"item_index"`
+	// TicketTypeID names the ticket type at fault. For a quota shortfall reached
+	// through a bundle this is the CONSTITUENT, which is what explains the
+	// refusal to a guest looking at a bundle that seemed available.
+	TicketTypeID *uuid.UUID `json:"ticket_type_id"`
+	// PackageID is set when the offending line was a bundle.
+	PackageID *uuid.UUID `json:"package_id"`
+	// Code is the STABLE STRING apperr code, never the numeric envelope code.
+	// apperr.Numeric renders TICKET_TYPE_NOT_ON_SALE, PACKAGE_NOT_ON_SALE and
+	// VALIDATION_ERROR all as 400001, so a client branching on numbers could not
+	// tell "your ticket stopped selling" from "your request was malformed" —
+	// which spec 013 FR-012 requires it to do.
+	Code string `json:"code"`
+	// Message is the guest-facing sentence, produced by the same code that
+	// produces booking's message for this condition (FR-013).
+	Message string `json:"message"`
+}
+
 // AgreementRequest is the record-agreement body
 // (POST /ticket/terms-condition/:order_id). EventTermsID is the document id the
 // dialog displayed, so the server can refuse a stale agreement (409002).
