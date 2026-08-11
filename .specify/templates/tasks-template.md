@@ -9,7 +9,7 @@ description: "Task list template for feature implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**Tests**: The examples below include test tasks. Unit and contract tests are OPTIONAL - only include them if explicitly requested in the feature specification. The end-to-end tasks in the Polish phase are NOT optional for any feature with a user-visible flow: Constitution Principle VIII makes `e2e/` an acceptance gate.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
@@ -157,6 +157,15 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
 - [ ] TXXX Security hardening
 - [ ] TXXX Run quickstart.md validation
+
+**End-to-end acceptance (Constitution Principle VIII) — NOT optional, unlike the unit
+tests above.** Any feature with a user-visible flow, and any bugfix in a flow `e2e/`
+already covers, MUST carry these:
+
+- [ ] TXXX Extend/update `e2e/specs/[spec].ts` for [flow] — for a bugfix, write the
+      scenario first and confirm it fails against the unfixed code
+- [ ] TXXX Run the full suite green: `cd e2e && npm test`
+- [ ] TXXX Run it once more with the cache off: `E2E_CACHE_ENABLED=false npm test`
 
 ---
 
