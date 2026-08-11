@@ -410,4 +410,53 @@ sequenceDiagram
     end
 ```
 
+**3.9. End-to-End Acceptance Suite (UAT)**
+
+Rule: `e2e/` is the acceptance gate for every change touching a covered flow
+(Constitution Principle VIII). It is not an optional extra tier — a PR that changes
+the guest purchase journey, the admin console, or cache coherence without a
+corresponding `e2e/` diff is incomplete.
+
+*Topology* — the suite assembles the real system and substitutes exactly one thing:
+
+```
+Playwright (Chromium)  ──▶  Next.js dev :3100  ──▶  Go API :8100  ──▶  PostgreSQL :5433
+                                                          │                Redis :6380
+                                                          ▼
+                                              Midtrans Core API stub :8101
+```
+
+Ports are offset from the dev ones (3000/8080) so a run never collides with a stack
+already open. The runner starts the stub, the API (`go run ./cmd/api`, so it always
+tests the working tree), and `next dev` itself, and shuts them down afterwards.
+PostgreSQL and Redis are deliberately NOT owned by the runner — they are containers,
+and managing their lifecycle from a test process makes failures much harder to read.
+
+*Why the gateway is stubbed at the network boundary, not at the interface* — replacing
+the `Gateway` implementation (§3.5) would skip the code that matters most. The stub
+speaks the Core API wire protocol instead, so `internal/payment/midtrans.go` does its
+real parsing, and settlement arrives as a genuine notification signed with
+`sha512(order_id + status_code + gross_amount + server_key)` that the production
+verifier checks. Rejection of a tampered signature and idempotency under a replayed
+settlement are asserted the same way.
+
+Rule: no spec may write order status, issue tickets, or mutate payment state directly
+in the database. Arrangement goes through the real admin API — those writes are also
+what invalidate the cache (§3.6a), so arranging through them keeps the setup honest.
+
+*Cache coverage* — `cache-refresh.spec.ts` asserts that the Principle VII cache stays
+invisible from outside: newly published events appear immediately, unpublish removes
+them, booking moves the quota a reader sees, invalidation is scoped per event, and the
+operator flush and health reporting behave. The suite MUST also pass with the cache
+disabled (`E2E_CACHE_ENABLED=false`), which is how the kill-switch requirement is
+verified rather than merely asserted.
+
+*Safety* — the suite TRUNCATEs every application table before each test and refuses to
+start if its database URL is non-local or production-shaped. `genders` and
+`order_statuses` are preserved: they are migration-seeded master data the visitor form
+and order queries depend on.
+
+See `e2e/README.md` for prerequisites, the per-spec coverage table, environment
+variables, and `E2E_SLOW_MO` for watching a headed run at human speed.
+
 ***

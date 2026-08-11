@@ -42,6 +42,18 @@
 
 [Gates determined based on constitution file]
 
+**End-to-end acceptance (Principle VIII) — always applicable, never omit this row:**
+
+- [ ] Does this feature touch a flow covered by `e2e/` (guest purchase journey, admin
+      console, or anything the read cache serves)? If yes, name the specs in
+      `e2e/specs/` that must change.
+- [ ] If it introduces a new user-visible flow, which new `e2e/` scenarios cover it? If
+      none, state the justification here — silence is not an answer.
+- [ ] If it is a bugfix in a covered flow, which scenario reproduces the bug (and has
+      been confirmed to fail against the unfixed code)?
+- [ ] Does anything here change behavior under `E2E_CACHE_ENABLED=false`? The suite must
+      pass in both cache modes.
+
 ## Project Structure
 
 ### Documentation (this feature)
