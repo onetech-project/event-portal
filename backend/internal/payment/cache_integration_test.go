@@ -2,11 +2,13 @@ package payment_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
+	"github.com/pgauto/cdtc/status"
 	"github.com/stretchr/testify/require"
 
 	"github.com/manjo/ticketing/backend/internal/event"
@@ -60,6 +62,8 @@ func newPaymentCacheFixture(t *testing.T) paymentCacheFixture {
 		gw,
 		orderAdapter{repo: order.NewRepository(pool)},
 		quotaAdapter{svc: events},
+		reserverAdapter{svc: events},
+		orderAdapter{repo: order.NewRepository(pool)},
 		fulfiller,
 		fulfiller,
 		testsupport.DiscardLogger(),
@@ -78,9 +82,14 @@ func (f paymentCacheFixture) settle(t *testing.T, ctx context.Context) {
 	f.gateway.result = &payment.WebhookResult{
 		OrderNumber:       "ORD-RESTORE",
 		TransactionID:     "tx-cache-1",
-		TransactionStatus: "settlement",
+		Status:            status.Completed,
+		StatusPresent:     true,
+		TransactionStatus: status.Completed.String(),
 		PaymentType:       "qris",
-		RawPayload:        []byte(`{"transaction_status":"settlement"}`),
+		TransactionType:   "DEPOSIT",
+		IsDeposit:         true,
+		RawPayload: []byte(fmt.Sprintf(`{"ri":"ORD-RESTORE","s":%d,"tt":0}`,
+			status.Completed)),
 	}
 	require.NoError(t, f.svc.HandleNotification(ctx, "midtrans", f.gateway.result.RawPayload, ""))
 	f.svc.WaitForFulfillment()

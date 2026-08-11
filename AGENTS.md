@@ -17,9 +17,9 @@ provider is substituted, and even that at the network boundary, so settlement ar
 a genuinely signed webhook the production handler verifies.
 
 It covers the guest purchase journey end to end (browse → book → holder forms → QRIS →
-settlement → issued tickets, plus ticket lookup, hold expiry, signature rejection,
-replay), the admin console (auth, orders, ticket validation, delete guards), and cache
-coherence.
+settlement → issued tickets, plus ticket lookup, hold expiry, callback-token
+rejection, replay), the admin console (auth, orders, ticket validation, delete
+guards), and cache coherence.
 
 Constitution **Principle VIII** makes this an acceptance gate, not an optional tier:
 

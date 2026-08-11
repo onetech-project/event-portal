@@ -19,7 +19,7 @@ export const config = {
   apiURL: env("E2E_API_URL", "http://localhost:8100/api/v1"),
   /** Same host without the prefix, for /healthz and /metrics. */
   apiRootURL: env("E2E_API_ROOT_URL", "http://localhost:8100"),
-  /** The Midtrans Core API stub this run drives payment through. */
+  /** The Manjo gateway stub this run drives payment through. */
   gatewayStubURL: env("E2E_GATEWAY_URL", "http://localhost:8101"),
 
   databaseURL: env(
@@ -29,11 +29,25 @@ export const config = {
   redisURL: env("E2E_REDIS_URL", "redis://localhost:6380/0"),
 
   /**
-   * Must match what the API is started with, because the webhook signature is
-   * sha512(order_id + status_code + gross_amount + server_key) and the suite
-   * signs its own settlement notifications.
+   * The bearer token inbound notifications must present, which must match the
+   * API's PG_CALLBACK_TOKEN.
+   *
+   * Manjo notifications carry no signature, no digest, and no field that could
+   * authenticate them — the token is the entire mechanism (see VerifyWebhook in
+   * `internal/payment/manjo.go`). So this is the whole of what the suite needs
+   * to impersonate the gateway, and presenting the wrong one is how the
+   * rejection path gets proven.
    */
-  midtransServerKey: env("E2E_MIDTRANS_SERVER_KEY", "SB-Mid-server-uat-e2e-key"),
+  pgCallbackToken: env("E2E_PG_CALLBACK_TOKEN", "uat-e2e-callback-token"),
+
+  /**
+   * The vestigial key pair. The gateway sends these in the session-open body as
+   * `ac.cr.{client_id,client_secret}` and Manjo checks only that they are
+   * present, so they grant nothing and the stub does not inspect them. They
+   * exist here so the request the stub receives is shaped like the real one.
+   */
+  pgServerKey: env("E2E_PG_SERVER_KEY", "uat-e2e-server-key"),
+  pgClientKey: env("E2E_PG_CLIENT_KEY", "uat-e2e-client-key"),
   jwtSecret: env("E2E_JWT_SECRET", "uat-e2e-jwt-secret-long-enough-for-hs256"),
 
   admin: {

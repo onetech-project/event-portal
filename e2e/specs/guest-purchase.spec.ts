@@ -17,7 +17,12 @@ import {
   waitFor,
 } from "../support/db";
 import { defaultHolder, GuestJourney, type Holder } from "../support/journey";
-import { deliverNotification, expireOrder, settleOrder } from "../support/payment";
+import {
+  PaymentStatus,
+  deliverNotification,
+  expireOrder,
+  settleOrder,
+} from "../support/payment";
 
 /**
  * The journey this product exists for: an unauthenticated guest goes from the
@@ -96,10 +101,9 @@ test.describe("Guest purchase, end to end", () => {
     expect(order.buyer_email).toBe(defaultHolder.email);
     expect(order.buyer_name).toBe(defaultHolder.name);
 
-    // The provider settles. The order moves because the real webhook handler
-    // verified a real signature — nothing here writes to the database.
-    const grossAmount = String(Math.trunc(Number(order.total_amount)));
-    expect(await settleOrder(orderNumber, grossAmount)).toBe(200);
+    // The gateway settles. The order moves because the real callback handler
+    // authenticated a real token — nothing here writes to the database.
+    expect(await settleOrder(orderNumber)).toBe(200);
 
     // --- Confirmation -------------------------------------------------------
     // The SSE stream pushes the transition; the page moves on its own.
@@ -138,8 +142,7 @@ test.describe("Guest purchase, end to end", () => {
     await guest.fillHolder(0, defaultHolder);
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
-    await settleOrder(orderNumber, String(Math.trunc(Number(order.total_amount))));
+    await settleOrder(orderNumber);
 
     const [code] = await waitFor(
       () => ticketCodesFor(orderNumber),
@@ -169,10 +172,7 @@ test.describe("Guest purchase, end to end", () => {
     await guest.fillHolder(2, { ...defaultHolder, name: "Third Holder" });
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
-    const grossAmount = String(Math.trunc(Number(order.total_amount)));
-
-    expect(await expireOrder(orderNumber, grossAmount)).toBe(200);
+    expect(await expireOrder(orderNumber)).toBe(200);
 
     await waitFor(
       () => orderStatusOf(orderNumber),
@@ -186,9 +186,12 @@ test.describe("Guest purchase, end to end", () => {
     expect(listed[0].quota_remaining).toBe(6);
   });
 
-  test("a webhook with a bad signature is rejected and changes nothing", async ({ page }) => {
+  // Manjo notifications carry no signature, no digest, and no field that could
+  // authenticate them, so the bearer token is the entire mechanism. Presenting
+  // the wrong one is the only way in.
+  test("a callback with a bad token is rejected and changes nothing", async ({ page }) => {
     const { event, ticketType } = await createSellableEvent(token, {
-      slug: "uat-bad-signature",
+      slug: "uat-bad-token",
       quota: 4,
     });
 
@@ -200,12 +203,10 @@ test.describe("Guest purchase, end to end", () => {
     await guest.fillHolder(0, defaultHolder);
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
     const status = await deliverNotification({
-      orderId: orderNumber,
-      transactionStatus: "settlement",
-      grossAmount: String(Math.trunc(Number(order.total_amount))),
-      tamperSignature: true,
+      orderNumber,
+      status: PaymentStatus.Completed,
+      invalidToken: true,
     });
 
     expect(status).toBe(401);
@@ -227,18 +228,15 @@ test.describe("Guest purchase, end to end", () => {
     await guest.fillHolder(0, defaultHolder);
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
-    const grossAmount = String(Math.trunc(Number(order.total_amount)));
-
-    expect(await settleOrder(orderNumber, grossAmount)).toBe(200);
+    expect(await settleOrder(orderNumber)).toBe(200);
     await waitFor(
       () => ticketCodesFor(orderNumber),
       (c) => c.length === 1,
       { what: "the ticket to be issued" },
     );
 
-    // Providers retry. The second delivery must be accepted and do nothing.
-    expect(await settleOrder(orderNumber, grossAmount)).toBe(200);
+    // Gateways retry. The second delivery must be accepted and do nothing.
+    expect(await settleOrder(orderNumber)).toBe(200);
 
     expect(await orderStatusOf(orderNumber)).toBe("PAID");
     expect(await ticketCodesFor(orderNumber)).toHaveLength(1);

@@ -176,9 +176,14 @@ function ResendRow({ orderNumber }: Readonly<{ orderNumber: string }>) {
           An email confirmation has been sent to your registered email address.
         </p>
 
+        {/* The acceptance carries the window it just started, so the wait is
+            shown here rather than held back until a refusal reveals it
+            (FR-021j). Seeding the countdown without displaying it would leave
+            the guest with a button that is disabled for no stated reason. */}
         {resend.isSuccess ? (
           <p role="status" className="text-sm font-medium text-emerald-600">
-            Email sent! Please check your inbox and spam folder.
+            Email sent again. Please check your inbox and spam folder.
+            {waiting ? ` You can ask again in ${secondsLeft}s.` : ""}
           </p>
         ) : null}
 

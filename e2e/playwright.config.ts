@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 import { config as env } from "./support/env";
 
 /**
- * The suite brings up the whole stack itself: a Midtrans stub, the Go API, and
+ * The suite brings up the whole stack itself: a Manjo stub, the Go API, and
  * the Next.js dev server, all on ports offset from the normal dev ones so a run
  * never collides with a stack you already have open.
  *
@@ -96,11 +96,14 @@ export default defineConfig({
             JWT_SECRET: env.jwtSecret,
             LOG_LEVEL: "warn",
 
-            // Payment goes through the stub, never the real sandbox.
-            MIDTRANS_SERVER_KEY: env.midtransServerKey,
-            MIDTRANS_CLIENT_KEY: "SB-Mid-client-uat-e2e-key",
-            MIDTRANS_IS_PRODUCTION: "false",
-            MIDTRANS_BASE_URL: env.gatewayStubURL,
+            // Payment goes through the stub, never a real gateway.
+            PG_BASE_URL: env.gatewayStubURL,
+            PG_SERVER_KEY: env.pgServerKey,
+            PG_CLIENT_KEY: env.pgClientKey,
+            // The whole of the callback's authentication: Manjo notifications
+            // carry no signature, so the suite impersonates the gateway by
+            // presenting this as a bearer token.
+            PG_CALLBACK_TOKEN: env.pgCallbackToken,
 
             // Short windows so hold-expiry scenarios do not take an hour, but
             // still above PAYMENT_EXPIRY's documented 15-minute floor.

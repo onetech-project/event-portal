@@ -31,7 +31,7 @@ describe("bookingStageFromPathname", () => {
   it("maps the confirmation page to Done, not Registration", () => {
     // The order route is a prefix of both nested routes, so a naive prefix
     // check stops at the forms and the rail never reaches its last two stages.
-    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/success`)).toBe("Success");
+    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/success`)).toBe("Done");
   });
 
   it("gives each of the four stages exactly one address", () => {

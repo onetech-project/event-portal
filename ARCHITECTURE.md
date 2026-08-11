@@ -424,7 +424,7 @@ corresponding `e2e/` diff is incomplete.
 Playwright (Chromium)  ──▶  Next.js dev :3100  ──▶  Go API :8100  ──▶  PostgreSQL :5433
                                                           │                Redis :6380
                                                           ▼
-                                              Midtrans Core API stub :8101
+                                                Manjo gateway stub :8101
 ```
 
 Ports are offset from the dev ones (3000/8080) so a run never collides with a stack
@@ -435,11 +435,11 @@ and managing their lifecycle from a test process makes failures much harder to r
 
 *Why the gateway is stubbed at the network boundary, not at the interface* — replacing
 the `Gateway` implementation (§3.5) would skip the code that matters most. The stub
-speaks the Core API wire protocol instead, so `internal/payment/midtrans.go` does its
-real parsing, and settlement arrives as a genuine notification signed with
-`sha512(order_id + status_code + gross_amount + server_key)` that the production
-verifier checks. Rejection of a tampered signature and idempotency under a replayed
-settlement are asserted the same way.
+speaks the Manjo REST wire protocol instead, so `internal/payment/manjo.go` does its
+real parsing — including the shared contract module's shapes and its integer enums —
+and settlement arrives as a genuine notification carrying the bearer token that the
+production verifier compares in constant time. Rejection of a bad token and
+idempotency under a replayed settlement are asserted the same way.
 
 Rule: no spec may write order status, issue tickets, or mutate payment state directly
 in the database. Arrangement goes through the real admin API — those writes are also

@@ -3,16 +3,16 @@
 Full end-to-end acceptance tests: a real browser driving the real Next.js app,
 against the real Go API, against real PostgreSQL and Redis.
 
-The only thing substituted is the payment provider — and even that is replaced at
-the network boundary, so the API still speaks the Midtrans Core API protocol and
-settlement still arrives as a correctly signed webhook that the production
-handler verifies. Nothing in this suite writes an order status directly.
+The only thing substituted is the payment gateway — and even that is replaced at
+the network boundary, so the API still speaks the Manjo REST protocol and
+settlement still arrives as an authenticated callback that the production handler
+verifies. Nothing in this suite writes an order status directly.
 
 ## What it covers
 
 | Spec | Scenarios |
 |---|---|
-| [`guest-purchase.spec.ts`](specs/guest-purchase.spec.ts) | Browse → select → agree to terms → book → holder forms → QRIS → settlement → confirmation → issued tickets. Plus ticket lookup, hold expiry returning quota, a tampered webhook signature, and a replayed settlement. |
+| [`guest-purchase.spec.ts`](specs/guest-purchase.spec.ts) | Browse → select → agree to terms → book → holder forms → QRIS → settlement → confirmation → issued tickets. Plus ticket lookup, hold expiry returning quota, a callback presenting a bad bearer token, and a replayed settlement. |
 | [`admin-console.spec.ts`](specs/admin-console.spec.ts) | Sign in, wrong password, unauthenticated redirect, a paid order reaching the order list, ticket validation including the irreversible "Mark used" transition, unknown code, and the delete guard on an event with orders. |
 | [`cache-refresh.spec.ts`](specs/cache-refresh.spec.ts) | The read cache (spec 012) staying invisible: newly published events appearing immediately, unpublish removing them, quota moving on booking, per-event scoping, hit counting, operator flush, and health reporting. |
 
@@ -72,7 +72,7 @@ The runner starts three processes itself and shuts them down afterwards:
 
 | Process | Port | Notes |
 |---|---|---|
-| Midtrans stub | 8101 | [`support/gateway-stub.ts`](support/gateway-stub.ts) |
+| Manjo gateway stub | 8101 | [`support/gateway-stub.ts`](support/gateway-stub.ts) |
 | Go API | 8100 | `go run ./cmd/api`, so it always tests the working tree |
 | Next.js | 3100 | `next dev`, because `NEXT_PUBLIC_*` is baked at build time |
 
@@ -81,15 +81,23 @@ with a stack you already have open.
 
 ## How payment is driven
 
-`POST /v2/charge` and `GET /v2/:order/status` are served by the stub, which
-returns the shapes `internal/payment/midtrans.go` parses — including a non-empty
-`qr_string` (checkout deliberately fails without one) and a Jakarta-local
-`expiry_time`.
+`POST /v1/manjo/transaction/incoming` is served by the stub, and it is the only
+gateway endpoint there is: the `Gateway` interface has exactly two methods,
+`CreateTransaction` and `VerifyWebhook`, so the API never polls for status. The
+response shapes come from the shared contract module (`paynet.TransactionResponse`
+wrapping a `method.QRResponse`), and three fields carry weight — `s` must be
+true, `d.mr.qr_r` must be non-empty (checkout deliberately fails without a
+payload), and `d.mr.qr_ea` must parse as RFC 3339.
 
-Settlement is a signed notification, not a database write:
+Settlement is an authenticated callback, not a database write. Manjo notifications
+carry no signature, no digest, and no field that could authenticate them, so a
+bearer token is the entire mechanism:
 
 ```
-signature = sha512(order_id + status_code + gross_amount + server_key)
+POST /v1.0/callback/exec
+Authorization: Bearer $PG_CALLBACK_TOKEN
+
+{"ri": "<order number>", "nti": "...", "s": 5, "tt": 0}
 ```
 
 `support/payment.ts` reproduces that, so `settleOrder()` exercises the real
@@ -98,7 +106,13 @@ dispatch, the SSE push that moves the browser to the confirmation screen, and th
 cache invalidation — all of it. That is what makes this end to end rather than a
 UI walkthrough that stops at the QR code.
 
-`deliverNotification({ tamperSignature: true })` proves the rejection path.
+The abbreviated keys and the integer enums are the wire contract, not shorthand:
+`s: 5` is `status.Completed` and `tt: 0` is `callback.DEPOSIT`. Note that `0` is
+also the zero value of both enums, which is why a body omitting `s` decodes as
+"pending" rather than failing — `deliverNotification({ omitStatus: true })`
+exercises that distinction.
+
+`deliverNotification({ invalidToken: true })` proves the rejection path.
 
 ## Safety
 
@@ -121,6 +135,7 @@ prerequisites above.
 | `E2E_FRONTEND_URL` | `http://localhost:3100` |
 | `E2E_API_URL` | `http://localhost:8100/api/v1` |
 | `E2E_GATEWAY_URL` | `http://localhost:8101` |
+| `E2E_PG_CALLBACK_TOKEN` | `uat-e2e-callback-token` — the API is started with this as `PG_CALLBACK_TOKEN`, and the suite presents it to impersonate the gateway |
 | `E2E_DATABASE_URL` | `postgres://ticketing:ticketing@localhost:5433/ticketing?sslmode=disable` |
 | `E2E_REDIS_URL` | `redis://localhost:6380/0` |
 | `E2E_CACHE_ENABLED` | `true` — set `false` to run the suite against a cache-free API |

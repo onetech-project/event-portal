@@ -1,38 +1,45 @@
 /**
- * A stand-in for the Midtrans Core API, so the purchase flow can be exercised
- * end to end without the network, without sandbox credentials, and without a
- * human scanning a QR code.
+ * A stand-in for the Manjo payment gateway, so the purchase flow can be
+ * exercised end to end without the network, without sandbox credentials, and
+ * without a human scanning a QR code.
  *
- * It implements exactly the two endpoints `internal/payment/midtrans.go` calls:
+ * It implements exactly the one endpoint `internal/payment/manjo.go` calls:
  *
- *   POST /v2/charge          — opens a QRIS session
- *   GET  /v2/:order_id/status — the reconciliation read
+ *   POST /v1/manjo/transaction/incoming — opens a QRIS payment session
  *
- * and nothing else. The shapes below are dictated by `chargeResponse` and
- * `statusResponse` in that file; in particular `qr_string` must be non-empty
- * (checkout fails deliberately without it) and `expiry_time` must parse as
- * "YYYY-MM-DD HH:MM:SS" in Asia/Jakarta.
+ * and nothing else. There is deliberately no status-read endpoint: the Gateway
+ * interface has exactly two methods, CreateTransaction and VerifyWebhook, so
+ * the API never polls. Settlement arrives only as a callback, which is
+ * `support/payment.ts`'s job.
+ *
+ * The shapes below are `paynet.TransactionResponse` and `method.QRResponse`
+ * from the shared contract module. Three things are load-bearing:
+ *
+ *   - `s` (success) must be true. Only that makes it a session; anything else
+ *     is a failed open whatever the HTTP status said (FR-003).
+ *   - `d.mr.qr_r` must be non-empty. Checkout deliberately fails without a
+ *     payload, because a payment page with no code is worse than a failure —
+ *     failing releases the guest's seats so they can retry (FR-006).
+ *   - `d.mr.qr_ea` must parse as RFC 3339. The contract types it as a
+ *     timestamp, so an unreadable value costs the deadline (the API falls back
+ *     to its configured window) though not the code itself.
  *
  * Run standalone: `node --experimental-strip-types support/gateway-stub.ts`
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
-/** What the stub remembers about each order, so /status can answer consistently. */
+/** `method.Method`. QR is the only one this shop opens sessions for. */
+const METHOD_QR = 0;
+
+/** What the stub remembers about each reference, so a duplicate open is refusable. */
 type StubTransaction = {
-  transactionId: string;
-  orderId: string;
-  grossAmount: string;
-  status: string;
+  externalRefId: string;
+  refId: string;
+  amount: number;
 };
 
 const transactions = new Map<string, StubTransaction>();
-
-/** Midtrans reports timestamps in WIB (UTC+7) as "YYYY-MM-DD HH:MM:SS". */
-function jakartaTimestamp(offsetMinutes: number): string {
-  const wib = new Date(Date.now() + offsetMinutes * 60_000 + 7 * 60 * 60_000);
-  return wib.toISOString().replace("T", " ").slice(0, 19);
-}
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -55,10 +62,14 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
- * Lets a test force the next charge to fail, so the compensating path — the
- * guest keeps their hold and their saved forms — can be exercised too.
+ * Lets a test force the next session open to fail, so the compensating path —
+ * the guest keeps their hold and their saved forms — can be exercised too.
+ *
+ * It answers 400 rather than 500 on purpose: the API retries a 5xx three times
+ * under the same reference before giving up, which would make a test that wants
+ * one clean failure wait out the backoff for no reason.
  */
-let failNextCharge = false;
+let failNextSession = false;
 
 export function createGatewayStub() {
   const server = createServer(async (req, res) => {
@@ -66,8 +77,8 @@ export function createGatewayStub() {
 
     // Test-only control surface. Namespaced under /__stub so it can never
     // collide with a real provider path.
-    if (url.pathname === "/__stub/fail-next-charge" && req.method === "POST") {
-      failNextCharge = true;
+    if (url.pathname === "/__stub/fail-next-session" && req.method === "POST") {
+      failNextSession = true;
       return json(res, 200, { ok: true });
     }
     if (url.pathname === "/__stub/health") {
@@ -75,106 +86,85 @@ export function createGatewayStub() {
     }
     if (url.pathname === "/__stub/reset" && req.method === "POST") {
       transactions.clear();
-      failNextCharge = false;
+      failNextSession = false;
       return json(res, 200, { ok: true });
     }
 
-    if (url.pathname === "/v2/charge" && req.method === "POST") {
-      if (failNextCharge) {
-        failNextCharge = false;
-        return json(res, 500, {
-          status_code: "500",
-          status_message: "stub: forced failure",
-          validation_messages: ["forced by the e2e stub"],
-        });
+    if (url.pathname === "/v1/manjo/transaction/incoming" && req.method === "POST") {
+      if (failNextSession) {
+        failNextSession = false;
+        return json(res, 400, { s: false, e: "stub: forced failure", d: null });
       }
 
       const body = JSON.parse((await readBody(req)) || "{}");
-      const orderId: string = body?.transaction_details?.order_id ?? "unknown";
-      const grossAmount: string = String(body?.transaction_details?.gross_amount ?? "0");
-      const transactionId = `stub-tx-${orderId}`;
+      const refId: string = body?.ri ?? "unknown";
+      const amount: number = Number(body?.a ?? 0);
 
-      transactions.set(orderId, {
-        transactionId,
-        orderId,
-        grossAmount,
-        status: "pending",
-      });
-
-      // The expiry must sit far enough out that the API's own shorter payment
-      // window is always the binding deadline — that is the invariant config
-      // enforces, and the stub must not be the thing that breaks it.
-      return json(res, 200, {
-        status_code: "201",
-        status_message: "QRIS transaction is created",
-        transaction_id: transactionId,
-        order_id: orderId,
-        gross_amount: grossAmount,
-        transaction_status: "pending",
-        fraud_status: "accept",
-        payment_type: "qris",
-        // A plausible QRIS payload. Only its non-emptiness is load-bearing:
-        // the API renders the PNG itself from this string.
-        qr_string: `00020101021226610014COM.STUB.WWW0118${orderId}5204599953033605802ID6304ABCD`,
-        expiry_time: jakartaTimestamp(30),
-        actions: [
-          {
-            name: "generate-qr-code",
-            method: "GET",
-            url: `http://localhost:8101/v2/qr/${encodeURIComponent(orderId)}`,
-          },
-        ],
-      });
-    }
-
-    // GET /v2/:order_id/status
-    const statusMatch = url.pathname.match(/^\/v2\/(.+)\/status$/);
-    if (statusMatch && req.method === "GET") {
-      const orderId = decodeURIComponent(statusMatch[1]);
-      const tx = transactions.get(orderId);
-
-      if (!tx) {
-        // Midtrans answers an unknown transaction with HTTP 200 and "404" in the
-        // body — the exact trap `statusResponse` documents. Reproducing it keeps
-        // the reconciliation path honest.
+      // The gateway refuses a reference it has already issued a code for, and
+      // the API leans on exactly that to make its session-open retry safe: a
+      // retry can never produce a second live code for one order. Reproducing
+      // the refusal keeps that guarantee honest rather than assumed.
+      //
+      // The wording matters. `isDuplicateReference` matches on text because the
+      // contract types the error as `any`, and "duplicate" is one of the
+      // markers it looks for.
+      if (transactions.has(refId)) {
         return json(res, 200, {
-          status_code: "404",
-          status_message: "Transaction doesn't exist.",
-          order_id: orderId,
+          s: false,
+          e: `duplicate ref id: ${refId}`,
+          d: null,
         });
       }
 
+      const externalRefId = `stub-eri-${refId}`;
+      transactions.set(refId, { externalRefId, refId, amount });
+
+      // Roughly the API's PAYMENT_EXPIRY, and deliberately not far from it.
+      //
+      // Under Manjo the gateway's expiry is adopted unchanged, whatever its
+      // length (FR-009c) — it is not capped by the configured window the way a
+      // Midtrans-era stub could assume. So this value *is* the deadline the
+      // guest gets, and a wildly different one would both misrepresent the
+      // gateway and trip the "differs materially" warning on every single
+      // checkout, which is how a signal worth reading gets trained into noise.
+      const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+
       return json(res, 200, {
-        status_code: tx.status === "settlement" ? "200" : "201",
-        status_message: "Success",
-        transaction_id: tx.transactionId,
-        order_id: tx.orderId,
-        gross_amount: tx.grossAmount,
-        transaction_status: tx.status,
-        fraud_status: "accept",
-        payment_type: "qris",
+        s: true,
+        e: null,
+        d: {
+          m: METHOD_QR,
+          eri: externalRefId,
+          mr: {
+            // A plausible QRIS payload. Only its non-emptiness is load-bearing:
+            // the API renders the PNG itself from this string.
+            qr_r: `00020101021226610014COM.STUB.WWW0118${refId}5204599953033605802ID6304ABCD`,
+            qr_u: `http://localhost:8101/qr/${encodeURIComponent(refId)}`,
+            qr_ea: expiresAt,
+          },
+        },
       });
     }
 
     // The provider-hosted QR image. Never fetched by the API — it generates its
     // own PNG — but a 404 here would be a confusing red herring in a trace.
-    if (url.pathname.startsWith("/v2/qr/")) {
+    if (url.pathname.startsWith("/qr/")) {
       res.writeHead(200, { "content-type": "image/png" });
       return res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     }
 
-    json(res, 404, { status_code: "404", status_message: "stub: no such path" });
+    json(res, 404, { s: false, e: "stub: no such path", d: null });
   });
 
   return {
     server,
-    /** Marks an order settled, so a later reconciliation read agrees with the webhook. */
-    markSettled(orderId: string): void {
-      const tx = transactions.get(orderId);
-      if (tx) tx.status = "settlement";
+    /** The amount the API opened the session for, for a test that wants to assert on it. */
+    amountFor(refId: string): number | undefined {
+      return transactions.get(refId)?.amount;
     },
-    grossAmountFor(orderId: string): string | undefined {
-      return transactions.get(orderId)?.grossAmount;
+    /** The gateway-side reference the API stores as the provider ref. */
+    externalRefFor(refId: string): string | undefined {
+      return transactions.get(refId)?.externalRefId;
     },
   };
 }
@@ -186,6 +176,6 @@ if (isMain) {
   const { server } = createGatewayStub();
   server.listen(port, () => {
     // eslint-disable-next-line no-console
-    console.log(`[gateway-stub] Midtrans Core API stub listening on :${port}`);
+    console.log(`[gateway-stub] Manjo gateway stub listening on :${port}`);
   });
 }

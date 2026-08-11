@@ -13,7 +13,6 @@ import {
 import { AdminConsole, defaultHolder, GuestJourney } from "../support/journey";
 import { settleOrder } from "../support/payment";
 import { config } from "../support/env";
-import { orderRow } from "../support/db";
 
 /**
  * The other half of the product: the operator's side. These scenarios pick up
@@ -70,8 +69,7 @@ test.describe("Admin console", () => {
     await guest.fillHolder(0, defaultHolder);
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
-    await settleOrder(orderNumber, String(Math.trunc(Number(order.total_amount))));
+    await settleOrder(orderNumber);
     await waitFor(
       () => orderStatusOf(orderNumber),
       (s) => s === "PAID",
@@ -101,8 +99,7 @@ test.describe("Admin console", () => {
     await guest.fillHolder(0, defaultHolder);
     await guest.payWithQris();
 
-    const order = await orderRow(orderNumber);
-    await settleOrder(orderNumber, String(Math.trunc(Number(order.total_amount))));
+    await settleOrder(orderNumber);
 
     const [code] = await waitFor(
       () => ticketCodesFor(orderNumber),

@@ -168,7 +168,7 @@ func (s *Service) OrderNotifications(ctx context.Context, orderID uuid.UUID) ([]
 // resend would be refused a second time on the same shortfall.
 func (s *Service) OrderHolds(ctx context.Context, orderID uuid.UUID) ([]OrderHold, error) {
 	var holds []QuotaHold
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		holds, err = s.orders.QuotaHolds(ctx, tx, orderID)
 		return err
@@ -223,7 +223,7 @@ func (s *Service) settleExpiredOrder(ctx context.Context, ord OrderRef, provider
 		applied bool
 		holds   []QuotaHold
 	)
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		applied, err = s.releaser.SettleExpired(ctx, tx, ord.ID)
 		if err != nil || !applied {

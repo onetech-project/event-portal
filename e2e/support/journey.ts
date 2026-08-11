@@ -159,8 +159,13 @@ export class GuestJourney {
    * the confirmation screen on its own — no reload.
    */
   async expectConfirmation(): Promise<void> {
-    await this.page.waitForURL(/\/done$/, { timeout: 45_000 });
-    await expect(this.page.getByText(/thank you for your purchase/i)).toBeVisible();
+    await this.page.waitForURL(/\/success$/, { timeout: 45_000 });
+    // The heading, not loose body text: this screen also renders "Payment" in
+    // its summary, and a regex broad enough to match that would pass on the
+    // still-pending checkout page too.
+    await expect(
+      this.page.getByRole("heading", { name: /payment successful/i }),
+    ).toBeVisible();
   }
 }
 
