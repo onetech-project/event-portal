@@ -80,6 +80,43 @@ export class GuestJourney {
     }
   }
 
+  /**
+   * Adjusts an already-selected row to an exact quantity, in either direction.
+   *
+   * Unlike selectQuantity this assumes the stepper is already showing, which is
+   * what makes it the right helper for a guest correcting a refused selection
+   * rather than building a new one.
+   */
+  async setQuantity(ticketName: string, quantity: number): Promise<void> {
+    const stepper = this.page.getByLabel(`Quantity for ${ticketName}`);
+    await expect(stepper).toBeVisible();
+
+    const increase = this.page.getByRole("button", { name: `Increase ${ticketName}` });
+    const decrease = this.page.getByRole("button", { name: `Decrease ${ticketName}` });
+
+    // Read between clicks rather than computing a click count up front: the
+    // counter is the source of truth, and stepping to it cannot drift.
+    for (let guard = 0; guard < 20; guard++) {
+      const current = Number((await stepper.textContent()) ?? "0");
+      if (current === quantity) return;
+      await (current < quantity ? increase : decrease).click();
+      await expect(stepper).toHaveText(String(current < quantity ? current + 1 : current - 1));
+    }
+
+    throw new Error(`could not step ${ticketName} to ${quantity}`);
+  }
+
+  /**
+   * The refusal panel the availability gate renders (spec 013).
+   *
+   * Named rather than located by bare role: the App Router keeps its own
+   * always-present `role="alert"` route announcer in the DOM, so an unqualified
+   * getByRole("alert") is a strict-mode violation on every page.
+   */
+  refusals() {
+    return this.page.getByRole("alert", { name: /why this selection cannot be bought/i });
+  }
+
   /** Reads the remaining-quota figure the row advertises, if it shows one. */
   async visibleQuotaText(ticketName: string): Promise<string> {
     const row = this.page.locator("section", { hasText: ticketName }).first();
@@ -87,11 +124,33 @@ export class GuestJourney {
   }
 
   /**
-   * "Buy Ticket" opens the terms gate rather than navigating. Agreement is what
-   * books the order, so this is the moment quota is actually taken.
+   * Presses "Buy Ticket" and waits for the availability check it fires to
+   * settle (spec 013).
+   *
+   * The button does not open the terms itself. It asks the server whether this
+   * exact selection can still be bought, and only a clean answer opens the
+   * gate — so a caller expecting the dialog must wait for the round trip, and a
+   * caller expecting a refusal has somewhere to assert instead.
+   *
+   * This only presses. Waiting belongs to the caller's assertion — `toBeVisible`
+   * on the dialog, or `toContainText` on the refusal — both of which retry, so
+   * they absorb the round trip without a sleep. Waiting here instead would have
+   * to re-find the button, and an open Radix dialog marks the page behind it
+   * `aria-hidden`, so by role it is no longer there to find.
+   */
+  async buyTicket(): Promise<void> {
+    const button = this.page.getByRole("button", { name: /buy ticket/i });
+    await expect(button).toBeEnabled();
+    await button.click();
+  }
+
+  /**
+   * The full gate: press Buy Ticket, pass the availability check, agree to the
+   * terms. Agreement is what books the order, so this is the moment quota is
+   * actually taken.
    */
   async agreeToTermsAndBook(): Promise<string> {
-    await this.page.getByRole("button", { name: /buy ticket/i }).click();
+    await this.buyTicket();
 
     const dialog = this.page.getByRole("dialog");
     await expect(dialog).toBeVisible();

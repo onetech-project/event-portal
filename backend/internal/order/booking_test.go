@@ -194,22 +194,35 @@ func TestBookSingleBundleUnitStampsUnitOne(t *testing.T) {
 	assert.Equal(t, map[uuid.UUID]int{day1.ID: 1, day2.ID: 1}, types)
 }
 
-// The concurrent last-ticket race: two guests agree at once; exactly one hold.
+// The concurrent last-ticket race: N guests agree at once; exactly one hold.
+//
+// This is also the standing guard on TicketTypeInfo.QuotaRemaining (spec 013).
+// That field carries a lock-free remaining-quota snapshot into the order domain
+// for the advisory availability check, which puts it within easy reach of
+// bookOnce. Using it there as a "cheap pre-check" would replace the atomic,
+// row-locked UPDATE with a read-then-write race and oversell under exactly this
+// contention — silently, because the uncontended path would look identical.
+// If this test ever goes red, that is the first thing to look for.
 func TestConcurrentBooksCannotOversellTheLastTicket(t *testing.T) {
 	f := newCheckoutFixture(t)
 	ev := testsupport.SeedEvent(t, f.pool, "last-ticket", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, f.pool, ev.ID, "Regular", "150000.00", 1)
 	testsupport.SeedEventTerms(t, f.pool, ev.ID, "<p>terms</p>")
 
+	// Eight contenders rather than two: a read-then-write oversell can slip
+	// through a two-way race often enough to look flaky, but not an eight-way one.
 	var wg sync.WaitGroup
-	results := make([]error, 2)
+	results := make([]error, 8)
+	start := make(chan struct{})
 	for i := range results {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start // release them together, so they actually contend
 			_, results[i] = f.svc.Book(context.Background(), bookFor(ev.ID, tt.ID, 1))
 		}()
 	}
+	close(start)
 	wg.Wait()
 
 	succeeded := 0
@@ -223,7 +236,10 @@ func TestConcurrentBooksCannotOversellTheLastTicket(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, succeeded, "exactly one booking may take the last seat")
-	assert.Equal(t, int32(0), quotaOf(t, f, tt.ID))
+
+	remaining := quotaOf(t, f, tt.ID)
+	assert.Equal(t, int32(0), remaining)
+	assert.GreaterOrEqual(t, remaining, int32(0), "quota must never go negative")
 }
 
 // --- T016 RecordAgreement ----------------------------------------------------

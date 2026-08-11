@@ -69,6 +69,34 @@ func (h *Handler) checkoutOrder(c echo.Context) error {
 	return httpx.Respond(c, http.StatusOK, resp)
 }
 
+// RegisterAvailabilityRoute mounts POST /ticket/availability (spec 013) on its
+// own group. It is read-only and creates nothing, so it does not belong behind
+// booking's deliberately tight limiter — a guest who is refused twice and
+// adjusts their selection would be throttled out of the recovery path the gate
+// exists to offer.
+func (h *Handler) RegisterAvailabilityRoute(g *echo.Group) {
+	g.POST("/ticket/availability", h.availability)
+}
+
+// availability answers whether a selection can still be bought.
+//
+// A refusal is a 200: the question was well formed and correctly answered, and
+// the decision body carries every reason at once — which an error envelope
+// could not, since it holds a single code. Only a malformed request is a 4xx.
+func (h *Handler) availability(c echo.Context) error {
+	var req AvailabilityRequest
+	if err := c.Bind(&req); err != nil {
+		return apperr.Wrap(err, http.StatusBadRequest, apperr.CodeValidation,
+			"The request body could not be parsed.")
+	}
+
+	decision, err := h.svc.EvaluateAvailability(c.Request().Context(), req)
+	if err != nil {
+		return err
+	}
+	return httpx.Respond(c, http.StatusOK, decision)
+}
+
 // RegisterBookRoute mounts POST /ticket/book on its own group so the
 // composition root can rate limit it per IP without throttling the polled
 // order reads.

@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { adminFetch, ApiError, apiFetch } from "./api-client";
 import type {
   AttendeeSummary,
+  AvailabilityDecision,
   BookResponse,
   CheckoutItemInput,
   EventTerms,
@@ -123,6 +124,26 @@ export function useEventTerms(slug: string, enabled: boolean = true) {
     queryFn: () =>
       apiFetch<EventTerms>(`/ticket/terms-condition/${encodeURIComponent(slug)}`),
     enabled: enabled && slug !== "",
+    retry: false,
+  });
+}
+
+/**
+ * Confirms the selection can still be bought, on the "Buy Ticket" press
+ * (POST /ticket/availability, spec 013) — before the Terms & Conditions gate
+ * opens, so a guest never reads a document for a purchase that cannot happen.
+ *
+ * The answer is advisory: it reserves nothing and creates no order, and a
+ * refusal comes back as a 200 with `available: false` rather than as an error,
+ * because it is a correct answer to a well-formed question. Only a malformed
+ * request throws.
+ */
+export function useCheckAvailability() {
+  return useMutation({
+    mutationFn: (body: { event_id: string; items: CheckoutItemInput[] }) =>
+      apiFetch<AvailabilityDecision>("/ticket/availability", { method: "POST", body }),
+    // Same reasoning as useBookOrder: a retry on an ambiguous transport failure
+    // doubles the load on an endpoint whose answer is stale the moment it lands.
     retry: false,
   });
 }

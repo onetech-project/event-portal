@@ -9,9 +9,9 @@ import {
   DialogClose,
   DialogContent,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { API_CODES, ApiError } from "@/lib/api-client";
+import { failureMessage } from "@/lib/availability";
 import { useBookOrder, useEventTerms, useRecordAgreement } from "@/lib/queries";
 import { checkoutItems } from "@/lib/selection";
 import type { SelectionLine } from "@/lib/types";
@@ -19,8 +19,14 @@ import type { SelectionLine } from "@/lib/types";
 /**
  * The Terms & Conditions gate in front of booking (spec 008).
  *
- * Buy Ticket does not navigate: it opens this dialog, which fetches the event's
- * current CMS-authored terms. The Agree click is two calls back-to-back —
+ * It is a CONTROLLED dialog (spec 013): it no longer owns the Buy Ticket
+ * button. The press now runs a server availability check first, and only a
+ * clean answer opens this — so the component that awaits that answer is the one
+ * that holds `open`. Owning a trigger here would mean blocking its own opening
+ * for the duration of a round trip, i.e. lying about its own state.
+ *
+ * Once open, nothing below changed. The dialog fetches the event's current
+ * CMS-authored terms; the Agree click is two calls back-to-back —
  * POST /ticket/book creates the held PENDING order (quota locked, 1-hour hold),
  * then POST /ticket/terms-condition/:order_id records the agreement — and only
  * then does the guest move on to the order page.
@@ -39,7 +45,8 @@ export function TermsDialog({
   eventSlug,
   eventName,
   lines,
-  triggerClassName,
+  open,
+  onOpenChange,
 }: {
   /** The event's UUID — what POST /ticket/book identifies the event by. */
   eventId: string;
@@ -47,10 +54,11 @@ export function TermsDialog({
   eventSlug: string;
   eventName: string;
   lines: SelectionLine[];
-  triggerClassName: string;
+  /** Owned by the caller, which opens this only on a clean availability check. */
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
   const [agreed, setAgreed] = useState(false);
   // Set once book succeeds, so a failed agreement retries against the same
   // order instead of booking (and holding quota) twice.
@@ -71,7 +79,7 @@ export function TermsDialog({
   const failed = book.isError || agreement.isError;
 
   function handleOpenChange(next: boolean) {
-    setOpen(next);
+    onOpenChange(next);
     if (!next) {
       setAgreed(false);
       // A booked-but-unagreed order left behind here is intentionally
@@ -119,8 +127,6 @@ export function TermsDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger className={triggerClassName}>Buy Ticket</DialogTrigger>
-
       <DialogContent className="flex max-h-[calc(100dvh-6rem)] max-w-144.5 flex-col gap-0 rounded-2xl p-0 sm:max-w-3xl">
         {/* An empty bar the close button sits in, so the rule below it clears
             the button rather than running under it. */}
@@ -205,23 +211,29 @@ export function TermsDialog({
   );
 }
 
-/** Words a booking failure for the dialog; null when there is none. */
+/**
+ * Words a booking failure for the dialog; null when there is none.
+ *
+ * Everything the availability check can ALSO report — a quota shortfall, absent
+ * terms — deliberately falls through to `failureMessage`, which echoes the
+ * server's own sentence. Those used to be re-worded here, which meant a guest
+ * refused at Buy Ticket and refused again at Agree read two different
+ * descriptions of one problem (spec 013 FR-013).
+ *
+ * The two kept below are the ones the check cannot produce, and where the
+ * client knows something the server's sentence does not say: that the document
+ * on screen has been replaced and must be re-read, and that the thing to do
+ * about a throttle is wait.
+ */
 function agreementErrorMessage(error: unknown): string | null {
   if (error === null || error === undefined) return null;
   if (error instanceof ApiError) {
-    if (error.code === API_CODES.insufficientQuota) {
-      return "Not enough tickets remain for your selection. Please adjust it and try again.";
-    }
-    if (error.code === API_CODES.termsMissing) {
-      return "This event's Terms & Conditions are not available yet, so booking is closed.";
-    }
     if (error.code === API_CODES.termsChanged) {
       return "The Terms & Conditions were updated. Please review the new version and agree again.";
     }
     if (error.code === API_CODES.rateLimited) {
       return "Too many booking attempts. Please wait a moment and try again.";
     }
-    return error.message;
   }
-  return "Something went wrong. Please try again.";
+  return failureMessage(error);
 }

@@ -34,6 +34,9 @@ func (a eventProviderAdapter) TicketTypeForCheckout(ctx context.Context, tx pgx.
 		Price:      row.Price,
 		SalesStart: row.SalesStart,
 		SalesEnd:   row.SalesEnd,
+		// Mirrors cmd/api: dropping it here would leave every availability check
+		// in these tests judging demand against a remaining quota of zero.
+		QuotaRemaining: row.Quota,
 	}, nil
 }
 

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TermsDialog } from "./terms-dialog";
@@ -81,17 +81,37 @@ function wrapper() {
   return Wrapper;
 }
 
-function setup() {
-  return render(
-    <TermsDialog
-      eventId={EVENT_ID}
-      eventSlug="jive-2026"
-      eventName="Jive Indonesia 2026"
-      lines={LINES}
-      triggerClassName="buy"
-    />,
-    { wrapper: wrapper() },
+/**
+ * The dialog is controlled since spec 013 — it no longer owns a Buy Ticket
+ * trigger, because the press now runs a server availability check first and
+ * only a clean answer opens the gate.
+ *
+ * This harness stands in for that parent with the smallest thing that still
+ * makes these tests mean what they meant: a button that opens it. The check
+ * itself is SelectionSummary's job and is covered there; what is under test
+ * here is everything the dialog does once open.
+ */
+function Harness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Buy Ticket
+      </button>
+      <TermsDialog
+        eventId={EVENT_ID}
+        eventSlug="jive-2026"
+        eventName="Jive Indonesia 2026"
+        lines={LINES}
+        open={open}
+        onOpenChange={setOpen}
+      />
+    </>
   );
+}
+
+function setup() {
+  return render(<Harness />, { wrapper: wrapper() });
 }
 
 beforeEach(() => {

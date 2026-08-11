@@ -42,6 +42,10 @@ func (a eventProviderAdapter) TicketTypeForCheckout(ctx context.Context, tx pgx.
 		Price:      row.Price,
 		SalesStart: row.SalesStart,
 		SalesEnd:   row.SalesEnd,
+		// Already on the row — GetTicketTypeByID selects quota — so carrying it
+		// across costs no query, no round trip and no lock. See the field's own
+		// doc comment for why booking must not read it.
+		QuotaRemaining: row.Quota,
 	}, nil
 }
 

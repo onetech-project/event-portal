@@ -57,6 +57,16 @@ const (
 	// for a genuine group organizing itself, while a scripted hoarder starves.
 	bookRate  = 0.33
 	bookBurst = 5
+
+	// The availability check reads and creates nothing, so it is limited far
+	// more loosely than booking. It deliberately does NOT share bookRate: the
+	// intended flow is check-then-book, plus another check every time a refused
+	// guest adjusts their selection and tries again, so charging those to the
+	// booking budget would throttle a guest out of the recovery path the check
+	// exists to offer. Still limited, because it is unauthenticated and hits the
+	// database on every call.
+	availabilityRate  = 1.0
+	availabilityBurst = 10
 )
 
 func main() {
@@ -291,6 +301,12 @@ func run(log *logger.Logger) error {
 	bookGroup := e.Group("/api/v1",
 		httpx.RateLimitPerIP(bookRate, bookBurst, rateLimitWindow))
 	orderHandler.RegisterBookRoute(bookGroup)
+
+	// The availability check in front of the Terms & Conditions gate (spec 013).
+	// Its own group and its own budget — see availabilityRate.
+	availabilityGroup := e.Group("/api/v1",
+		httpx.RateLimitPerIP(availabilityRate, availabilityBurst, rateLimitWindow))
+	orderHandler.RegisterAvailabilityRoute(availabilityGroup)
 
 	// The public ticket lookup is rate limited per IP so ticket-code enumeration
 	// is impractical (spec FR-020).
