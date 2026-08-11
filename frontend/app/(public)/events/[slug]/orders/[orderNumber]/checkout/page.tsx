@@ -165,27 +165,33 @@ export function CheckoutView({
   // panel — with the collapsible how-to-pay — on the right.
   return (
     <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
-      {showPayment && data.payment ? (
-        <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl bg-brand-surface px-5 py-4 border border-destructive/20">
-          <div className="flex items-center gap-3">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-background text-brand">
-              <Clock aria-hidden className="size-5" />
-            </span>
-            <div>
-              <p className="font-semibold">Complete Purchase</p>
-              <p className="text-xs text-muted-foreground">
-                The order will be automatically canceled if the time expires.
-              </p>
-            </div>
+      {/* The banner outlives the deadline it counts. Removing it at zero took
+          the countdown off the screen at the one moment the guest was watching
+          it, which read as the page breaking; leaving it at 0 : 00 shows the
+          window closing rather than the page losing its nerve. It adds no
+          second expiry message — the dialog is still the only one (FR-022). */}
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl bg-brand-surface px-5 py-4 border border-destructive/20">
+        <div className="flex items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-background text-brand">
+            <Clock aria-hidden className="size-5" />
+          </span>
+          <div>
+            <p className="font-semibold">Complete Purchase</p>
+            <p className="text-xs text-muted-foreground">
+              The order will be automatically canceled if the time expires.
+            </p>
           </div>
-          <ExpiryCountdown
-            variant="digits"
-            expiresAt={data.payment.expires_at}
-            serverTime={data.server_time}
-            onExpired={onExpired}
-          />
         </div>
-      ) : null}
+        <ExpiryCountdown
+          variant="digits"
+          // Null once the order has ended: the server stops issuing an
+          // instruction, so there is no deadline left to count and the clock
+          // holds at zero.
+          expiresAt={showPayment && data.payment ? data.payment.expires_at : null}
+          serverTime={data.server_time}
+          onExpired={onExpired}
+        />
+      </div>
 
       <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-start">
         <div className="space-y-6">
@@ -257,7 +263,7 @@ function PrimaryAction({
   }
 
   return (
-    <Button size="lg" disabled className="w-full">
+    <Button size="lg" disabled className="w-full disabled:bg-muted disabled:text-muted-foreground">
       Waiting for payment…
     </Button>
   );

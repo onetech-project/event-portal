@@ -69,10 +69,9 @@ export function QrisPanel({
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="text-xl font-bold">
+      <CardHeader className="justify-center items-center">
+        <CardTitle className="text-xl font-bold text-center">
           Scan to Pay
-          {ended ? " — Order Ended" : ""}
         </CardTitle>
         <CardDescription className="text-xs text-muted-foreground">
           {ended
@@ -88,9 +87,7 @@ export function QrisPanel({
         */}
         <div className="@container w-full">
           <div
-            className={`relative aspect-522/735 overflow-hidden rounded-xl border bg-white text-neutral-900 ${
-              ended ? "opacity-60 grayscale" : ""
-            }`}
+            className="relative aspect-522/735 overflow-hidden rounded-xl border bg-white text-neutral-900"
           >
             {/* eslint-disable @next/next/no-img-element -- fixed artwork; the
                 optimizer would only re-encode small static PNGs. */}

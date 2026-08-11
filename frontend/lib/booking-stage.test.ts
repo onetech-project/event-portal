@@ -31,7 +31,7 @@ describe("bookingStageFromPathname", () => {
   it("maps the confirmation page to Done, not Registration", () => {
     // The order route is a prefix of both nested routes, so a naive prefix
     // check stops at the forms and the rail never reaches its last two stages.
-    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/done`)).toBe("Done");
+    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/success`)).toBe("Success");
   });
 
   it("gives each of the four stages exactly one address", () => {
@@ -40,19 +40,19 @@ describe("bookingStageFromPathname", () => {
       stageOf(`/events/${SLUG}/tickets`),
       stageOf(`/events/${SLUG}/orders/${ORDER}`),
       stageOf(`/events/${SLUG}/orders/${ORDER}/checkout`),
-      stageOf(`/events/${SLUG}/orders/${ORDER}/done`),
+      stageOf(`/events/${SLUG}/orders/${ORDER}/success`),
     ]).toEqual([...BOOKING_STEPS]);
   });
 
   it("ignores a trailing slash", () => {
-    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/done/`)).toBe("Done");
+    expect(bookingStageFromPathname(`/events/${SLUG}/orders/${ORDER}/success/`)).toBe("Done");
     expect(bookingStageFromPathname(`/events/${SLUG}/tickets/`)).toBe("Booking");
     expect(bookingStageFromPathname(`/events/${SLUG}/`)).toBe("Booking");
   });
 
   it("is not confused by a slug or order number containing a stage name", () => {
     expect(bookingStageFromPathname("/events/checkout")).toBe("Booking");
-    expect(bookingStageFromPathname("/events/done/orders/done")).toBe("Registration");
+    expect(bookingStageFromPathname("/events/success/orders/success")).toBe("Registration");
     expect(bookingStageFromPathname("/events/checkout/orders/checkout")).toBe(
       "Registration",
     );
@@ -68,7 +68,7 @@ describe("bookingStageFromPathname", () => {
       `/events/${SLUG}/checkout`,
       `/events/${SLUG}/orders/${ORDER}`,
       `/events/${SLUG}/orders/${ORDER}/checkout`,
-      `/events/${SLUG}/orders/${ORDER}/done`,
+      `/events/${SLUG}/orders/${ORDER}/success`,
       "/",
       "",
     ];

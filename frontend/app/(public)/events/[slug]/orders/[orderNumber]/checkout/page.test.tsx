@@ -64,7 +64,7 @@ const EXPIRED: TicketOrderDetail = { ...PENDING, status: "EXPIRED", payment: nul
 const HELD: TicketOrderDetail = { ...PENDING, payment_started: false, payment: null };
 
 const FORMS_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}`;
-const DONE_PATH = `${FORMS_PATH}/done`;
+const DONE_PATH = `${FORMS_PATH}/success`;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
