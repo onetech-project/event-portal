@@ -20,6 +20,7 @@ backend/     Go modular monolith (Echo v4, sqlc, pgx)
   pkg/              shared non-domain utilities (db, config, logger, money, …)
   migrations/       golang-migrate up/down pairs, schema per SCHEMA.md
 frontend/    Next.js App Router, TypeScript, TailwindCSS, TanStack Query
+e2e/         Playwright acceptance suite — a real browser against the real stack
 ```
 
 Each domain owns its tables and exposes `dto.go`, `repository.go`, `service.go`,
@@ -108,7 +109,18 @@ Both are multi-stage.
 ```bash
 cd backend && ./scripts/test.sh ./...   # Go: unit + database-backed
 cd frontend && npx vitest run           # TypeScript: logic + components
+cd e2e && npm test                      # Playwright: the whole system, in a browser
 ```
+
+**The e2e suite is the acceptance gate, not an optional extra** (Constitution
+Principle VIII). It drives a real browser against the real Next.js app, the real Go
+API, and real PostgreSQL and Redis — the payment provider is the only substitution, and
+even that is replaced at the network boundary so settlement still arrives as a signed
+webhook the production handler verifies. If you change the purchase journey, the admin
+console, or anything the cache serves, update `e2e/specs/` in the same change; if you
+fix a bug in one of those flows, add a scenario that fails against the unfixed code.
+It needs Postgres and Redis up first — [`e2e/README.md`](e2e/README.md) has the
+prerequisites, the coverage table, and `E2E_SLOW_MO` for watching a run at human speed.
 
 The Go suite talks to a real PostgreSQL. `scripts/test.sh` points at a
 `ticketing_test` database and runs packages one at a time, since each truncates the
@@ -203,6 +215,10 @@ apply.
   admin supplies.
 - **SCHEMA.md is locked.** Ticket-code lookups are exact matches against the
   existing index — normalize the input, never wrap the column in `UPPER()`.
+- **`e2e/` covers all of the above, and expects to be updated with them.** The
+  purchase journey, the admin console, and the cache are under acceptance test. A
+  change to any of them ships with its `e2e/specs/` change; a bugfix in any of them
+  ships with a scenario that was red before the fix. See Constitution Principle VIII.
 
 ## Payment configuration
 
@@ -213,6 +229,9 @@ apply.
 | `PAYMENT_SWEEP_INTERVAL` | `30s` | How often abandoned orders past their deadline are expired and their quota returned. |
 
 ## Local end-to-end runs
+
+This section is about driving the flow *by hand*. For the automated version, see
+[`e2e/`](e2e/README.md) — it does all of the below without you clicking anything.
 
 `MIDTRANS_BASE_URL` overrides the Core API endpoint, so the whole purchase flow —
 checkout, webhook, ticket generation, email — can be exercised against a stub
