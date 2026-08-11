@@ -1,6 +1,6 @@
 # Quickstart: Refresh-on-Write List Caching
 
-**Feature**: 012-redis-list-cache | **Date**: 2026-08-10
+**Feature**: 014-redis-list-cache | **Date**: 2026-08-10
 
 How to run the feature locally and prove it works. Design details live in
 [plan.md](./plan.md); key and invalidation rules live in [contracts/](./contracts/).

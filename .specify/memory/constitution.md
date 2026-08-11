@@ -123,7 +123,7 @@ Trigger: user direction of 2026-08-10 — event lists, ticket_type lists, and or
 are the most frequently read data in the product and should be served from a Redis cache
 kept correct by refresh-on-write. Constitution 3.0.0 named Redis in Principle VI's
 out-of-scope list and restricted infrastructure to PostgreSQL only, which blocked
-specs/012-redis-list-cache at the specification stage. This amendment unblocks it under
+specs/014-redis-list-cache at the specification stage. This amendment unblocks it under
 narrow, enumerated conditions rather than by lifting the restriction wholesale.
 
 Added principles:
@@ -166,7 +166,7 @@ Deferred items: none. No placeholder tokens remain in this document.
 
 Templates requiring follow-up: none.
 
-Downstream: specs/012-redis-list-cache is unblocked and may proceed to /speckit-plan. Its
+Downstream: specs/014-redis-list-cache is unblocked and may proceed to /speckit-plan. Its
 FR-001..FR-003 (cacheable surfaces), FR-006..FR-011 (commit-triggered invalidation),
 FR-012..FR-013 (never authoritative for quota; fail open), and FR-021 (kill switch) were
 checked line-by-line against Principle VII and are consistent with it. Its Status line

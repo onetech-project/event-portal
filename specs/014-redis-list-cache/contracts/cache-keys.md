@@ -1,6 +1,6 @@
 # Contract: Cache Key Grammar and Cacheable Surfaces
 
-**Feature**: 012-redis-list-cache | **Date**: 2026-08-10
+**Feature**: 014-redis-list-cache | **Date**: 2026-08-10
 
 This file is the closed list Constitution Principle VII requires. **Adding a row to the
 surface table requires a constitution amendment**, not just a code change.

@@ -1,8 +1,8 @@
 # Implementation Plan: Refresh-on-Write List Caching
 
-**Branch**: `012-redis-list-cache` | **Date**: 2026-08-10 | **Spec**: [spec.md](./spec.md)
+**Branch**: `014-redis-list-cache` | **Date**: 2026-08-10 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/012-redis-list-cache/spec.md`
+**Input**: Feature specification from `/specs/014-redis-list-cache/spec.md`
 
 ## Summary
 
@@ -92,7 +92,7 @@ the Complexity Tracking table stays empty.
 ### Documentation (this feature)
 
 ```text
-specs/012-redis-list-cache/
+specs/014-redis-list-cache/
 ├── plan.md              # This file
 ├── spec.md              # Feature specification
 ├── research.md          # Phase 0 output — 8 resolved decisions

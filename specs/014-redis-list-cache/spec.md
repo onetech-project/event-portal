@@ -1,6 +1,6 @@
 # Feature Specification: Refresh-on-Write List Caching
 
-**Feature Branch**: `012-redis-list-cache`
+**Feature Branch**: `014-redis-list-cache`
 
 **Created**: 2026-08-10
 

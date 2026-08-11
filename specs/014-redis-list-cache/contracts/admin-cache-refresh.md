@@ -1,6 +1,6 @@
 # Contract: `POST /api/v1/admin/cache/refresh`
 
-**Feature**: 012-redis-list-cache | **Requirement**: FR-020
+**Feature**: 014-redis-list-cache | **Requirement**: FR-020
 
 The operator escape hatch: discard every cached list and force the next read of each to be
 rebuilt from PostgreSQL. Used after a manual database correction, on suspected

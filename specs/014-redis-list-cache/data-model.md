@@ -1,6 +1,6 @@
 # Phase 1 Data Model: Refresh-on-Write List Caching
 
-**Feature**: 012-redis-list-cache | **Date**: 2026-08-10
+**Feature**: 014-redis-list-cache | **Date**: 2026-08-10
 
 **No PostgreSQL schema change.** No table, column, index, or constraint is added, altered,
 or dropped, so `SCHEMA.md` is untouched. Every entity below lives in Redis or in process

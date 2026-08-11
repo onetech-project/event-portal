@@ -1,11 +1,11 @@
 ---
 
-description: "Task list for 012-redis-list-cache"
+description: "Task list for 014-redis-list-cache"
 ---
 
 # Tasks: Refresh-on-Write List Caching
 
-**Input**: Design documents from `/specs/012-redis-list-cache/`
+**Input**: Design documents from `/specs/014-redis-list-cache/`
 
 **Prerequisites**: [plan.md](./plan.md), [spec.md](./spec.md), [research.md](./research.md), [data-model.md](./data-model.md), [contracts/](./contracts/)
 

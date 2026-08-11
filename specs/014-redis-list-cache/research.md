@@ -1,6 +1,6 @@
 # Phase 0 Research: Refresh-on-Write List Caching
 
-**Feature**: 012-redis-list-cache | **Date**: 2026-08-10
+**Feature**: 014-redis-list-cache | **Date**: 2026-08-10
 
 Eight decisions were open after the spec. All are resolved; no `NEEDS CLARIFICATION`
 remains in the plan's Technical Context.

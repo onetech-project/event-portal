@@ -1,6 +1,6 @@
 # Contract: Invalidation Map
 
-**Feature**: 012-redis-list-cache | **Date**: 2026-08-10
+**Feature**: 014-redis-list-cache | **Date**: 2026-08-10
 
 Every write path that touches cached data, and the scopes it MUST bump after its
 transaction commits. This table is the checklist for FR-006 and FR-008: a write path

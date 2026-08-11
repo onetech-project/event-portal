@@ -18,7 +18,7 @@ import { config } from "../support/env";
 import { defaultHolder, GuestJourney } from "../support/journey";
 
 /**
- * UAT for the read cache (spec 012 / Constitution Principle VII).
+ * UAT for the read cache (spec 014 / Constitution Principle VII).
  *
  * The point of these scenarios is that the cache must be invisible: a guest
  * should never be able to tell it is there except by how fast the page is. So
