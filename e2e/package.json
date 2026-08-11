@@ -1,0 +1,22 @@
+{
+  "name": "ticketing-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full end-to-end UAT automation: real browser, real Next.js, real Go API, real PostgreSQL, real Redis.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:debug": "PWDEBUG=1 playwright test",
+    "report": "playwright show-report",
+    "install-browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.11.0",
+    "pg": "^8.13.0",
+    "typescript": "^5.7.0"
+  }
+}
