@@ -84,6 +84,73 @@ with `service_completed_successfully`, so the binary never serves against a sche
 it was not generated for. `sqlc.yaml` points `schema:` at the directory: sqlc
 replays the `up` files in order and ignores the `down` ones.
 
+**3.6a. Read Cache (Redis)**
+
+Rule: Redis is a disposable read accelerator in front of the list endpoints and
+nothing else (Constitution Principle VII). PostgreSQL remains the single source of
+truth; nothing exists only in Redis, and `FLUSHDB` costs latency and nothing else.
+Redis MUST NOT be used for writes, sessions, locks, queues, or pub/sub.
+
+*What is cached* — a closed set of nine list reads, in both their public and admin
+projections: the event catalogue, per-event ticket-type and package lists, and the
+admin order and attendee lists including their filtered variants. Nothing else:
+not detail reads, not ticket lookup by code, not payment status, not the QRIS
+image. The set is enforced by the key-constructor registry in `pkg/cache/surfaces.go`,
+and extending it requires a constitution amendment.
+
+*How it stays fresh* — refresh-on-write, never expiry. Each scope owns a
+generation counter in Redis and cache keys embed its current value, so a write
+invalidates every entry derived from that scope with a single `INCR`. Three scopes
+exist:
+
+| Scope | Counter | Covers |
+|---|---|---|
+| `events` | `gen:events` | Catalogue + admin event list |
+| `event:{id}` | `gen:event:{id}` | That event's ticket-type and package lists |
+| `orders` | `gen:orders` | Every admin order and attendee variant |
+
+The single shared `orders` counter is what lets one order change reach every warm
+filter combination without the writer knowing which are warm. The TTL
+(`CACHE_TTL`, default 10m) is a backstop bounding a missed invalidation — it is
+never how the system becomes correct.
+
+*When invalidation runs* — after the writing transaction commits, and outside it.
+`db.InTx` stamps its context with a transaction marker and collects
+`db.AfterCommit` hooks, firing them only on the success path; a rollback discards
+them. `cache.InvalidateAfterCommit` registers through that, so a domain writes the
+same line whether or not it is inside a transaction.
+
+This timing is not stylistic. The quota-deducting `UPDATE` in booking holds a row
+lock until `COMMIT`, so a Redis round-trip inside it would serialise every
+concurrent buyer of the same ticket type behind network latency — the same
+collapse §3.4 and Principle IV ban gateway calls to prevent. The cache client
+therefore refuses outright when `db.InTransaction(ctx)` is true, returning
+`ErrInTransaction`. It is a runtime invariant with a test behind it, not a review
+convention.
+
+*Cross-instance* — no broadcast and no pub/sub. The generation counter lives in
+the shared Redis, so an `INCR` from any instance is immediately visible to all of
+them.
+
+*Failure behaviour* — fail open. Redis unreachable means reads fall back to
+PostgreSQL and succeed, writes still commit, and no endpoint returns an error
+because of the cache. `/healthz` reports `degraded` (200), never 503: pulling a
+working instance out of rotation over a performance problem would turn a slowdown
+into an outage. If an invalidation fails *after* its write committed — the one
+case where entries are provably wrong — the process enters a 30-second distrust
+window during which reads bypass the cache entirely, then self-clears.
+
+*Controls* — `CACHE_ENABLED=false` (or an empty `REDIS_URL`) substitutes
+`cache.NoOp{}` and returns the system to a direct database read per request, with
+no other behavioural difference. `POST /api/v1/admin/cache/refresh` flushes
+everything for an operator. Counters are exported on `/metrics` with labels
+bounded to family, scope, and operation — never an event or order id.
+
+*Quota is never cached authoritatively.* A cached availability figure is a display
+value. Every sale is decided by the row-locked `UPDATE` in the booking
+transaction, so a stale figure can mislead a guest's screen for one request but can
+never oversell.
+
 **3.7. Guest Flow**
 
 The guest never authenticates. Everything below is reachable with an order number

@@ -28,6 +28,14 @@ SELECT id FROM ticket_types WHERE event_id = $1;
 -- name: ListTicketTypeNamesByIDs :many
 SELECT id, name FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 
+-- The inverse of ListTicketTypeIDsByEventID. The payment domain holds quota
+-- holds keyed by ticket type and needs the owning events to invalidate their
+-- cached lists; `orders` has no event_id column, so this is the resolution path.
+-- DISTINCT because an order's holds routinely span several ticket types of the
+-- same event.
+-- name: ListEventIDsByTicketTypeIDs :many
+SELECT DISTINCT event_id FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
+
 -- Both tables belong to this domain, so the JOIN stays inside the boundary the
 -- order domain is not allowed to cross itself.
 -- name: ListTicketTypeDisplaysByIDs :many

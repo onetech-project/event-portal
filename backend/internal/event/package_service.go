@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
@@ -48,6 +49,13 @@ type PackageAdminDetail struct {
 // ListPackagesByEvent returns every package of an event with derived
 // availability for the admin dashboard.
 func (s *Service) ListPackagesByEvent(ctx context.Context, eventID uuid.UUID) ([]PackageAdminDTO, error) {
+	return cache.Through(ctx, s.cache, cache.PackagesAdminKey(eventID),
+		func(ctx context.Context) ([]PackageAdminDTO, error) {
+			return s.listPackagesByEvent(ctx, eventID)
+		})
+}
+
+func (s *Service) listPackagesByEvent(ctx context.Context, eventID uuid.UUID) ([]PackageAdminDTO, error) {
 	rows, err := s.repo.ListPackagesWithAvailabilityByEventID(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -195,13 +203,17 @@ func (s *Service) CreatePackage(ctx context.Context, body []byte) (PackageAdminD
 	}
 
 	var created PackageRow
-	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		created, err = s.repo.CreatePackage(ctx, tx, toAdminPackageParams(req))
 		if err != nil {
 			return err
 		}
-		return s.repo.ReplacePackageComponents(ctx, tx, created.ID, req.EventID, toAdminComponentParams(req.Components))
+		if err := s.repo.ReplacePackageComponents(ctx, tx, created.ID, req.EventID, toAdminComponentParams(req.Components)); err != nil {
+			return err
+		}
+		cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(req.EventID))
+		return nil
 	})
 	if err != nil {
 		return PackageAdminDTO{}, err
@@ -238,7 +250,7 @@ func (s *Service) UpdatePackage(ctx context.Context, id uuid.UUID, body []byte) 
 		return PackageAdminDTO{}, err
 	}
 
-	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		if !sameComposition(current, req.Components) {
 			if s.orders == nil {
 				return errors.New("event: no order checker configured")
@@ -255,8 +267,14 @@ func (s *Service) UpdatePackage(ctx context.Context, id uuid.UUID, body []byte) 
 				return err
 			}
 		}
-		_, err := s.repo.UpdatePackage(ctx, tx, id, toAdminPackageParams(req))
-		return err
+		if _, err := s.repo.UpdatePackage(ctx, tx, id, toAdminPackageParams(req)); err != nil {
+			return err
+		}
+		// Price, window, status and composition all feed the guest-facing package
+		// summary and its derived availability. A composition change that the
+		// open-order guard rejects rolls back, and takes this with it.
+		cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(existing.EventID))
+		return nil
 	})
 	if err != nil {
 		return PackageAdminDTO{}, err
@@ -275,9 +293,16 @@ func (s *Service) DeletePackage(ctx context.Context, id uuid.UUID) error {
 		return errors.New("event: no order checker configured")
 	}
 
+	// Resolved before the delete: afterwards the row is gone and with it the link
+	// back to the event whose cached package list must be invalidated.
+	var eventID uuid.UUID
+	if row, lookupErr := s.repo.GetPackageByID(ctx, id); lookupErr == nil {
+		eventID = row.EventID
+	}
+
 	var found bool
 
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		hasOrders, err := s.orders.HasOrdersForPackage(ctx, tx, id)
 		if err != nil {
 			return err
@@ -288,7 +313,13 @@ func (s *Service) DeletePackage(ctx context.Context, id uuid.UUID) error {
 		}
 
 		found, err = s.repo.DeletePackage(ctx, tx, id)
-		return err
+		if err != nil {
+			return err
+		}
+		if found && eventID != uuid.Nil {
+			cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(eventID))
+		}
+		return nil
 	})
 	if err != nil {
 		return err

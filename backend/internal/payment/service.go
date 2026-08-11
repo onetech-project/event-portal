@@ -15,6 +15,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/logger"
 )
@@ -95,6 +96,21 @@ type QuotaRestorer interface {
 	RestoreQuota(ctx context.Context, tx pgx.Tx, ticketTypeID uuid.UUID, qty int32) error
 }
 
+// EventScopeLookup resolves ticket types back to the events that own them.
+//
+// It exists because `orders` has no event_id column — an order reaches its event
+// only through order_items → ticket_types — while this domain holds nothing but
+// []QuotaHold{TicketTypeID, Quantity}. Restoring quota changes what the guest's
+// ticket list should say, so the event has to be named somehow, and reaching into
+// the event domain's tables to do it would violate Principle II.
+//
+// Declared here by its consumer (ARCHITECTURE.md §3.2) and satisfied by
+// event.Service. Called only AFTER the transaction commits, so the extra indexed
+// read costs the webhook nothing while a row lock is held.
+type EventScopeLookup interface {
+	EventIDsForTicketTypes(ctx context.Context, ticketTypeIDs []uuid.UUID) ([]uuid.UUID, error)
+}
+
 // TicketIssuer generates one ticket per attendee once an order is paid.
 type TicketIssuer interface {
 	IssueTicketsForOrder(ctx context.Context, orderID uuid.UUID) error
@@ -126,6 +142,13 @@ type Service struct {
 	// hub fans status transitions out to open SSE streams (spec 008). Always
 	// non-nil; publishing with no subscribers is a cheap no-op.
 	hub *StreamHub
+
+	// cache is the list cache. Quota restored by a webhook or the sweeper must
+	// reach the guest-facing ticket lists, so this domain invalidates too.
+	cache cache.Lists
+	// eventScopes resolves ticket types to their events, because orders carry no
+	// event_id and this domain must not reach into the event domain's tables.
+	eventScopes EventScopeLookup
 }
 
 // NewService builds the payment service.
@@ -142,9 +165,23 @@ func NewService(
 	return &Service{
 		pool: pool, repo: repo, gateway: gateway, orders: orders,
 		quota: quota, issuer: issuer, deliverer: deliverer, log: log,
-		now: time.Now,
-		hub: NewStreamHub(),
+		now:   time.Now,
+		hub:   NewStreamHub(),
+		cache: cache.NoOp{},
 	}
+}
+
+// WithCache installs the list cache and the lookup that resolves a restored
+// quota hold's ticket types back to their event (Constitution Principle VII).
+//
+// Both are optional: without them this service simply invalidates nothing, which
+// is what every existing test does.
+func (s *Service) WithCache(c cache.Lists, scopes EventScopeLookup) *Service {
+	if c != nil {
+		s.cache = c
+	}
+	s.eventScopes = scopes
+	return s
 }
 
 // Hub exposes the status stream hub (used by tests and diagnostics).
@@ -534,7 +571,7 @@ func (s *Service) applyOutcome(ctx context.Context, ord OrderRef, outcome Outcom
 		restored []QuotaHold
 	)
 
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		restored = nil // reset on a retried transaction
 		var err error
 		applied, err = s.orders.UpdateStatusIfPending(ctx, tx, ord.ID, outcome.OrderStatus)
@@ -565,8 +602,56 @@ func (s *Service) applyOutcome(ctx context.Context, ord OrderRef, outcome Outcom
 			OrderID: ord.OrderNumber, Status: outcome.OrderStatus,
 			ExpiresAt: ord.PaymentExpiresAt,
 		})
+		s.invalidateAfterOutcome(ctx, ord, restored)
 	}
 	return applied, restored, err
+}
+
+// invalidateAfterOutcome refreshes the cached lists a status transition made
+// wrong. Every path that moves an order — webhook, sweeper, reconciliation —
+// funnels through applyOutcome, so this is the one place it has to happen.
+//
+// Guarded on `applied`, which is false for a replayed notification against an
+// already-resolved order: an idempotent no-op wrote nothing and must invalidate
+// nothing. Providers retry, and discarding a warm cache on every duplicate
+// delivery would be a self-inflicted stampede.
+//
+// It runs after the transaction has committed and outside it. The event lookup
+// below is a second database read: issuing it inside the transaction would take a
+// second pool connection while quota row locks are held, which is the same
+// starvation this domain avoids elsewhere.
+//
+// Cost on the webhook's response path is one INCR plus, on a restore, one indexed
+// SELECT — small enough to keep here rather than defer, and worth it: a guest
+// watching an event page should see returned tickets immediately, not after a PDF
+// has been rendered and an email sent.
+func (s *Service) invalidateAfterOutcome(ctx context.Context, ord OrderRef, restored []QuotaHold) {
+	if s.cache == nil {
+		return
+	}
+
+	scopes := []cache.Scope{cache.Orders()}
+
+	// Quota went back to the pool, so the guest-facing ticket and package lists
+	// for the affected events are now understating availability.
+	if len(restored) > 0 && s.eventScopes != nil {
+		ticketTypeIDs := make([]uuid.UUID, 0, len(restored))
+		for _, hold := range restored {
+			ticketTypeIDs = append(ticketTypeIDs, hold.TicketTypeID)
+		}
+		eventIDs, err := s.eventScopes.EventIDsForTicketTypes(ctx, ticketTypeIDs)
+		if err != nil {
+			// The order list still gets refreshed below. The ticket lists fall
+			// back to their TTL backstop, which is exactly what it is for.
+			s.log.ErrorContext(ctx, "could not resolve events for restored quota; their ticket lists may be briefly stale",
+				"order_number", ord.OrderNumber, "error", err.Error())
+		}
+		for _, eventID := range eventIDs {
+			scopes = append(scopes, cache.Event(eventID))
+		}
+	}
+
+	_ = s.cache.Invalidate(ctx, scopes...)
 }
 
 // fulfillAsync runs post-payment work off the request path so the provider gets

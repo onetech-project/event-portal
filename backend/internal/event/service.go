@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/logger"
 	"github.com/manjo/ticketing/backend/pkg/money"
@@ -31,23 +32,41 @@ type Service struct {
 	repo   *Repository
 	orders OrderChecker
 	log    *logger.Logger
+	cache  cache.Lists
 }
 
 // NewService builds the event service.
 //
 // orders may be nil for callers that only use the guest-facing catalog reads and
 // the quota contract; the admin delete guards and sold counts require it.
+//
+// The cache starts as a no-op, so a service built without WithCache behaves
+// exactly as it did before the cache existed — which is what every existing test
+// relies on.
 func NewService(pool db.Beginner, repo *Repository, orders OrderChecker, log *logger.Logger) *Service {
-	return &Service{pool: pool, repo: repo, orders: orders, log: log}
+	return &Service{pool: pool, repo: repo, orders: orders, log: log, cache: cache.NoOp{}}
+}
+
+// WithCache installs the list cache (Constitution Principle VII). Passing nil
+// leaves the no-op in place rather than panicking later on a read.
+func (s *Service) WithCache(c cache.Lists) *Service {
+	if c != nil {
+		s.cache = c
+	}
+	return s
 }
 
 // ListPublishedEvents returns the guest-facing catalog.
+//
+// This is the highest-traffic read in the product — every guest starts here — and
+// it changes only when an admin edits an event, so it is cached. Freshness comes
+// from the admin write path invalidating the events scope on commit, not from
+// expiry: a newly published event is visible on the very next request.
 func (s *Service) ListPublishedEvents(ctx context.Context) ([]EventSummary, error) {
-	events, err := s.repo.ListPublishedEvents(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return events, nil
+	return cache.Through(ctx, s.cache, cache.EventsPublicKey(),
+		func(ctx context.Context) ([]EventSummary, error) {
+			return s.repo.ListPublishedEvents(ctx)
+		})
 }
 
 // GetPublishedEventBySlug returns one published event's content-only detail
@@ -144,24 +163,32 @@ func (s *Service) TicketTypesForEventSlug(ctx context.Context, slug string) ([]T
 		return nil, err
 	}
 
-	rows, err := s.repo.ListTicketTypesByEventID(ctx, detail.ID)
-	if err != nil {
-		return nil, err
-	}
+	// Cached per event. QuotaRemaining is live inventory, so this list is only
+	// safe to cache because every quota movement invalidates the event scope on
+	// commit — booking, cancellation, expiry, denial and failure alike. The
+	// number here is a DISPLAY value: no sale is ever authorised against it, only
+	// against the row-locked UPDATE in the booking transaction (Principle VII).
+	return cache.Through(ctx, s.cache, cache.TicketTypesPublicKey(detail.ID),
+		func(ctx context.Context) ([]TicketTypeSummary, error) {
+			rows, err := s.repo.ListTicketTypesByEventID(ctx, detail.ID)
+			if err != nil {
+				return nil, err
+			}
 
-	out := make([]TicketTypeSummary, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, TicketTypeSummary{
-			ID:             row.ID,
-			Name:           row.Name,
-			Description:    row.Description,
-			Price:          money.From(row.Price),
-			QuotaRemaining: row.Quota,
-			SalesStart:     row.SalesStart,
-			SalesEnd:       row.SalesEnd,
+			out := make([]TicketTypeSummary, 0, len(rows))
+			for _, row := range rows {
+				out = append(out, TicketTypeSummary{
+					ID:             row.ID,
+					Name:           row.Name,
+					Description:    row.Description,
+					Price:          money.From(row.Price),
+					QuotaRemaining: row.Quota,
+					SalesStart:     row.SalesStart,
+					SalesEnd:       row.SalesEnd,
+				})
+			}
+			return out, nil
 		})
-	}
-	return out, nil
 }
 
 // PackagesForEventSlug returns the ACTIVE packages of a published event with
@@ -181,20 +208,26 @@ func (s *Service) PackagesForEventSlug(ctx context.Context, slug string) ([]Pack
 // rows with derived availability, in exactly two queries regardless of package
 // count. Used by GET /events/:slug and the availability-only polling route.
 func (s *Service) PackagesForEvent(ctx context.Context, eventID uuid.UUID) ([]PackageSummaryDTO, error) {
-	rows, err := s.repo.ListPackagesWithAvailabilityByEventID(ctx, eventID)
-	if err != nil {
-		return nil, err
-	}
+	// Same reasoning as the ticket list: AvailableUnits is derived from the
+	// constituents' remaining quota, so it moves with every booking and every
+	// restore, and every one of those bumps this event's scope.
+	return cache.Through(ctx, s.cache, cache.PackagesByEventKey(eventID),
+		func(ctx context.Context) ([]PackageSummaryDTO, error) {
+			rows, err := s.repo.ListPackagesWithAvailabilityByEventID(ctx, eventID)
+			if err != nil {
+				return nil, err
+			}
 
-	// Only ACTIVE packages appear to guests; inactive ones are admin-visible only.
-	filtered := rows[:0]
-	for _, row := range rows {
-		if row.IsActive {
-			filtered = append(filtered, row)
-		}
-	}
+			// Only ACTIVE packages appear to guests; inactive ones are admin-visible only.
+			filtered := rows[:0]
+			for _, row := range rows {
+				if row.IsActive {
+					filtered = append(filtered, row)
+				}
+			}
 
-	return s.assemblePackageSummaries(ctx, filtered)
+			return s.assemblePackageSummaries(ctx, filtered)
+		})
 }
 
 // assemblePackageSummaries attaches batched components and maps rows to the

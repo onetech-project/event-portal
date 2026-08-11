@@ -137,6 +137,24 @@ func (r *Repository) ListTicketTypeIDsByEventID(ctx context.Context, tx pgx.Tx, 
 	return ids, nil
 }
 
+// EventIDsByTicketTypeIDs is the inverse of ListTicketTypeIDsByEventID: it
+// resolves ticket types back to the events that own them, deduplicated.
+//
+// The payment domain needs this after restoring quota — it holds ticket type ids
+// and must invalidate the owning events' cached ticket lists, but `orders` has no
+// event_id column and reaching into this domain's tables directly would cross a
+// boundary it is not allowed to cross.
+func (r *Repository) EventIDsByTicketTypeIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	eventIDs, err := r.queries.ListEventIDsByTicketTypeIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list event ids for ticket types: %w", err)
+	}
+	return eventIDs, nil
+}
+
 // TicketTypeNamesByIDs resolves ticket type ids to their display names in one
 // query. The order domain uses it to label attendee rows without JOINing across a
 // domain boundary.

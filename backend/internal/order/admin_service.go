@@ -11,6 +11,7 @@ import (
 
 	"github.com/manjo/ticketing/backend/internal/order/ordersql"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
 
@@ -77,15 +78,37 @@ type AttendeeFilter struct {
 type AdminService struct {
 	repo   *Repository
 	events EventLookup
+	cache  cache.Lists
 }
 
-// NewAdminService builds the admin read service.
+// NewAdminService builds the admin read service. The cache starts as a no-op so
+// a service built without WithCache reads the database on every call, exactly as
+// it did before the cache existed.
 func NewAdminService(repo *Repository, events EventLookup) *AdminService {
-	return &AdminService{repo: repo, events: events}
+	return &AdminService{repo: repo, events: events, cache: cache.NoOp{}}
+}
+
+// WithCache installs the list cache (Constitution Principle VII).
+func (s *AdminService) WithCache(c cache.Lists) *AdminService {
+	if c != nil {
+		s.cache = c
+	}
+	return s
 }
 
 // ListOrders returns orders matching the filter, newest first.
+//
+// Cached per filter combination, all sharing the single orders scope — so one
+// order changing status invalidates every variant that could contain it with one
+// INCR, rather than requiring the writer to know which filters are warm (FR-010).
 func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) ([]OrderSummary, error) {
+	return cache.Through(ctx, s.cache, cache.OrdersAdminKey(filter.Status, filter.EventID),
+		func(ctx context.Context) ([]OrderSummary, error) {
+			return s.listOrders(ctx, filter)
+		})
+}
+
+func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) ([]OrderSummary, error) {
 	ticketTypeIDs, scoped, err := s.ticketTypeScope(ctx, filter.EventID)
 	if err != nil {
 		return nil, err
@@ -121,6 +144,13 @@ func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) ([]Or
 // ListAttendees returns attendees matching the filter, with their ticket type
 // names resolved through the event domain in one batched lookup.
 func (s *AdminService) ListAttendees(ctx context.Context, filter AttendeeFilter) ([]AttendeeSummary, error) {
+	return cache.Through(ctx, s.cache, cache.AttendeesAdminKey(filter.OrderID, filter.EventID),
+		func(ctx context.Context) ([]AttendeeSummary, error) {
+			return s.listAttendees(ctx, filter)
+		})
+}
+
+func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter) ([]AttendeeSummary, error) {
 	ticketTypeIDs, scoped, err := s.ticketTypeScope(ctx, filter.EventID)
 	if err != nil {
 		return nil, err

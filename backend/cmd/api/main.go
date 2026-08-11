@@ -23,7 +23,7 @@ import (
 	"github.com/manjo/ticketing/backend/internal/order"
 	"github.com/manjo/ticketing/backend/internal/payment"
 	"github.com/manjo/ticketing/backend/internal/ticket"
-	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/config"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/httpx"
@@ -113,6 +113,49 @@ func run(log *logger.Logger) error {
 	defer pool.Close()
 	log.Info("connected to the database")
 
+	// --- Cache ------------------------------------------------------------
+	//
+	// A read cache in front of the list endpoints, and nothing more (Constitution
+	// Principle VII). It is a SOFT dependency by design: a dial failure here logs
+	// and continues, because an API that refuses to start because a cache is down
+	// has turned an accelerator into a liability.
+	//
+	// cacheRegistry is the same registry the HTTP metrics use when metrics are on,
+	// so cache counters appear on the existing /metrics endpoint rather than a
+	// second one.
+	var listCache cache.Lists = cache.NoOp{}
+	var metricsRegistry *prometheus.Registry
+	if cfg.MetricsEnabled {
+		metricsRegistry = prometheus.NewRegistry()
+	}
+	if cfg.CacheActive() {
+		// A nil registry is fine — NewMetrics skips registration and the counters
+		// become cheap no-ops, which is exactly right when metrics are off.
+		var reg prometheus.Registerer
+		if metricsRegistry != nil {
+			reg = metricsRegistry
+		}
+		rc, err := cache.NewRedis(cfg.RedisURL, cfg.CacheTTL, log, reg)
+		if err != nil {
+			// A malformed URL is a configuration error, not a runtime one — but it
+			// still must not stop the API from serving.
+			log.Error("cache disabled: REDIS_URL could not be parsed", "error", err.Error())
+		} else {
+			defer func() { _ = rc.Close() }()
+			listCache = rc
+			pingCtx, cancelPing := context.WithTimeout(startupCtx, 2*time.Second)
+			if err := rc.Ping(pingCtx); err != nil {
+				log.Warn("cache is not reachable at startup; serving from the database until it appears",
+					"error", err.Error())
+			} else {
+				log.Info("connected to the cache", "ttl", cfg.CacheTTL.String())
+			}
+			cancelPing()
+		}
+	} else {
+		log.Info("cache disabled by configuration; every list read goes to the database")
+	}
+
 	// --- Repositories -----------------------------------------------------
 
 	adminRepo := admin.NewRepository(pool)
@@ -140,18 +183,18 @@ func run(log *logger.Logger) error {
 	// orderRepo satisfies event.OrderChecker structurally, so the event domain
 	// gets its delete guards and sold counts without importing internal/order.
 
-	eventSvc := event.NewService(pool, eventRepo, orderRepo, log)
+	eventSvc := event.NewService(pool, eventRepo, orderRepo, log).WithCache(listCache)
 
 	orderSvc := order.NewService(pool, orderRepo,
 		eventProviderAdapter{events: eventSvc},
 		gatewayAdapter{gateway: gateway},
-		log).WithTimers(order.Timers{
+		log).WithCache(listCache).WithTimers(order.Timers{
 		BookingHold:    cfg.BookingHold,
 		PaymentWindow:  cfg.PaymentWindow,
 		QRRefreshAfter: cfg.QRRefreshAfter,
 	})
 
-	adminOrderSvc := order.NewAdminService(orderRepo, orderEventLookupAdapter{events: eventSvc})
+	adminOrderSvc := order.NewAdminService(orderRepo, orderEventLookupAdapter{events: eventSvc}).WithCache(listCache)
 
 	// The guest's own order page: read-only, unauthenticated, keyed by order
 	// number.
@@ -177,7 +220,7 @@ func run(log *logger.Logger) error {
 		eventSvc,  // payment.QuotaRestorer
 		ticketSvc, // payment.TicketIssuer
 		ticketDelivererAdapter{notifications: notificationSvc}, // payment.TicketDeliverer (narrows the spec-011 recipient list)
-		log)
+		log).WithCache(listCache, eventSvc) // eventSvc satisfies payment.EventScopeLookup
 
 	adminSvc := admin.NewService(adminRepo, admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL), log)
 
@@ -196,7 +239,8 @@ func run(log *logger.Logger) error {
 	e.Use(otelecho.Middleware(cfg.ServiceName))
 
 	if cfg.MetricsEnabled {
-		metrics := observability.NewMetrics(prometheus.NewRegistry())
+		// Same registry the cache counters registered on, so /metrics carries both.
+		metrics := observability.NewMetrics(metricsRegistry)
 		e.Use(metrics.Middleware())
 		e.GET("/metrics", metrics.Handler())
 	}
@@ -206,15 +250,7 @@ func run(log *logger.Logger) error {
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAuthorization},
 	}))
 
-	e.GET("/healthz", func(c echo.Context) error {
-		ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
-		defer cancel()
-		if err := pool.Ping(ctx); err != nil {
-			return apperr.Wrap(err, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE",
-				"The database is not reachable.")
-		}
-		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
-	})
+	e.GET("/healthz", healthHandler(pool, listCache))
 
 	api := e.Group("/api/v1")
 
@@ -277,6 +313,8 @@ func run(log *logger.Logger) error {
 	order.NewAdminHandler(adminOrderSvc).RegisterAdminRoutes(adminAPI)
 	ticket.NewHandler(ticketSvc).RegisterAdminRoutes(adminAPI)
 	notification.NewHandler(notificationSvc).RegisterAdminRoutes(adminAPI)
+
+	adminAPI.POST("/admin/cache/refresh", cacheRefreshHandler(listCache, log))
 
 	// --- Serve, then drain ------------------------------------------------
 

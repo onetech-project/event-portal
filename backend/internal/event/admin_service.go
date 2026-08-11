@@ -10,16 +10,23 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
-	"github.com/manjo/ticketing/backend/pkg/sanitize"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/money"
+	"github.com/manjo/ticketing/backend/pkg/sanitize"
 )
 
 // --- Events ---------------------------------------------------------------
 
 // ListEvents returns every event, in any status, for the admin dashboard.
+//
+// Shares the events scope with the guest catalogue: the same writes invalidate
+// both, so the admin table can never lag behind an edit the admin just made.
 func (s *Service) ListEvents(ctx context.Context) ([]EventAdminView, error) {
-	return s.repo.ListEvents(ctx)
+	return cache.Through(ctx, s.cache, cache.EventsAdminKey(),
+		func(ctx context.Context) ([]EventAdminView, error) {
+			return s.repo.ListEvents(ctx)
+		})
 }
 
 // GetEventDetail returns one event with its ticket types and their derived sold
@@ -53,6 +60,11 @@ func (s *Service) CreateEvent(ctx context.Context, req EventRequest) (EventAdmin
 	if err != nil {
 		return EventAdminView{}, err
 	}
+
+	// A new event joins the catalogue, so the catalogue's cached list is now
+	// wrong. Only the events scope: a brand-new event has no per-event entries
+	// derived from it yet.
+	cache.InvalidateAfterCommit(ctx, s.cache, cache.Events())
 	return created, nil
 }
 
@@ -71,6 +83,11 @@ func (s *Service) UpdateEvent(ctx context.Context, id uuid.UUID, req EventReques
 	case err != nil:
 		return EventAdminView{}, err
 	}
+
+	// Both scopes. A publish/unpublish or a title change alters the catalogue row
+	// AND the event's own admin and ticket views, and there is no cheap way to
+	// tell which fields moved — bumping both costs two INCRs.
+	cache.InvalidateAfterCommit(ctx, s.cache, cache.Events(), cache.Event(id))
 	return updated, nil
 }
 
@@ -91,7 +108,7 @@ func (s *Service) DeleteEvent(ctx context.Context, id uuid.UUID) error {
 
 	var found bool
 
-	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		// Guard 1: packages with this event cannot exist.
 		packageCount, err := s.repo.CountPackagesByEventID(ctx, id)
 		if err != nil {
@@ -121,7 +138,18 @@ func (s *Service) DeleteEvent(ctx context.Context, id uuid.UUID) error {
 		}
 
 		found, err = s.repo.DeleteEvent(ctx, tx, id)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// Registered inside the transaction, executed after it commits — so a
+		// guard that rolls the delete back never invalidates anything. Both
+		// scopes: the event leaves the catalogue and its ticket types went with
+		// it. Note this runs from the transaction context on purpose; issuing the
+		// cache command here directly would hold the row locks across a network
+		// round-trip, which is exactly what Principle VII forbids.
+		cache.InvalidateAfterCommit(ctx, s.cache, cache.Events(), cache.Event(id))
+		return nil
 	})
 	if err != nil {
 		return err
@@ -153,15 +181,31 @@ func (s *Service) TicketTypeIDsForEvent(ctx context.Context, eventID uuid.UUID) 
 	return s.repo.ListTicketTypeIDsByEventID(ctx, nil, eventID)
 }
 
+// EventIDsForTicketTypes is the inverse, and satisfies payment.EventScopeLookup.
+//
+// The payment domain calls it after a webhook or the sweeper restores quota: it
+// knows which ticket types were credited but not which events they belong to, and
+// the guest-facing ticket lists it must invalidate are scoped per event.
+func (s *Service) EventIDsForTicketTypes(ctx context.Context, ticketTypeIDs []uuid.UUID) ([]uuid.UUID, error) {
+	return s.repo.EventIDsByTicketTypeIDs(ctx, ticketTypeIDs)
+}
+
 // --- Ticket types ---------------------------------------------------------
 
 // ListTicketTypes returns one event's ticket types with their derived sold counts.
+//
+// The sold count is derived from order_items, so it moves on every booking —
+// which is exactly why booking bumps this event's scope alongside the quota it
+// deducts.
 func (s *Service) ListTicketTypes(ctx context.Context, eventID uuid.UUID) ([]TicketTypeAdminView, error) {
-	rows, err := s.repo.ListTicketTypesAdmin(ctx, eventID)
-	if err != nil {
-		return nil, err
-	}
-	return s.withSoldCounts(ctx, rows)
+	return cache.Through(ctx, s.cache, cache.TicketTypesAdminKey(eventID),
+		func(ctx context.Context) ([]TicketTypeAdminView, error) {
+			rows, err := s.repo.ListTicketTypesAdmin(ctx, eventID)
+			if err != nil {
+				return nil, err
+			}
+			return s.withSoldCounts(ctx, rows)
+		})
 }
 
 // GetTicketType returns one ticket type with its derived sold count.
@@ -210,6 +254,10 @@ func (s *Service) CreateTicketType(ctx context.Context, req TicketTypeRequest) (
 		return TicketTypeAdminView{}, err
 	}
 
+	// The event's guest-facing ticket list and its admin table both gained a row.
+	// Only this event's scope — another event's cached lists are untouched (FR-009).
+	cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(created.EventID))
+
 	// A freshly created ticket type has no sales yet, so its sold count is zero
 	// without needing a query.
 	return toTicketTypeView(created, 0), nil
@@ -238,6 +286,10 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 	if err != nil {
 		return TicketTypeAdminView{}, err
 	}
+
+	// Price, sales window and quota all appear in the guest list, so any of them
+	// moving makes the cached copy wrong.
+	cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(updated.EventID))
 
 	views, err := s.withSoldCounts(ctx, []TicketTypeRow{updated})
 	if err != nil {
@@ -270,9 +322,17 @@ func (s *Service) DeleteTicketType(ctx context.Context, id uuid.UUID) error {
 				packages[0].Name))
 	}
 
+	// Resolved before the delete, because afterwards the row is gone and with it
+	// the only link back to the event whose cached lists must be invalidated.
+	// A missing row is not an error here: the delete below reports that.
+	var eventID uuid.UUID
+	if row, lookupErr := s.repo.GetTicketTypeAdmin(ctx, id); lookupErr == nil {
+		eventID = row.EventID
+	}
+
 	var found bool
 
-	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		hasOrders, err := s.orders.HasOrdersForTicketType(ctx, tx, id)
 		if err != nil {
 			return err
@@ -283,7 +343,15 @@ func (s *Service) DeleteTicketType(ctx context.Context, id uuid.UUID) error {
 		}
 
 		found, err = s.repo.DeleteTicketType(ctx, tx, id)
-		return err
+		if err != nil {
+			return err
+		}
+		if found && eventID != uuid.Nil {
+			// Registered inside, fired after commit: the has-orders guard above
+			// rolls back, and a rolled-back delete must not invalidate.
+			cache.InvalidateAfterCommit(ctx, s.cache, cache.Event(eventID))
+		}
+		return nil
 	})
 	if err != nil {
 		return err
