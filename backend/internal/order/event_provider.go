@@ -18,6 +18,16 @@ var ErrInsufficientQuota = errors.New("order: insufficient quota")
 // Providers translate their own not-found onto this one.
 var ErrNoTerms = errors.New("order: event has no terms")
 
+// ErrGatewaySessionDuplicate reports that the gateway had already issued a code
+// for this order's reference and refused to issue another. The adapter
+// translates the payment domain's own sentinel onto this one.
+//
+// It is separate from a generic session-open failure because the two need
+// opposite handling. A generic failure leaves the order payable and worth
+// retrying; this one proves a code exists that this system will never hold, so
+// the order can never be paid and the guest must start again.
+var ErrGatewaySessionDuplicate = errors.New("order: gateway already issued a code for this reference")
+
 // EventTermsInfo is the slice of a terms document the booking flow needs: the
 // identity to stamp on the order when agreement is recorded.
 type EventTermsInfo struct {
@@ -123,9 +133,15 @@ type PaymentSession struct {
 	// QRImageURL is the provider-hosted image of the same payload, persisted as
 	// an audit trail rather than as somewhere to send the guest.
 	QRImageURL string
-	// ExpiresAt is the provider-computed deadline that becomes the order's
-	// payment_expires_at, and from there the guest's countdown.
+	// ExpiresAt is the gateway's own deadline, which becomes the order's
+	// payment_expires_at and from there the guest's countdown. It is always set —
+	// the adapter substitutes a fallback when the gateway returned nothing usable
+	// — so checkout never has to decide what a missing deadline means.
 	ExpiresAt time.Time
+	// ExpiryFromGateway is false when ExpiresAt is that fallback. Checkout records
+	// it so a deadline the gateway never agreed to is visible in the order's own
+	// logs, not only in the adapter's.
+	ExpiryFromGateway bool
 	// RedirectURL is empty for QRIS; it exists for a gateway that can only
 	// redirect.
 	RedirectURL string

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrderView } from "./page";
 import type { TicketOrderDetail } from "@/lib/types";
@@ -45,7 +45,7 @@ const PENDING: TicketOrderDetail = {
   server_time: "2026-08-01T10:03:00Z",
   payment: {
     method: "QRIS",
-    provider: "midtrans",
+    provider: "manjo",
     amount: "550000.00",
     expires_at: "2026-08-01T10:15:00Z",
     qr_image_path: "/api/v1/orders/ORD-20260801-A1B2C3D4/qris.png",
@@ -141,7 +141,7 @@ describe("order page — wrong event", () => {
 // replace so the back button cannot bounce between screens that forward to
 // each other.
 describe("order page — settled and started", () => {
-  const DONE_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}/done`;
+  const DONE_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}/success`;
   const CHECKOUT_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}/checkout`;
 
   it("sends a paid order to the confirmation screen", async () => {
@@ -153,7 +153,7 @@ describe("order page — settled and started", () => {
   });
 
   // FR-020 / FR-022: an expired order is a dead end shown HERE, not a
-  // confirmation — forwarding to /done would congratulate a failed purchase.
+  // confirmation — forwarding to /success would congratulate a failed purchase.
   it("shows the Time's Up dialog for an expired order instead of forwarding", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
 
@@ -422,7 +422,6 @@ function registrationFetch(order: TicketOrderDetail) {
           qr_string: "QR",
           expires_at: "2026-08-01T10:17:00Z",
           qr_image_url: `/api/v1/ticket/order/${order.order_id}/qris.png`,
-          qr_refresh_after_seconds: 420,
         }),
       );
     }
@@ -969,5 +968,71 @@ describe("order page — registration phase with a bundle", () => {
 
     // Payload index 1 remaps to the single visible bundle card's dob field.
     expect(await screen.findByText(message)).toBeInTheDocument();
+  });
+});
+
+// --- A card title that does not fit hands its text to a tooltip --------------
+
+/**
+ * happy-dom lays nothing out — every element measures zero — so the ellipsis a
+ * real browser draws has to be simulated. Reports the given widths for card
+ * titles only, which is what the overflow check compares.
+ */
+function stubCardTitleWidths(scrollWidth: number, clientWidth: number) {
+  for (const [prop, value] of [
+    ["scrollWidth", scrollWidth],
+    ["clientWidth", clientWidth],
+  ] as const) {
+    Object.defineProperty(HTMLElement.prototype, prop, {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute("data-slot") === "card-title" ? value : 0;
+      },
+    });
+  }
+}
+
+describe("order page — a card title too long for its card", () => {
+  afterEach(() => {
+    // The stubs are own properties of the prototype; deleting them uncovers
+    // happy-dom's own accessors again for the next file.
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+    delete proto.scrollWidth;
+    delete proto.clientWidth;
+  });
+
+  it("offers the whole heading as a tooltip once the line is clipped", async () => {
+    stubCardTitleWidths(400, 100);
+    vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
+
+    renderOrder();
+    await findContinueButton();
+
+    const title = document.querySelector('[data-slot="card-title"]');
+    expect(title).not.toBeNull();
+
+    await userEvent.setup().hover(title as HTMLElement);
+
+    // Title, unit label and badge — everything the ellipsis swallowed — read
+    // back in one line.
+    expect(
+      await screen.findByText("2-Day Bundle · 2 tickets"),
+    ).toBeInTheDocument();
+  });
+
+  it("stays quiet when the heading fits", async () => {
+    stubCardTitleWidths(100, 100);
+    vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
+
+    renderOrder();
+    await findContinueButton();
+
+    const title = document.querySelector('[data-slot="card-title"]');
+    await userEvent.setup().hover(title as HTMLElement);
+
+    // Nothing is hidden, so a tooltip would only shadow text already on screen.
+    await waitFor(() =>
+      expect(screen.queryByText("2-Day Bundle · 2 tickets")).toBeNull(),
+    );
   });
 });

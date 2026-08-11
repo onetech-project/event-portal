@@ -37,16 +37,18 @@ const (
 	// rateLimitWindow is how long an idle per-IP bucket is retained.
 	rateLimitWindow = 3 * time.Minute
 
-	// The guest's "check payment status" button costs an outbound provider call
-	// per press, so it is limited far more tightly than a read: roughly one press
-	// every five seconds, with a small burst for an impatient double-tap.
-	paymentRefreshRate  = 0.2
-	paymentRefreshBurst = 3
+	// Checkout costs an outbound gateway call per press, so it is limited far more
+	// tightly than a read: roughly one every five seconds, with a small burst for
+	// an impatient double-tap.
+	gatewayCallRate  = 0.2
+	gatewayCallBurst = 3
 
 	// The guest resend sends real mail without any authentication, so it is
 	// limited per order — one a minute, no burst. Keying on the order rather than
 	// the caller is the point: the inbox being protected is the buyer's, and a
-	// per-IP limit would let a few hosts flood one buyer between them.
+	// per-IP limit would let a few hosts flood one buyer between them. The window
+	// is also what the confirmation screen counts down from, so changing it
+	// changes what a guest is told, not only what they are allowed.
 	guestResendRate  = 1.0 / 60.0
 	guestResendBurst = 1
 
@@ -166,17 +168,24 @@ func run(log *logger.Logger) error {
 
 	// --- Gateway ----------------------------------------------------------
 
-	gatewayBaseURL := payment.CoreAPISandboxBaseURL
-	if cfg.MidtransIsProduction {
-		gatewayBaseURL = payment.CoreAPIProductionBaseURL
-	}
-	if cfg.MidtransBaseURL != "" {
-		gatewayBaseURL = cfg.MidtransBaseURL
-		log.Warn("using an overridden payment gateway endpoint", "base_url", gatewayBaseURL)
-	}
-	gateway := payment.NewMidtransGateway(cfg.MidtransServerKey, gatewayBaseURL, cfg.PaymentExpiry, &http.Client{
-		Timeout: 15 * time.Second,
+	// There is no sandbox/production selection and no compiled-in hostname: the
+	// address comes from configuration or the process does not start (FR-026).
+	// Nothing here can recognise a *stale* address, which is a deliberate,
+	// recorded trade — catching that belongs to deployment tooling.
+	gateway := payment.NewManjoGateway(payment.ManjoConfig{
+		BaseURL:        cfg.PGBaseURL,
+		ServerKey:      cfg.PGServerKey,
+		ClientKey:      cfg.PGClientKey,
+		CallbackToken:  cfg.PGCallbackToken,
+		ExpectedWindow: cfg.PaymentWindow,
+		HTTPClient: &http.Client{
+			// Well inside a guest's patience, and short enough that two retries on
+			// top of it still fit inside one (FR-007c).
+			Timeout: 8 * time.Second,
+		},
+		Log: log,
 	})
+	log.Info("payment gateway configured", "provider", gateway.Name(), "base_url", cfg.PGBaseURL)
 
 	// --- Services, wired through the adapters in adapters.go --------------
 	//
@@ -185,13 +194,16 @@ func run(log *logger.Logger) error {
 
 	eventSvc := event.NewService(pool, eventRepo, orderRepo, log).WithCache(listCache)
 
+	// Held as a variable because it needs the payment service back-wired into it
+	// once that exists — see the comment on gatewayAdapter.payments.
+	checkoutGateway := &gatewayAdapter{gateway: gateway, log: log}
+
 	orderSvc := order.NewService(pool, orderRepo,
 		eventProviderAdapter{events: eventSvc},
-		gatewayAdapter{gateway: gateway},
+		checkoutGateway,
 		log).WithCache(listCache).WithTimers(order.Timers{
-		BookingHold:    cfg.BookingHold,
-		PaymentWindow:  cfg.PaymentWindow,
-		QRRefreshAfter: cfg.QRRefreshAfter,
+		BookingHold:   cfg.BookingHold,
+		PaymentWindow: cfg.PaymentWindow,
 	})
 
 	adminOrderSvc := order.NewAdminService(orderRepo, orderEventLookupAdapter{events: eventSvc}).WithCache(listCache)
@@ -217,10 +229,16 @@ func run(log *logger.Logger) error {
 
 	paymentSvc := payment.NewService(pool, paymentRepo, gateway,
 		paymentOrderAdapter{orders: orderRepo},
-		eventSvc,  // payment.QuotaRestorer
-		ticketSvc, // payment.TicketIssuer
+		eventSvc,                               // payment.QuotaRestorer
+		quotaReserverAdapter{events: eventSvc}, // payment.QuotaReserver — the settle path takes seats back
+		paymentOrderAdapter{orders: orderRepo}, // payment.OrderReleaser — EXPIRED → PAID and nothing else
+		ticketSvc,                              // payment.TicketIssuer
 		ticketDelivererAdapter{notifications: notificationSvc}, // payment.TicketDeliverer (narrows the spec-011 recipient list)
 		log).WithCache(listCache, eventSvc) // eventSvc satisfies payment.EventScopeLookup
+
+	// Closes the loop: a checkout whose session-open is refused as a duplicate
+	// reference releases its seats and records why, on the order's own history.
+	checkoutGateway.payments = paymentSvc
 
 	adminSvc := admin.NewService(adminRepo, admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL), log)
 
@@ -258,8 +276,12 @@ func run(log *logger.Logger) error {
 	event.NewHandler(eventSvc).RegisterPublicRoutes(api)
 	orderHandler := order.NewHandler(orderSvc, publicOrderSvc, log)
 	orderHandler.RegisterPublicRoutes(api)
-	paymentHandler := payment.NewHandler(paymentSvc, log).WithQRRefreshAfter(cfg.QRRefreshAfter)
-	paymentHandler.RegisterPublicRoutes(api)
+	paymentHandler := payment.NewHandler(paymentSvc, log)
+	// The gateway notification endpoint. Mounted on the Echo instance rather than
+	// on `api` because its path is fixed by the gateway's dispatch code
+	// (/v1.0/callback/exec) — versioning it under /api/v1 would simply put it
+	// somewhere the gateway cannot reach.
+	paymentHandler.RegisterCallbackRoute(e)
 	// Live checkout status (SSE). It caps concurrent connections per IP itself,
 	// so it mounts on the unthrottled group.
 	paymentHandler.RegisterStatusStream(api)
@@ -276,22 +298,26 @@ func run(log *logger.Logger) error {
 		httpx.RateLimitPerIP(cfg.TicketLookupRateLimit, cfg.TicketLookupBurst, rateLimitWindow))
 	ticket.NewHandler(ticketSvc).RegisterPublicRoutes(ticketLookup)
 
-	// Reconciling with the payment provider costs an outbound round-trip per
-	// call, so unlike the polled order read it sits behind a per-IP limit
-	// (spec FR-018).
-	paymentRefresh := e.Group("/api/v1",
-		httpx.RateLimitPerIP(paymentRefreshRate, paymentRefreshBurst, rateLimitWindow))
-	paymentHandler.RegisterRefreshRoute(paymentRefresh)
-	// Checkout starts a provider session per call, so it shares this limiter.
-	orderHandler.RegisterCheckoutRoutes(paymentRefresh)
+	// Checkout opens a gateway session per call, so it sits behind a per-IP limit
+	// rather than on the unthrottled read group.
+	//
+	// The group survives the withdrawal of the status-refresh and QR-refresh
+	// routes because checkout still belongs in it — it was never empty of
+	// outbound-cost endpoints.
+	gatewayCalls := e.Group("/api/v1",
+		httpx.RateLimitPerIP(gatewayCallRate, gatewayCallBurst, rateLimitWindow))
+	orderHandler.RegisterCheckoutRoutes(gatewayCalls)
 
-	// The guest resend on the confirmation screen. Limited per order number —
-	// carried in the body's order_id field — and mounted on its own group: on
-	// `api` the limiter would also throttle the order polling that runs every
-	// few seconds by design (spec FR-025).
-	guestResend := e.Group("/api/v1",
-		httpx.RateLimitPerBodyField("order_id", guestResendRate, guestResendBurst, rateLimitWindow))
-	notification.NewHandler(notificationSvc).RegisterPublicRoutes(guestResend)
+	// The guest resend on the confirmation screen. Limited per order number, which
+	// the handler reads from the body and hands to the cooldown itself — no
+	// middleware and so no separate group, because the limit now has to answer
+	// "how long?" as well as "may I?" (spec 012 FR-021j).
+	//
+	// rateLimitWindow doubles as the cooldown's idle-eviction period here, and it
+	// must stay longer than the window itself: evicting a key mid-cooldown would
+	// forgive it silently. Three minutes against sixty seconds.
+	notification.NewHandler(notificationSvc).RegisterPublicRoutes(api,
+		httpx.NewCooldown(guestResendRate, guestResendBurst, rateLimitWindow))
 
 	// Abandoned orders release their seats without anyone opening the page.
 	sweeper := payment.NewSweeper(paymentSvc, cfg.PaymentSweepInterval)
@@ -313,6 +339,11 @@ func run(log *logger.Logger) error {
 	order.NewAdminHandler(adminOrderSvc).RegisterAdminRoutes(adminAPI)
 	ticket.NewHandler(ticketSvc).RegisterAdminRoutes(adminAPI)
 	notification.NewHandler(notificationSvc).RegisterAdminRoutes(adminAPI)
+	// The two order-scoped read views (spec 012 US6). Reads only: a payment whose
+	// notification was lost is recovered by asking the gateway to resend it, and
+	// these are what an operator checks first — the order's notification history,
+	// and what it holds against what remains.
+	paymentHandler.RegisterAdminRoutes(adminAPI)
 
 	adminAPI.POST("/admin/cache/refresh", cacheRefreshHandler(listCache, log))
 

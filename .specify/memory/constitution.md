@@ -1,5 +1,57 @@
 <!--
 Sync Impact Report
+Version change: 3.2.0 → 3.3.0 (MINOR — materially expanded guidance. No principle is
+removed or redefined and nothing compliant under 3.2.0 becomes non-compliant: the new
+paragraph governs a webhook outcome the previous text simply did not contemplate.)
+
+Trigger: merge of feat/payment. That branch was cut from 3.0.0 and authored two
+amendments of its own, numbered 3.0.1 (PATCH — Midtrans → Manjo in the Technology Stack
+and Principle V) and 3.1.0 (MINOR — settle-on-expiry). Meanwhile main took 3.1.0 for the
+Redis read cache and 3.2.0 for the e2e acceptance gate, so the branch's 3.1.0 collides
+with a different amendment. This merge re-versions both branch amendments onto the head
+of the 3.2.0 line as a single 3.3.0; their substance is unchanged and is restated below.
+The superseded 3.0.1 and 3.1.0 branch reports are not retained separately — this entry
+replaces them.
+
+Modified sections:
+  - Principle IV (Transactional Integrity & Idempotency) — added the settle-on-expiry
+    case: a completed-payment webhook for a self-expired order settles it and
+    re-deducts its quota in the same transaction, all-or-nothing across every ticket
+    type held; a shortfall changes nothing and still answers 200; a gateway-rejected or
+    gateway-cancelled order is never settled this way; and no non-webhook path may move
+    an order to `PAID`. The existing enumeration of quota-*restoring* outcomes
+    (`expire`, `cancel`, `deny`, `failure`) is unchanged. Rationale extended.
+  - Principle V (Payment Gateway Abstraction) — the example provider is updated, and
+    `VerifyWebhook`'s parameter is noted as the presented credential rather than a body
+    signature. The method keeps its name and its role: authenticate an inbound
+    notification and normalise it. The Manjo contract carries no signature at all — the
+    gateway presents a bearer token — so the parameter reflects reality while the
+    interface the principle mandates is unchanged. `FetchStatus` was never named by this
+    principle and its removal is therefore not a deviation.
+  - Technology Stack Requirements, Payment bullet — the concrete implementation is the
+    Manjo gateway over plain HTTP REST, with wire shapes from the shared `cdtc` contract
+    module. No vendor SDK is or was a dependency. The Infrastructure bullet keeps the
+    PostgreSQL + Redis wording introduced at 3.1.0; the two amendments are orthogonal.
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - ARCHITECTURE.md — follow-up in the implementation change: the order lifecycle gains
+    an `EXPIRED → PAID` edge, the first transition out of a terminal state in this
+    system.
+  - PRD.md — UPDATED WITH THIS MERGE: §1.2 Tech Stack Payment names the Manjo gateway.
+    The Redis Infrastructure and Cache bullets from 3.1.0 are retained.
+  - SCHEMA.md — no impact. No schema change and no product-surface change: the recovery
+    is a business process run outside the app, and this system gains only two read-only
+    admin views.
+  - README.md is not named by the Governance clause but described the withdrawn
+    Admin → Reconciliation screen and the old `MIDTRANS_BASE_URL` override; both are
+    swept in this merge.
+
+Deferred items: none.
+
+Previous report (3.1.0 → 3.2.0) follows.
+
 Version change: 3.1.0 → 3.2.0 (MINOR — a new principle is added; no existing principle
 is removed, weakened, or redefined. Nothing compliant under 3.1.0 becomes non-compliant
 in behavior: Principle VIII binds the delivery process, not the running system. It does
@@ -331,19 +383,42 @@ the handler MUST return `200 OK` immediately without reprocessing. Webhooks rece
 work (PDF generation, QR generation, SMTP dispatch) MUST run in a non-blocking
 goroutine so the webhook responds `200 OK` instantly; `email_sent` MUST be set only
 after successful delivery.
+A webhook reporting a completed payment for an order the system itself expired MUST
+settle that order, and settling MUST **re-deduct** its quota in the same transaction as
+the status change — the one webhook outcome that takes quota rather than restoring it.
+The re-deduction is all-or-nothing across every ticket type the order holds: if any is
+short, nothing moves, the order's status is unchanged, no tickets are issued, and the
+handler still answers `200 OK` (a body may carry the refusal; the status code may not,
+because a retry would fail identically). An order the *gateway* rejected or cancelled
+MUST NOT be settled this way — only the system's own expiry verdict is reversible — and
+no path other than a gateway webhook may move an order to `PAID`.
 Rationale: Prevents overselling, double-processing of payments, and slow/blocked
 webhook responses that payment providers may retry or flag as failing. The
 no-network-call rule exists because the quota-deducting `UPDATE` holds a row lock
 until commit: a gateway round-trip inside that transaction would serialize every
 concurrent buyer of the same ticket type behind it, collapsing checkout throughput to
 roughly one order per gateway round-trip.
+The settle-on-expiry rule exists because a lost notification is not hypothetical: a
+gateway's automatic retry budget is finite, so an outage that outlasts it strands a
+guest who genuinely paid. The recovery is to ask the gateway to redeliver, which means
+the *notification* path — not a second, staff-only path — has to be able to finish the
+job. Requiring that recovery run through the same webhook code every ordinary purchase
+exercises is the whole point: a rescue path used once a month is a path nobody knows is
+broken. Making it all-or-nothing keeps the no-overselling guarantee intact when the
+seats have since been resold, and forbidding any non-webhook route to `PAID` keeps
+exactly one source of payment truth.
 
 ### V. Payment Gateway Abstraction
 The `internal/payment` domain MUST expose a `Gateway` interface
-(`CreateTransaction`, `VerifyWebhook`) so gateways can be swapped (e.g., from Midtrans
-to another provider) without modifying the `order` domain.
+(`CreateTransaction`, `VerifyWebhook`) so gateways can be swapped without modifying the
+`order` domain. `VerifyWebhook` takes the credential the caller presented — a bearer
+token, a signature, or whatever the provider's contract specifies — and its job is
+unchanged either way: authenticate an inbound notification and normalise it onto a
+provider-neutral shape.
 Rationale: Keeps payment-provider-specific logic isolated and replaceable, consistent
-with Domain Isolation (Principle II).
+with Domain Isolation (Principle II). This has been exercised: the initial Midtrans
+adapter was replaced wholesale by the Manjo one (spec 012) with no change to the
+`order` domain beyond removing a DTO field the new contract has no use for.
 
 ### VI. Guest-First MVP Scope Discipline
 Ticket purchase MUST work end-to-end for unauthenticated guest users (browse → dynamic
@@ -478,8 +553,11 @@ purchase flow at all.
   orchestration platforms per Principle VI. Redis is a single node used solely as the
   Principle VII read cache, and is a soft dependency: `docker compose up` and the API's
   startup MUST both succeed when it is unavailable.
-* **Payment**: Payment Gateway Abstraction per Principle V; initial concrete
-  implementation is Midtrans SNAP Sandbox.
+* **Payment**: Payment Gateway Abstraction per Principle V; the concrete
+  implementation is the Manjo gateway, spoken over plain HTTP REST with the wire
+  shapes taken from the shared `cdtc` contract module. No vendor SDK is a
+  dependency. (Midtrans SNAP Sandbox was the initial implementation and was
+  replaced by spec 012.)
 * **Email & PDF**: SMTP via `go-mail/mail` or `net/smtp`; PDF via `maroto` or
   `gofpdf`; QR codes via `go-qrcode`.
 * **No object storage**: this MVP has no file storage, no CDN, and no static-asset
@@ -562,4 +640,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 3.2.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-11
+**Version**: 3.3.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-11

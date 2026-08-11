@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 func TestNewCarriesCodeMessageAndStatus(t *testing.T) {
@@ -91,6 +92,15 @@ func TestNumericRegistry(t *testing.T) {
 		{http.StatusTooManyRequests, apperr.CodeRateLimited, 429001},
 		{http.StatusInternalServerError, apperr.CodeInternal, 500000},
 		{http.StatusBadGateway, apperr.CodePaymentInitiationFailed, 502001},
+		{http.StatusConflict, apperr.CodePaymentSessionDuplicate, 409006},
+		// The 200 band: outcomes a retry cannot change, so the status line stays a
+		// success and the sub-code carries the meaning (specs/012 FR-019e, FR-012g).
+		{http.StatusOK, apperr.CodeTicketsUnavailable, 200001},
+		{http.StatusOK, apperr.CodeNotificationOrderUnknown, 200002},
+		{http.StatusOK, apperr.CodeNotificationNotDeposit, 200003},
+		{http.StatusOK, apperr.CodeNotificationStatusUnknown, 200004},
+		{http.StatusOK, apperr.CodeNotificationContradiction, 200005},
+		{http.StatusOK, apperr.CodeNotificationOrderCancelled, 200006},
 		// Unregistered codes fall back to status*1000, staying in the scheme.
 		{http.StatusConflict, apperr.CodeEventHasOrders, 409000},
 	}
@@ -99,6 +109,23 @@ func TestNumericRegistry(t *testing.T) {
 			assert.Equal(t, tc.want, apperr.Numeric(tc.status, tc.code))
 		})
 	}
+}
+
+// An unregistered code on a 200 renders exactly httpx.SuccessCode.
+//
+// This is the trap TICKETS_UNAVAILABLE exists to sit outside of, and the reason
+// it must be *registered* rather than left to the fallback. Numeric's default is
+// status*1000, so any future 200-band code added without a registry arm would
+// announce itself as a success — on a status line that is 200 in both cases by
+// design (specs/012 FR-019c), so nothing asserting on the status would notice.
+// If this assertion ever fails, the fallback changed and that guarantee moved.
+func TestUnregisteredCodeOnOKCollidesWithSuccess(t *testing.T) {
+	assert.Equal(t, httpx.SuccessCode, apperr.Numeric(http.StatusOK, "ANYTHING_UNREGISTERED"),
+		"the fallback collides with success by construction — this is why 200-band codes must be registered")
+
+	assert.NotEqual(t, apperr.Numeric(http.StatusOK, "ANYTHING_UNREGISTERED"),
+		apperr.Numeric(http.StatusOK, apperr.CodeTicketsUnavailable),
+		"a settle refusal must never render the same code as an acknowledgement")
 }
 
 // PAYMENT_ALREADY_STARTED carries the current QR payload so a retry is safe.

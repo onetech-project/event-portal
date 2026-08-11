@@ -21,7 +21,7 @@ export function bookingStageFromPathname(pathname: string): BookingStep {
 
   // Order matters: the bare order path is a prefix of both nested ones, so
   // testing for it first would leave the last two stages unreachable.
-  if (/^\/orders\/[^/]+\/done$/.test(rest)) return "Done";
+  if (/^\/orders\/[^/]+\/success$/.test(rest)) return "Done";
   // Spec 011 FR-020: the QR screen has its own address, so Registration and
   // Payment are finally distinguishable. Before that both phases lived at the
   // bare order path and the rail had to call them all Payment — which read as

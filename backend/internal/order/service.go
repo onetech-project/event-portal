@@ -24,12 +24,16 @@ import (
 // instead of spinning.
 const orderNumberAttempts = 5
 
-// Timers are the server-owned booking deadlines (spec 008, config-backed:
-// BOOKING_HOLD / PAYMENT_WINDOW / QR_REFRESH_AFTER).
+// Timers are the booking deadlines this domain owns (config-backed:
+// BOOKING_HOLD / PAYMENT_WINDOW).
+//
+// PaymentWindow is no longer among them in the payment phase: the gateway
+// returns the deadline it will enforce and checkout adopts it verbatim
+// (FR-009). The value survives here only as the fallback the payment adapter
+// substitutes when nothing usable came back.
 type Timers struct {
-	BookingHold    time.Duration
-	PaymentWindow  time.Duration
-	QRRefreshAfter time.Duration
+	BookingHold   time.Duration
+	PaymentWindow time.Duration
 }
 
 // Service implements guest checkout.
@@ -56,9 +60,8 @@ func NewService(pool db.Beginner, repo *Repository, events EventProvider, gatewa
 		now:     time.Now,
 		cache:   cache.NoOp{},
 		timers: Timers{
-			BookingHold:    time.Hour,
-			PaymentWindow:  14 * time.Minute,
-			QRRefreshAfter: 7 * time.Minute,
+			BookingHold:   time.Hour,
+			PaymentWindow: 15 * time.Minute,
 		},
 	}
 }
@@ -467,6 +470,19 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		CustomerPhone: primary.Phone,
 		Items:         paymentItems,
 	})
+	if errors.Is(err, ErrGatewaySessionDuplicate) {
+		// The gateway has already issued a code for this reference and will not
+		// issue another, and nothing can fetch the existing one. The order is
+		// unpayable from birth: the guest will never be shown anything to scan.
+		//
+		// The seats have already been released by the time this returns — holding
+		// them to a deadline that cannot end in a payment would only keep them from
+		// someone who could actually buy them.
+		s.log.ErrorContext(ctx, "gateway refused a duplicate reference; order cannot be paid",
+			"order_number", ord.OrderNumber, "provider", s.gateway.Name(), "error", err.Error())
+		return CheckoutQRResponse{}, apperr.Wrap(err, http.StatusConflict, apperr.CodePaymentSessionDuplicate,
+			"This order could not be set up for payment and its seats have been released. Please book again.")
+	}
 	if err != nil {
 		s.log.ErrorContext(ctx, "payment initiation failed; order stays payable",
 			"order_number", ord.OrderNumber, "provider", s.gateway.Name(), "error", err.Error())
@@ -474,10 +490,16 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 			"We could not start the payment with the provider. Your details are saved — please try again.")
 	}
 
-	// TX-P: the server-owned 14-minute window replaces the booking hold. The
-	// provider session is valid longer (PAYMENT_EXPIRY ≥ 15m, config invariant),
-	// so our deadline always falls inside it.
-	deadline := s.now().Add(s.timers.PaymentWindow)
+	// TX-P: the gateway's own deadline replaces the booking hold (FR-009).
+	//
+	// This is the change that removes a whole class of disagreement. Previously
+	// each side computed a deadline and we relied on ours being the shorter; now
+	// there is one deadline, the gateway enforces it, and the countdown the guest
+	// watches is the same instant the code actually stops working. The adapter
+	// guarantees ExpiresAt is set even when the gateway returned nothing usable —
+	// it substitutes the fallback and signals — so there is no zero value to
+	// defend against here.
+	deadline := session.ExpiresAt
 	var stamped bool
 	if err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -515,14 +537,18 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 
 	s.log.InfoContext(ctx, "checkout started payment",
 		"order_number", ord.OrderNumber, "provider", s.gateway.Name(),
-		"payment_expires_at", deadline.UTC())
+		"payment_expires_at", deadline.UTC(),
+		// Which side the deadline came from, recorded at the moment it is stamped.
+		// A fallback deadline is one the gateway never agreed to, so the two sides
+		// can disagree about when the code stops working — worth being able to see
+		// in the logs of the order that misbehaved, not only in the adapter's.
+		"expiry_from_gateway", session.ExpiryFromGateway)
 
 	return CheckoutQRResponse{
-		OrderID:               ord.OrderNumber,
-		QRString:              session.QRString,
-		ExpiresAt:             deadline.UTC(),
-		QRImageURL:            TicketQRImagePath(ord.OrderNumber),
-		QRRefreshAfterSeconds: int(s.timers.QRRefreshAfter.Seconds()),
+		OrderID:    ord.OrderNumber,
+		QRString:   session.QRString,
+		ExpiresAt:  deadline.UTC(),
+		QRImageURL: TicketQRImagePath(ord.OrderNumber),
 	}, nil
 }
 
@@ -530,9 +556,8 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 // fields — the idempotent-retry and lost-race branches.
 func (s *Service) qrResponseFor(ord OrderRecord) CheckoutQRResponse {
 	resp := CheckoutQRResponse{
-		OrderID:               ord.OrderNumber,
-		QRImageURL:            TicketQRImagePath(ord.OrderNumber),
-		QRRefreshAfterSeconds: int(s.timers.QRRefreshAfter.Seconds()),
+		OrderID:    ord.OrderNumber,
+		QRImageURL: TicketQRImagePath(ord.OrderNumber),
 	}
 	if ord.PaymentQRString != nil {
 		resp.QRString = *ord.PaymentQRString

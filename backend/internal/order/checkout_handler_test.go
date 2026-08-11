@@ -36,11 +36,11 @@ func TestCheckoutEndpointReturnsTheQRContractShape(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var data map[string]any
 	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &data))
+	// qr_refresh_after_seconds is gone: one order, one code, one window (FR-010).
 	assert.ElementsMatch(t,
-		[]string{"order_id", "qr_string", "expires_at", "qr_image_url", "qr_refresh_after_seconds"},
-		keysOfMap(data), "contracts/api.md call 8")
+		[]string{"order_id", "qr_string", "expires_at", "qr_image_url"},
+		keysOfMap(data), "specs/012-manjo-payment-gateway/contracts/api.md")
 	assert.Equal(t, "/api/v1/ticket/order/"+orderNumber+"/qris.png", data["qr_image_url"])
-	assert.InDelta(t, 420, data["qr_refresh_after_seconds"], 0.001)
 }
 
 func TestCheckoutEndpointReturns409004WithTheCurrentPayloadOnRetry(t *testing.T) {

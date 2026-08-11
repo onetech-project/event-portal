@@ -51,7 +51,7 @@ const PENDING: TicketOrderDetail = {
   server_time: "2026-08-01T10:03:00Z",
   payment: {
     method: "QRIS",
-    provider: "midtrans",
+    provider: "manjo",
     amount: "550000.00",
     expires_at: "2026-08-01T10:15:00Z",
     qr_image_path: "/api/v1/orders/ORD-20260801-A1B2C3D4/qris.png",
@@ -64,7 +64,7 @@ const EXPIRED: TicketOrderDetail = { ...PENDING, status: "EXPIRED", payment: nul
 const HELD: TicketOrderDetail = { ...PENDING, payment_started: false, payment: null };
 
 const FORMS_PATH = `/events/${PENDING.event.slug}/orders/${PENDING.order_id}`;
-const DONE_PATH = `${FORMS_PATH}/done`;
+const DONE_PATH = `${FORMS_PATH}/success`;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -129,7 +129,12 @@ describe("checkout page — awaiting payment", () => {
     // The payment breakdown frozen at booking (spec 011 FR-016): Ticket Total,
     // one row per fee, then the grand total. This screen itemizes; the forms
     // step deliberately does not.
-    expect(screen.getByText("Ticket Total").parentElement).toHaveTextContent(/500[.,]000/);
+    // The row is labelled "Subtotal (N items)" per the design (Figma 206-5210);
+    // matched by shape rather than by the count so a fixture change does not
+    // silently turn this into an assertion about nothing.
+    expect(screen.getByText(/^Subtotal \(\d+ items?\)$/).parentElement).toHaveTextContent(
+      /500[.,]000/,
+    );
     expect(screen.getByText("PPN (10%)").parentElement).toHaveTextContent(/50[.,]000/);
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
 
@@ -148,7 +153,7 @@ describe("checkout page — awaiting payment", () => {
     renderCheckout();
     await screen.findByText(/scan to pay/i);
 
-    expect(screen.queryByText("Ticket Total")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Subtotal \(/)).not.toBeInTheDocument();
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
   });
 
@@ -162,25 +167,38 @@ describe("checkout page — awaiting payment", () => {
     expect(screen.queryByText(/scan qr or pay menu/i)).not.toBeInTheDocument();
     await userEvent.setup().click(trigger);
     expect(await screen.findByText(/scan qr or pay menu/i)).toBeInTheDocument();
-    expect(screen.getByText(/enter your pin/i)).toBeInTheDocument();
+    expect(screen.getByText(/confirm the payment and enter your pin/i)).toBeInTheDocument();
+    // Step 4 names both halves of the check a guest can actually make — the
+    // merchant and the amount — because "does this match?" is answerable and
+    // "is this right?" is not.
+    expect(screen.getByText(/do not enter your PIN/i)).toBeInTheDocument();
   });
 
-  it("offers a way to check the payment status on demand", async () => {
+  // The "check payment status" button is withdrawn along with the provider
+  // status query that backed it (FR-022a). There is nothing left for it to ask:
+  // the gateway offers no call that reads a transaction's status, and a button
+  // that only re-read our own database would be useless in exactly the case it
+  // existed for.
+  it("offers no status-check button, because nothing can answer it", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
 
     renderCheckout();
+    await screen.findByText(/scan to pay/i);
 
     expect(
-      await screen.findByRole("button", { name: /check payment status/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /check payment status/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it("says the page updates itself while it is polling", async () => {
+  // The primary action is inert while the order is pending: payment happens in
+  // the guest's banking app, not on this page.
+  it("shows an inert primary action while payment is pending", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(PENDING)));
 
     renderCheckout();
 
-    expect(await screen.findByText(/updates by itself/i)).toBeInTheDocument();
+    const action = await screen.findByRole("button", { name: /waiting for payment/i });
+    expect(action).toBeDisabled();
   });
 
   it("shows no ticket holder forms — those belong to the previous step", async () => {
@@ -253,6 +271,28 @@ describe("checkout page — state forwards", () => {
 
     expect(screen.getByText("Jazz Night 2026")).toBeInTheDocument();
     expect(screen.getByText("Regular")).toBeInTheDocument();
+  });
+
+  // The frame stays, only the code goes. Blanking the whole left column left the
+  // page a void beside the dialog, which read as broken rather than as finished
+  // — but an expired order still must not present anything scannable
+  // (US5 scenario 7), and the server has already stopped issuing the payload.
+  it("keeps the QRIS frame but drops the code once the order has expired", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
+
+    renderCheckout();
+    await screen.findByRole("heading", { name: /time's up/i });
+
+    // Queried by text and alt rather than by role: the open dialog marks
+    // everything behind it aria-hidden, so a role query would find nothing here
+    // and every assertion below would pass for the wrong reason.
+    expect(screen.getByText(/scan to pay/i)).toBeInTheDocument();
+    expect(screen.getByAltText(/QR Code Standar/i)).toBeInTheDocument();
+    expect(screen.getByText(/satu qris untuk semua/i)).toBeInTheDocument();
+
+    expect(screen.queryByAltText(/QRIS code for/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/payment time ran out/i)).toBeInTheDocument();
+    expect(screen.getByText(/can no longer be paid/i)).toBeInTheDocument();
   });
 
   it("shows a cancelled order the same dialog, worded as cancelled", async () => {
@@ -395,50 +435,6 @@ describe("checkout page — isolation and polling", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(fetchSpy.mock.calls.length).toBe(afterLoad);
-  });
-});
-
-describe("checkout page — checking status", () => {
-  it("reports that nothing has changed yet", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) =>
-      Promise.resolve(
-        url.includes("/payment/refresh")
-          ? envelope({
-              order_number: PENDING.order_id,
-              status: "PENDING",
-              changed: false,
-              checked_at: "2026-08-01T10:04:00Z",
-            })
-          : envelope(PENDING),
-      ),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
-
-    renderCheckout();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /check payment status/i }),
-    );
-
-    expect(await screen.findByText(/still waiting for your payment/i)).toBeInTheDocument();
-  });
-
-  // Spec 008 FR-018: pressing too often is a cooldown, not an error.
-  it("shows a cooldown rather than an error when rate limited", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) =>
-      Promise.resolve(
-        url.includes("/payment/refresh")
-          ? jsonResponse({ error_code: "RATE_LIMITED", message: "Too many requests." }, 429)
-          : envelope(PENDING),
-      ),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
-
-    renderCheckout();
-    const button = await screen.findByRole("button", { name: /check payment status/i });
-    await userEvent.click(button);
-
-    expect(await screen.findByText(/wait a few seconds/i)).toBeInTheDocument();
-    await waitFor(() => expect(button).toBeDisabled());
   });
 });
 

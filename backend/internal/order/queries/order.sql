@@ -295,12 +295,6 @@ UPDATE attendees
 SET name = $3, email = $4, phone = $5, dob = $6, gender_id = $7
 WHERE id = $1 AND order_id = $2;
 
--- name: UpdatePaymentQR :execrows
--- QR re-issue (7-minute refresh): swaps the payload WITHOUT touching the
--- deadline — the 14-minute window never extends (FR-015).
-UPDATE orders
-SET payment_url = $2, payment_qr_string = $3, updated_at = now()
-WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING');
 
 -- name: UpdatePaymentDetailsIfUnstarted :execrows
 -- Checkout TX-P: stamps the gateway session and the payment window, guarded so
@@ -391,3 +385,25 @@ SELECT id, name, amount, position
 FROM order_fees
 WHERE order_id = $1
 ORDER BY position, name;
+
+-- name: UpdateOrderStatusFromReleased :execrows
+-- Settle-after-expiry only (FR-019): move an order out of a RELEASED state into
+-- PAID because the gateway redelivered a notification saying it was paid.
+--
+-- The query can express any from→to move; the payment domain cannot ask for one.
+-- Its adapter binds both statuses at the call site to EXPIRED → PAID, which is
+-- what makes FR-019d — never revive an order the gateway itself cancelled —
+-- unreachable by construction rather than by a caller remembering the rule.
+--
+-- Guarded on the order still being in the state the caller saw, for the same
+-- reason UpdateOrderStatusIfPending is guarded on PENDING: two deliveries of the
+-- same resend must produce one transition, not two, or the re-deduction that
+-- accompanies it would run twice and oversell.
+--
+-- Nothing here is reachable by a person asserting a payment. FR-022d forbids that
+-- outright, and there is no endpoint, service method, or interface that offers it.
+UPDATE orders
+SET status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = sqlc.arg(status)),
+    updated_at = now()
+WHERE orders.id = $1
+  AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = sqlc.arg(from_status));

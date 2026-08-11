@@ -3,12 +3,14 @@ package payment_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pgauto/cdtc/status"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,17 +26,13 @@ import (
 type stubGateway struct {
 	result *payment.WebhookResult
 	err    error
-	// statusResult/statusErr let a test make a provider status read differ from
-	// what its webhook says — the case reconciliation exists for.
-	statusResult *payment.WebhookResult
-	statusErr    error
-	// session/createErr/createCalls back the QR re-issue tests.
+	// session/createErr/createCalls back the session-open tests.
 	session     payment.PaymentSession
 	createErr   error
 	createCalls []payment.TransactionRequest
 }
 
-func (g *stubGateway) Name() string { return "midtrans" }
+func (g *stubGateway) Name() string { return "manjo" }
 
 func (g *stubGateway) CreateTransaction(_ context.Context, req payment.TransactionRequest) (payment.PaymentSession, error) {
 	g.createCalls = append(g.createCalls, req)
@@ -45,16 +43,6 @@ func (g *stubGateway) CreateTransaction(_ context.Context, req payment.Transacti
 		return payment.PaymentSession{}, errors.New("no session configured")
 	}
 	return g.session, nil
-}
-
-func (g *stubGateway) FetchStatus(context.Context, string) (*payment.WebhookResult, error) {
-	if g.statusErr != nil {
-		return nil, g.statusErr
-	}
-	if g.statusResult != nil {
-		return g.statusResult, nil
-	}
-	return g.result, g.err
 }
 
 func (g *stubGateway) VerifyWebhook([]byte, string) (*payment.WebhookResult, error) {
@@ -81,11 +69,6 @@ func (a orderAdapter) OrderByNumber(ctx context.Context, number string) (payment
 		OrderNumber:      rec.OrderNumber,
 		Status:           rec.Status,
 		PaymentExpiresAt: rec.PaymentExpiresAt,
-		TotalAmount:      rec.TotalAmount,
-		BuyerName:        rec.BuyerName,
-		BuyerEmail:       rec.BuyerEmail,
-		BuyerPhone:       rec.BuyerPhone,
-		PaymentStarted:   rec.PaymentQRString != nil && *rec.PaymentQRString != "",
 	}, nil
 }
 
@@ -118,12 +101,8 @@ func (a orderAdapter) QuotaHolds(ctx context.Context, tx pgx.Tx, orderID uuid.UU
 	return out, nil
 }
 
-func (a orderAdapter) UpdateStatusIfPending(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, status string) (bool, error) {
-	return a.repo.UpdateOrderStatusIfPending(ctx, tx, orderID, status)
-}
-
-func (a orderAdapter) UpdatePaymentQR(ctx context.Context, orderID uuid.UUID, url, qrString string) (bool, error) {
-	return a.repo.UpdatePaymentQRByID(ctx, orderID, url, qrString)
+func (a orderAdapter) UpdateStatusIfPending(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, orderStatus string) (bool, error) {
+	return a.repo.UpdateOrderStatusIfPending(ctx, tx, orderID, orderStatus)
 }
 
 type quotaAdapter struct{ svc *event.Service }
@@ -194,6 +173,8 @@ func newWebhookFixture(t *testing.T) webhookFixture {
 		gw,
 		orderAdapter{repo: order.NewRepository(pool)},
 		quotaAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		reserverAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		orderAdapter{repo: order.NewRepository(pool)},
 		fulfiller,
 		fulfiller,
 		testsupport.DiscardLogger(),
@@ -234,6 +215,8 @@ func newBundleWebhookFixture(t *testing.T) webhookFixture {
 		gw,
 		orderAdapter{repo: order.NewRepository(pool)},
 		quotaAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		reserverAdapter{svc: event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())},
+		orderAdapter{repo: order.NewRepository(pool)},
 		fulfiller,
 		fulfiller,
 		testsupport.DiscardLogger(),
@@ -245,73 +228,79 @@ func newBundleWebhookFixture(t *testing.T) webhookFixture {
 	}
 }
 
-func (f webhookFixture) notifyBundle(t *testing.T, transactionStatus, fraudStatus string) error {
-	t.Helper()
-	f.gateway.result = &payment.WebhookResult{
-		OrderNumber:       "ORD-WEBHOOK-BUNDLE",
-		TransactionID:     "tx-1",
-		TransactionStatus: transactionStatus,
-		FraudStatus:       fraudStatus,
-		PaymentType:       "bank_transfer",
-		RawPayload:        []byte(`{"transaction_status":"` + transactionStatus + `"}`),
+// notification builds an authenticated result the way the real adapter would,
+// including the deposit flag every genuine payment carries.
+func notification(reference string, s status.Status) *payment.WebhookResult {
+	return &payment.WebhookResult{
+		OrderNumber:       reference,
+		TransactionID:     "A48593" + s.String(),
+		Status:            s,
+		StatusPresent:     true,
+		TransactionStatus: s.String(),
+		PaymentType:       "qris",
+		TransactionType:   "DEPOSIT",
+		IsDeposit:         true,
+		RawPayload:        []byte(fmt.Sprintf(`{"ri":%q,"s":%d,"tt":0}`, reference, s)),
 	}
-	err := f.svc.HandleNotification(context.Background(), "midtrans", f.gateway.result.RawPayload, "")
+}
+
+func (f webhookFixture) deliver(t *testing.T, result *payment.WebhookResult) error {
+	t.Helper()
+	f.gateway.result = result
+	err := f.svc.HandleNotification(context.Background(), "manjo", result.RawPayload, "token")
 	f.svc.WaitForFulfillment()
 	return err
 }
 
-func (f webhookFixture) notify(t *testing.T, transactionStatus, fraudStatus string) error {
+func (f webhookFixture) notify(t *testing.T, s status.Status) error {
 	t.Helper()
-	f.gateway.result = &payment.WebhookResult{
-		OrderNumber:       "ORD-WEBHOOK",
-		TransactionID:     "tx-1",
-		TransactionStatus: transactionStatus,
-		FraudStatus:       fraudStatus,
-		PaymentType:       "bank_transfer",
-		RawPayload:        []byte(`{"transaction_status":"` + transactionStatus + `"}`),
-	}
-	err := f.svc.HandleNotification(context.Background(), "midtrans", f.gateway.result.RawPayload, "")
-	f.svc.WaitForFulfillment()
-	return err
+	return f.deliver(t, notification("ORD-WEBHOOK", s))
+}
+
+func (f webhookFixture) notifyBundle(t *testing.T, s status.Status) error {
+	t.Helper()
+	return f.deliver(t, notification("ORD-WEBHOOK-BUNDLE", s))
+}
+
+// markerCount reports how many rows carry a given marker.
+func (f webhookFixture) markerCount(t *testing.T, marker string) int {
+	t.Helper()
+	var count int
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM payments WHERE order_id = $1 AND status = $2`,
+		f.orderID, marker).Scan(&count))
+	return count
 }
 
 // --- Authentication -------------------------------------------------------
 
-func TestWebhookRejectsAnUnverifiedNotification(t *testing.T) {
+func TestCallbackRejectsAnUnauthenticatedNotification(t *testing.T) {
 	f := newWebhookFixture(t)
 	f.gateway.err = payment.ErrInvalidSignature
 
-	err := f.svc.HandleNotification(context.Background(), "midtrans", []byte(`{}`), "")
+	err := f.svc.HandleNotification(context.Background(), "manjo", []byte(`{}`), "wrong")
 
 	assert.ErrorIs(t, err, payment.ErrInvalidSignature)
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID),
-		"an unverified notification must change nothing")
+		"an unauthenticated notification must change nothing")
 }
 
 // --- Paid path ------------------------------------------------------------
 
-func TestSettlementMarksTheOrderPaidWithoutTouchingQuota(t *testing.T) {
+func TestCompletedMarksTheOrderPaidWithoutTouchingQuota(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "settlement", ""))
+	require.NoError(t, f.notify(t, status.Completed))
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota was already deducted at checkout and must not move again")
 }
 
-func TestCaptureWithAcceptMarksTheOrderPaid(t *testing.T) {
-	f := newWebhookFixture(t)
-
-	require.NoError(t, f.notify(t, "capture", "accept"))
-
-	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
-}
-
 func TestPaidOrderTriggersTicketGenerationAndEmail(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "settlement", ""))
+	require.NoError(t, f.notify(t, status.Completed))
 
 	issued, emailed := f.fulfiller.counts()
 	assert.Equal(t, 1, issued)
@@ -322,21 +311,23 @@ func TestFulfillmentIsSkippedWhenTicketGenerationFails(t *testing.T) {
 	f := newWebhookFixture(t)
 	f.fulfiller.issueErr = errors.New("db down")
 
-	require.NoError(t, f.notify(t, "settlement", ""),
-		"the provider is still acknowledged; fulfillment is retried out of band")
+	require.NoError(t, f.notify(t, status.Completed),
+		"the gateway is still acknowledged; fulfilment is retried out of band")
 
 	_, emailed := f.fulfiller.counts()
 	assert.Zero(t, emailed, "no email may be sent for tickets that were never issued")
 }
 
-// --- Idempotency (Constitution Principle IV) ------------------------------
+// --- Idempotency (Constitution Principle IV, FR-012d, SC-004) -------------
 
-func TestReplayedSettlementIsANoOp(t *testing.T) {
+// The gateway retries any non-200 three times and delivers at least once, so an
+// outcome must survive four deliveries. Ten is deliberate overkill.
+func TestRepeatedDeliveryIssuesOneSetOfTicketsAndOneEmail(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "settlement", ""))
-	require.NoError(t, f.notify(t, "settlement", ""))
-	require.NoError(t, f.notify(t, "settlement", ""))
+	for i := 0; i < 10; i++ {
+		require.NoError(t, f.notify(t, status.Completed), "delivery %d", i+1)
+	}
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 
@@ -345,12 +336,25 @@ func TestReplayedSettlementIsANoOp(t *testing.T) {
 	assert.Equal(t, 1, emailed, "the buyer must not receive a second email")
 }
 
+// A repeat of the recorded outcome is the NORMAL case under at-least-once
+// delivery, so it must raise no signal at all — doing so would bury the genuine
+// contradictions below in routine retry noise.
+func TestRepeatedCompletedRaisesNoMarker(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	require.NoError(t, f.notify(t, status.Completed))
+	require.NoError(t, f.notify(t, status.Completed))
+
+	assert.Zero(t, f.markerCount(t, payment.MarkerDisputed))
+	assert.Zero(t, f.markerCount(t, payment.MarkerSettledAfterExpiry))
+}
+
 func TestANotificationForAnAlreadyPaidOrderIsStillLogged(t *testing.T) {
 	f := newWebhookFixture(t)
 	ctx := context.Background()
 
-	require.NoError(t, f.notify(t, "settlement", ""))
-	require.NoError(t, f.notify(t, "settlement", ""))
+	require.NoError(t, f.notify(t, status.Completed))
+	require.NoError(t, f.notify(t, status.Completed))
 
 	var count int
 	require.NoError(t, f.pool.QueryRow(ctx,
@@ -358,32 +362,116 @@ func TestANotificationForAnAlreadyPaidOrderIsStillLogged(t *testing.T) {
 	assert.Equal(t, 2, count, "the audit trail records every notification received")
 }
 
-// --- Quota-restoring outcomes ---------------------------------------------
+// --- Contradiction (FR-016b/c/d) ------------------------------------------
+
+// PAID is terminal for every automated path. A notification saying the payment
+// failed does not reverse it — the seats are gone and the buyer holds valid
+// tickets — but it must reach a human, distinguishably from retry traffic.
+func TestTerminalFailureAfterPaidLeavesTheOrderPaidAndRaisesADispute(t *testing.T) {
+	for _, s := range []status.Status{status.Cancel, status.Reject, status.Expired} {
+		t.Run(s.String(), func(t *testing.T) {
+			f := newWebhookFixture(t)
+
+			require.NoError(t, f.notify(t, status.Completed))
+			require.ErrorIs(t, f.notify(t, s), payment.ErrNotificationContradiction,
+				"a contradiction names itself in the response (FR-012g)")
+
+			assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID),
+				"nothing but an attributable staff action may leave PAID")
+			assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
+				"quota must not be returned for seats whose tickets are live")
+			assert.Equal(t, 1, f.markerCount(t, payment.MarkerDisputed))
+		})
+	}
+}
+
+// The marker is written IN ADDITION to the audit row for the payload that
+// triggered it, never instead of it (FR-018).
+func TestADisputeKeepsTheAuditRowForTheContradictingPayload(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
+
+	var raw int
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM payments WHERE order_id = $1 AND status = $2`,
+		f.orderID, status.Cancel.String()).Scan(&raw))
+	assert.Equal(t, 1, raw, "the contradicting notification keeps its own audit row")
+	assert.Equal(t, 1, f.markerCount(t, payment.MarkerDisputed))
+}
+
+// --- A completion for a cancelled order (FR-019d) --------------------------
+
+// Cancellation is the GATEWAY's verdict, or the consequence of a code that never
+// reached the guest. Reversing it would contradict the source of payment truth
+// this design rests on, so the order stands and a person decides about the money.
+//
+// The expired case is the exact opposite and lives in reconcile_test.go: expiry
+// is OUR verdict, so a completion reverses it. That the two arrive here looking
+// identical — a released order with money against it — is why the split is
+// tested rather than assumed.
+func TestCompletedForACancelledOrderIsNotRevived(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled,
+		"a completion for a cancelled order is reported, never silently dropped (FR-012g)")
+
+	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
+		"the seats stay in the pool; nothing takes them back for an order that is not revived")
+
+	issued, emailed := f.fulfiller.counts()
+	assert.Zero(t, issued, "no ticket may be issued against a cancelled order")
+	assert.Zero(t, emailed)
+	assert.Zero(t, f.markerCount(t, payment.MarkerSettledAfterExpiry))
+}
+
+// No marker is written for this case, deliberately: the audit row for the
+// completion payload is already on the order's own record, and that is where
+// anyone looking the order up will find it.
+func TestCompletedForACancelledOrderKeepsItsAuditRow(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.notify(t, status.Cancel))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled)
+
+	var raw int
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM payments WHERE order_id = $1 AND status = $2`,
+		f.orderID, status.Completed.String()).Scan(&raw))
+	assert.Equal(t, 1, raw, "the payment we refused to honour is still recorded in full")
+}
+
+// --- Quota-restoring outcomes (US3) ---------------------------------------
 
 func TestCancelRestoresQuotaAndCancelsTheOrder(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "cancel", ""))
+	require.NoError(t, f.notify(t, status.Cancel))
 
 	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
-func TestExpireRestoresQuotaAndExpiresTheOrder(t *testing.T) {
+func TestExpiredRestoresQuotaAndExpiresTheOrder(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "expire", ""))
+	require.NoError(t, f.notify(t, status.Expired))
 
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
-func TestDenyAndFailureBothCancelAndRestore(t *testing.T) {
-	for _, status := range []string{"deny", "failure"} {
-		t.Run(status, func(t *testing.T) {
+func TestRejectAndCancelBothCancelAndRestore(t *testing.T) {
+	for _, s := range []status.Status{status.Reject, status.Cancel} {
+		t.Run(s.String(), func(t *testing.T) {
 			f := newWebhookFixture(t)
 
-			require.NoError(t, f.notify(t, status, ""))
+			require.NoError(t, f.notify(t, s))
 
 			assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 			assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
@@ -396,9 +484,9 @@ func TestDenyAndFailureBothCancelAndRestore(t *testing.T) {
 func TestReplayedCancelDoesNotRestoreQuotaTwice(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "cancel", ""))
-	require.NoError(t, f.notify(t, "cancel", ""))
-	require.NoError(t, f.notify(t, "cancel", ""))
+	for i := 0; i < 4; i++ {
+		require.NoError(t, f.notify(t, status.Cancel))
+	}
 
 	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota must be restored exactly once")
@@ -407,21 +495,40 @@ func TestReplayedCancelDoesNotRestoreQuotaTwice(t *testing.T) {
 func TestCancelAfterPaidDoesNotRestoreQuota(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "settlement", ""))
-	require.NoError(t, f.notify(t, "cancel", ""))
+	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
 
 	assert.Equal(t, "PAID", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
-// T051: cancelling a bundle order restores every constituent to its pre-checkout
-// value — the release is driven by the package-expanded holds, not by a single
-// flat count — and a replayed cancel cannot restore any of them twice.
+// A sweep racing a notification still restores quota exactly once — both go
+// through the same guarded transition.
+func TestSweepRacingACancelRestoresQuotaOnce(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	// Put the order past its deadline so the sweeper is eligible too.
+	_, err := f.pool.Exec(ctx,
+		`UPDATE orders SET payment_expires_at = now() - interval '1 minute' WHERE id = $1`, f.orderID)
+	require.NoError(t, err)
+
+	require.NoError(t, f.notify(t, status.Cancel))
+	_, err = f.svc.ExpireDueOrders(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
+		"whichever path wins the guarded transition, the seats come back once")
+}
+
+// Cancelling a bundle order restores every constituent to its pre-checkout value
+// — the release is driven by the package-expanded holds, not by a single flat
+// count — and a replayed cancel cannot restore any of them twice.
 func TestCancelRestoresEveryBundleConstituentExactlyOnce(t *testing.T) {
 	f := newBundleWebhookFixture(t)
 
-	require.NoError(t, f.notifyBundle(t, "cancel", ""))
-	require.NoError(t, f.notifyBundle(t, "cancel", ""))
+	require.NoError(t, f.notifyBundle(t, status.Cancel))
+	require.NoError(t, f.notifyBundle(t, status.Cancel))
 
 	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	for _, ticketID := range f.ticketIDs {
@@ -430,10 +537,10 @@ func TestCancelRestoresEveryBundleConstituentExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestExpireRestoresEveryBundleConstituent(t *testing.T) {
+func TestExpiredRestoresEveryBundleConstituent(t *testing.T) {
 	f := newBundleWebhookFixture(t)
 
-	require.NoError(t, f.notifyBundle(t, "expire", ""))
+	require.NoError(t, f.notifyBundle(t, status.Expired))
 
 	assert.Equal(t, "EXPIRED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	for _, ticketID := range f.ticketIDs {
@@ -447,7 +554,7 @@ func TestExpireRestoresEveryBundleConstituent(t *testing.T) {
 func TestPendingLeavesTheOrderAndQuotaUntouched(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "pending", ""))
+	require.NoError(t, f.notify(t, status.Pending))
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
@@ -456,38 +563,139 @@ func TestPendingLeavesTheOrderAndQuotaUntouched(t *testing.T) {
 	assert.Zero(t, issued)
 }
 
-func TestCaptureWithChallengeLeavesTheOrderPending(t *testing.T) {
+// Obscure is "undefined status from payment network or bank". It holds the order
+// rather than guessing, and it is still acknowledged so the gateway stops.
+func TestObscureHoldsTheOrderAndIsAcknowledged(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	require.NoError(t, f.notify(t, "capture", "challenge"))
+	require.ErrorIs(t, f.notify(t, status.Obscure), payment.ErrNotificationUnknownStatus,
+		"an indeterminate status is reported to the caller (FR-012g)")
 
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
 		"quota is held until a definitive notification arrives")
 }
 
-func TestAnUnrecognizedStatusChangesNothingButIsAcknowledged(t *testing.T) {
+func TestAnUnrecognisedStatusChangesNothingButIsAcknowledged(t *testing.T) {
 	f := newWebhookFixture(t)
 
-	err := f.notify(t, "refund", "")
+	err := f.notify(t, status.Status(99))
 
-	require.NoError(t, err, "the provider is acknowledged so it stops retrying")
+	require.ErrorIs(t, err, payment.ErrNotificationUnknownStatus,
+		"still a 200 to the gateway, but the caller is told what was wrong (FR-012g)")
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
 	assert.Equal(t, int32(7), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]))
 }
 
-// --- Unknown order --------------------------------------------------------
+// --- Refused notifications (FR-013, FR-020) -------------------------------
 
-func TestANotificationForAnUnknownOrderIsAcknowledged(t *testing.T) {
+func TestANotificationForAnUnknownReferenceIsAcknowledged(t *testing.T) {
 	f := newWebhookFixture(t)
-	f.gateway.result = &payment.WebhookResult{
-		OrderNumber:       "ORD-DOES-NOT-EXIST",
-		TransactionStatus: "settlement",
-		RawPayload:        []byte(`{}`),
-	}
 
-	err := f.svc.HandleNotification(context.Background(), "midtrans", []byte(`{}`), "")
+	err := f.deliver(t, notification("ORD-DOES-NOT-EXIST", status.Completed))
 
-	require.NoError(t, err, "acknowledging stops the provider retrying a notification we can never process")
+	require.ErrorIs(t, err, payment.ErrNotificationUnknownOrder,
+		"still acknowledged so the gateway stops retrying, but no longer silently (FR-012g)")
 	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+}
+
+// A withdrawal is not a payment for one of our orders. It changes nothing, and
+// retrying would deliver the same irrelevant fact three more times.
+func TestANonDepositNotificationChangesNothingAndIsAcknowledged(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	result := notification("ORD-WEBHOOK", status.Completed)
+	result.IsDeposit = false
+	result.TransactionType = "WITHDRAW"
+
+	require.ErrorIs(t, f.deliver(t, result), payment.ErrNotificationNotDeposit,
+		"a withdrawal on a deposit-only endpoint is reported (FR-012g)")
+
+	assert.Equal(t, "PENDING", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	issued, _ := f.fulfiller.counts()
+	assert.Zero(t, issued)
+}
+
+// --- Duplicate reference (FR-007e) ----------------------------------------
+
+// The gateway has issued a code this system will never hold, so the order can
+// never be paid. Holding its seats to the deadline could not help anyone.
+func TestReleaseDuplicateSessionFreesQuotaImmediatelyAndMarksTheOrder(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	require.NoError(t, f.svc.ReleaseDuplicateSession(
+		context.Background(), "ORD-WEBHOOK", payment.ErrDuplicateReference))
+
+	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	assert.Equal(t, int32(10), testsupport.QuotaOf(t, f.pool, f.ticketIDs[0]),
+		"seats come back now, not at a deadline that cannot end in a payment")
+	assert.Equal(t, 1, f.markerCount(t, payment.MarkerSessionDuplicate))
+}
+
+// FR-007f: a payment that somehow arrives for an order released this way must be
+// recorded and reach a person, and must NOT settle under FR-019.
+//
+// The release cancels the order rather than expiring it, and that is what makes
+// the distinction load-bearing rather than academic: the order was released
+// because no code ever reached the guest, so a payment against it did not come
+// from this booking — the guest was told to start again and may hold a second
+// order entirely.
+func TestAPaymentArrivingAfterADuplicateReleaseDoesNotSettleTheOrder(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.svc.ReleaseDuplicateSession(
+		ctx, "ORD-WEBHOOK", payment.ErrDuplicateReference))
+	require.ErrorIs(t, f.notify(t, status.Completed), payment.ErrNotificationOrderCancelled)
+
+	assert.Equal(t, "CANCELLED", testsupport.OrderStatusOf(t, f.pool, f.orderID))
+	assert.Zero(t, f.markerCount(t, payment.MarkerSettledAfterExpiry))
+	issued, _ := f.fulfiller.counts()
+	assert.Zero(t, issued)
+
+	// It is still findable: the payload sits on the order's own history beside the
+	// SESSION_DUPLICATE marker that explains why the order was released at all.
+	records, err := f.svc.OrderNotifications(ctx, f.orderID)
+	require.NoError(t, err)
+
+	var sawDuplicateMarker, sawCompletion bool
+	for _, r := range records {
+		switch {
+		case r.Status == payment.MarkerSessionDuplicate:
+			sawDuplicateMarker = true
+		case r.Status == status.Completed.String():
+			sawCompletion = true
+		}
+	}
+	assert.True(t, sawDuplicateMarker, "why the order was released")
+	assert.True(t, sawCompletion, "and the payment that arrived for it anyway")
+}
+
+// FR-016c. A contradiction has to be visible on the order's own record, not only
+// in a log line — anyone who looks the order up should see it without being told
+// to look. This is the coverage the withdrawn worklist used to carry.
+func TestADisputeIsReadableOnTheOrdersOwnHistory(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.notify(t, status.Completed))
+	require.ErrorIs(t, f.notify(t, status.Cancel), payment.ErrNotificationContradiction)
+
+	records, err := f.svc.OrderNotifications(ctx, f.orderID)
+	require.NoError(t, err)
+
+	var dispute, settlement bool
+	for _, r := range records {
+		switch r.Status {
+		case payment.MarkerDisputed:
+			dispute = true
+			assert.True(t, r.IsMarker, "a conclusion of ours must not read as a gateway status")
+			assert.Contains(t, string(r.RawPayload), "PAID",
+				"the marker carries the status the order was in when the contradiction arrived")
+		case status.Completed.String():
+			settlement = true
+		}
+	}
+	assert.True(t, dispute, "the contradiction")
+	assert.True(t, settlement, "shown alongside the notification that settled the payment")
 }

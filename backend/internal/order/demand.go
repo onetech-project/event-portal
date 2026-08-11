@@ -141,4 +141,3 @@ func sortedTicketTypeIDs(demand map[uuid.UUID]int32) []uuid.UUID {
 	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 	return ids
 }
-

@@ -49,6 +49,8 @@ DB Transactions (Booking, spec 008): POST /api/v1/ticket/book MUST wrap the crea
 
 Quota Restoration (Abandoned Cart): The webhook handler MUST listen for expire, cancel, or deny statuses. Upon receipt, update order status to Expired/Cancelled and atomically restore the quota in the ticket_types table.
 
+Quota Re-deduction (Settle after expiry, spec 012): The one webhook outcome that takes quota rather than restoring it. A completed-payment notification for an order this system itself expired MUST settle it — the gateway can be asked to redeliver a notification, so a callback lost to an outage is recovered by replaying it rather than by a person recording the payment by hand. Settling re-deducts every ticket type the order holds inside the same transaction as the status change, all-or-nothing: if any type is short, nothing moves, the order stays EXPIRED, and the handler still answers 200 with a body naming the shortfall (a non-200 would burn the gateway's retry budget on an attempt guaranteed to fail identically). Because that 200 shares its status line with every ordinary acknowledgement, the refusal is carried by the envelope's numeric code — `200001` / `TICKETS_UNAVAILABLE` against `200000` — and not by the status; anything asserting on this endpoint must read the code. An order the *gateway* rejected or cancelled MUST NOT be settled this way — only this system's own expiry verdict is reversible. No path other than a gateway webhook may move an order to PAID.
+
 Next.js Caching: Frontend fetch requests for Event Lists and Quotas MUST disable Next.js aggressive caching (e.g., cache: 'no-store').
 
 Webhook Idempotency: Webhook handlers MUST check order status. If status == "PAID", immediately return 200 OK.
@@ -183,9 +185,10 @@ flowchart TD
     N --> O{"Order status"}
     O -- "PENDING" --> P{"Past payment_expires_at?"}
     P -- no --> N
-    P -- yes --> Q["Sweeper, or the guest's own refresh,<br/>expires it: status → EXPIRED,<br/>quota returned to the pool"]
+    P -- yes --> Q["Sweeper expires it: status → EXPIRED,<br/>quota returned to the pool"]
     Q --> R["QR hidden, guest can start a new order"]
     R --> C
+    Q -.->|"callback was lost and the guest did pay —<br/>ops tops up quota and asks the gateway to RESEND,<br/>moving EXPIRED to PAID and re-taking the seats"| S
     O -- "PAID" --> S["Tickets issued and emailed<br/>off the request path"]
     S --> T["Guest can look up GET /api/v1/tickets/:code<br/>— rate limited, and answers with far less<br/>than the admin view"]
 ```
@@ -205,7 +208,7 @@ sequenceDiagram
     participant OS as order.Service
     participant EV as event.Service
     participant DB as PostgreSQL
-    participant MT as Midtrans Core API
+    participant MJ as Manjo gateway
 
     G->>FE: Choose tickets, agree to the T&C
     FE->>API: POST /api/v1/ticket/book
@@ -235,22 +238,27 @@ sequenceDiagram
     API->>OS: CheckoutOrder(orderID, forms)
     Note right of OS: The TOPMOST form's holder (first slot in<br/>canonical order) is the primary contact
     OS->>DB: TX-D — fill attendee slots (gender_id FK) +<br/>snapshot the primary contact into orders.buyer_*
-    OS->>MT: CreateTransaction — outside any TX, no lock held;<br/>customer = the primary contact
+    OS->>MJ: CreateTransaction — outside any TX, no lock held<br/>six fields, no requested expiry, reference = order number
 
-    alt Provider call fails
+    alt Gateway call fails transiently
+        Note right of OS: Retried at most twice under the SAME reference —<br/>the gateway refuses a reference it has already<br/>issued a code for, so a retry can never create<br/>a second live code
         OS-->>FE: 502001 PAYMENT_INITIATION_FAILED
         Note right of OS: No compensation: the hold and the saved forms<br/>are kept, and the guest retries from the same order
+    else Duplicate reference
+        MJ-->>OS: error — a code exists that we will never hold
+        OS->>DB: Release quota NOW + SESSION_DUPLICATE marker
+        OS-->>FE: 409006 PAYMENT_SESSION_DUPLICATE — start again
+        Note right of OS: Terminal. No call returns an existing code, so<br/>holding the seats to a deadline that cannot end<br/>in a payment would help nobody
     else QRIS session created
-        MT-->>OS: qr_string, expiry
-        OS->>DB: TX-P — UPDATE orders SET payment_qr_string,<br/>payment_expires_at = now() + 14m<br/>WHERE payment_qr_string IS NULL
+        MJ-->>OS: qr_r (payload), eri, qr_ea (the gateway's own expiry)
+        OS->>DB: TX-P — UPDATE orders SET payment_qr_string,<br/>payment_expires_at = qr_ea (adopted verbatim)<br/>WHERE payment_qr_string IS NULL
         OS-->>FE: qr_string, expires_at, qr_image_url
     end
 ```
 
 *Settlement — three paths racing for the same order*
 
-A webhook, the guest's refresh button, and the expiry sweeper can all reach the
-same order at once. They converge on one guarded transition — `UPDATE orders SET
+A gateway notification and the expiry sweeper can reach the same order at once. They converge on one guarded transition — `UPDATE orders SET
 status_id … WHERE status_id = <PENDING>` — which is what makes quota restoration
 and ticket generation happen exactly once no matter who wins. (Migration 0013
 made the column a reference to the `order_statuses` master list; callers still
@@ -265,34 +273,27 @@ sequenceDiagram
     participant API as Echo router
     participant PS as payment.Service
     participant DB as PostgreSQL
-    participant MT as Midtrans
+    participant MJ as Manjo gateway
     participant TS as ticket.Service
     participant NS as notification.Service
     participant SW as Expiry sweeper
 
     par Guest watches the page
-        loop Every 3s until the status is final
-            FE->>API: GET /api/v1/ticket/order/:order_id
-            API-->>FE: status, total, payment.expires_at
-        end
-        G->>FE: Press "check payment status"
-        FE->>API: POST /api/v1/ticket/order/:order_id/payment/refresh
-        Note right of API: Rate limited to ~1 press per 5s per IP:<br/>each one costs an outbound provider call
-        API->>PS: RefreshStatus
-        PS->>MT: FetchStatus
-        MT-->>PS: transaction_status
-        PS->>PS: applyProviderResult — the same path a webhook takes
-    and Provider notifies
-        MT->>API: POST /api/v1/payment/webhook/midtrans
+        FE->>API: GET /api/v1/ticket/checkout/:order_id/status (SSE)
+        API-->>FE: snapshot, then a named keep-alive every 25s
+        Note right of FE: No interval poll. The client watches the beat and<br/>falls back to periodic reads ONLY while the stream<br/>is failing — a proxy that accepts the connection and<br/>forwards nothing produces onopen and no error, so<br/>connection state alone reports health that is not there
+    and Gateway notifies
+        MJ->>API: POST /v1.0/callback/exec
+        Note right of API: Mounted at the root, not under /api/v1:<br/>the path is fixed by the gateway's dispatch code
         API->>PS: HandleNotification
-        PS->>PS: VerifyWebhook — SHA-512 over the body's signature_key,<br/>compared in constant time
-        Note right of PS: Only a bad signature answers non-2xx.<br/>Unknown orders and unrecognized statuses are<br/>acknowledged and logged, or the provider<br/>retries something we can never process
+        PS->>PS: VerifyWebhook — bearer token compared in constant time
+        Note right of PS: Only a bad token answers non-2xx.<br/>The gateway retries ANY other answer 3 times,<br/>10s apart, with a 5s timeout and no dead-letter —<br/>so unknown references, withdrawals, and<br/>unrecognised statuses are all recorded and 200'd
         PS->>DB: INSERT payments — the audit row is written first,<br/>even for answers that change nothing
         alt Order is already PAID
-            PS-->>MT: 200 OK — idempotent no-op, no second email
+            PS-->>MJ: 200 OK — idempotent no-op, no second email
         else Still PENDING
             PS->>DB: TX — UPDATE orders SET status_id WHERE status_id = PENDING
-            PS-->>MT: 200 OK — returned before fulfillment runs
+            PS-->>MJ: 200 OK — returned before fulfillment runs
             PS->>TS: IssueTicketsForOrder — goroutine
             TS->>DB: INSERT tickets, one per attendee, idempotent
             PS->>NS: SendTicketEmail — goroutine

@@ -120,4 +120,47 @@ describe("ExpiryCountdown", () => {
     expect(onExpired).toHaveBeenCalled();
     expect(screen.getByText(/expired/i)).toBeInTheDocument();
   });
+
+  // What the banner is for is the clock, so the clock is what has to survive the
+  // deadline. Replacing it with the word "Expired" removed it at the one moment
+  // the guest was looking straight at it.
+  it("holds the digits at zero rather than replacing them once time runs out", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-08-01T10:00:00Z"));
+
+    render(
+      <ExpiryCountdown
+        variant="digits"
+        expiresAt="2026-08-01T10:00:03Z"
+        serverTime="2026-08-01T10:00:00Z"
+      />,
+    );
+
+    expect(screen.getByText("0 : 03")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(4000));
+
+    expect(screen.getByText("0 : 00")).toBeInTheDocument();
+    expect(screen.queryByText(/^expired$/i)).not.toBeInTheDocument();
+  });
+
+  // An order that ended before the page opened has no deadline left to count.
+  // The clock still shows, because a banner that vanishes reads as a broken
+  // page rather than as a closed window.
+  it("shows a zeroed clock when there is no deadline left", () => {
+    const onExpired = vi.fn();
+
+    render(
+      <ExpiryCountdown
+        variant="digits"
+        expiresAt={null}
+        serverTime="2026-08-01T10:00:00Z"
+        onExpired={onExpired}
+      />,
+    );
+
+    expect(screen.getByText("0 : 00")).toBeInTheDocument();
+    // Nothing expired while the guest watched, so nothing is reported.
+    expect(onExpired).not.toHaveBeenCalled();
+  });
 });

@@ -174,6 +174,36 @@ func (r *Repository) TicketTypeNamesByIDs(ctx context.Context, ids []uuid.UUID) 
 	return names, nil
 }
 
+// TicketTypeQuotaRecord is one ticket type's name beside how many seats it has
+// left. `Remaining` is the live counter, not the original allocation.
+type TicketTypeQuotaRecord struct {
+	Name      string
+	Remaining int32
+}
+
+// TicketTypeQuotasByIDs reports what each of the given ticket types has left.
+//
+// The payment domain uses it for two things a redelivered notification needs:
+// sizing the shortfall when a settle cannot be honoured (FR-019c), and showing
+// an operator what an order holds against what remains before they ask for a
+// resend (FR-022e). Neither figure is the ticket-type editor's sold count, which
+// counts released orders and therefore overstates what has actually been sold.
+func (r *Repository) TicketTypeQuotasByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeQuotaRecord, error) {
+	quotas := make(map[uuid.UUID]TicketTypeQuotaRecord, len(ids))
+	if len(ids) == 0 {
+		return quotas, nil
+	}
+
+	rows, err := r.queries.ListTicketTypeQuotasByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list ticket type quotas: %w", err)
+	}
+	for _, row := range rows {
+		quotas[row.ID] = TicketTypeQuotaRecord{Name: row.Name, Remaining: row.Quota}
+	}
+	return quotas, nil
+}
+
 // TicketTypeDisplayRecord labels one ticket type with the event it belongs to.
 type TicketTypeDisplayRecord struct {
 	TicketTypeName string

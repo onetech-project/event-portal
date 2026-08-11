@@ -25,7 +25,7 @@ export function orderCheckoutPath(eventSlug: string, orderNumber: string): strin
   return `${eventBase(eventSlug, orderNumber)}/checkout`;
 }
 
-/** The confirmation — the Done stage. */
+/** The confirmation — the Success stage. */
 export function orderDonePath(eventSlug: string, orderNumber: string): string {
-  return `${eventBase(eventSlug, orderNumber)}/done`;
+  return `${eventBase(eventSlug, orderNumber)}/success`;
 }

@@ -20,9 +20,10 @@ import type {
   PackageAdminView,
   PackageSummary,
   CheckoutQRResponse,
-  PaymentRefreshResponse,
   PublicResendResponse,
   PublicTicket,
+  PaymentNotification,
+  PaymentOrderHold,
   ResendResponse,
   TicketOrderDetail,
   TicketTypeAdminView,
@@ -52,6 +53,10 @@ export const queryKeys = {
     ["admin", "orders", status ?? null, eventId ?? null] as const,
   adminAttendees: (orderId?: string, eventId?: string) =>
     ["admin", "attendees", orderId ?? null, eventId ?? null] as const,
+  adminOrderNotifications: (orderId: string) =>
+    ["admin", "payment", orderId, "notifications"] as const,
+  adminOrderHolds: (orderId: string) =>
+    ["admin", "payment", orderId, "holds"] as const,
 };
 
 // --- Guest ----------------------------------------------------------------
@@ -160,26 +165,17 @@ export function isFinalOrderStatus(status: string | undefined): boolean {
   return status !== undefined && FINAL_ORDER_STATUSES.has(status);
 }
 
-/** How often an unpaid order is re-read while its page is open. */
-export const ORDER_POLL_INTERVAL_MS = 3_000;
-
-/**
- * When the QR is re-issued, measured back from the payment deadline: with the
- * server's PAYMENT_WINDOW (14m) and QR_REFRESH_AFTER (7m) defaults, the refresh
- * lands 7 minutes before expiry. A checkout response carries the authoritative
- * `qr_refresh_after_seconds`; this constant covers page revisits, where only
- * `expires_at` is known.
- */
-export const QR_REFRESH_BEFORE_EXPIRY_MS = 7 * 60_000;
-
 /**
  * The guest's own order page.
  *
- * While the order is awaiting payment this polls every few seconds, which is
- * how the page flips itself to "paid" seconds after the provider's webhook
- * lands without the guest touching anything. Once the status is final the
- * interval is switched off: a settled page must place no further load on the
- * API.
+ * There is NO fixed refetch interval any more (FR-021d). The endpoint itself
+ * stays — it serves the initial render, the refetch a stream frame triggers, and
+ * the degraded-mode reads `useCheckoutStatus` drives while the stream is known
+ * to be failing. What is gone is the every-3-seconds read that ran underneath a
+ * perfectly healthy stream and did nothing but cost requests.
+ *
+ * The fallback did not disappear with it: it moved to where it can be turned
+ * off, which is the whole point. See `lib/checkout-status.ts`.
  */
 export function useOrderDetail(orderNumber: string) {
   return useQuery({
@@ -189,37 +185,13 @@ export function useOrderDetail(orderNumber: string) {
     enabled: orderNumber !== "",
     // Live payment status: never serve it from a cache.
     staleTime: 0,
+    // Cheap, event-driven, and not repeating: a guest returning from their
+    // banking app gets a fresh read on focus without anything polling meanwhile.
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
-    refetchInterval: (query) =>
-      isFinalOrderStatus(query.state.data?.status) ? false : ORDER_POLL_INTERVAL_MS,
-    // Keep polling while the tab is backgrounded, so a guest who switched to
-    // their banking app to pay comes back to an already-updated page.
-    refetchIntervalInBackground: true,
     // An unknown order number stays unknown; retrying just repeats the 404.
     retry: (failureCount, error) =>
       !(error instanceof ApiError && error.status === 404) && failureCount < 3,
-  });
-}
-
-/**
- * Asks the server to reconcile an order against the payment provider.
- *
- * This is the "check payment status" button. It exists because the webhook can
- * be delayed, lost, or — in local development — undeliverable, and a button
- * that only re-read our own database would be useless in exactly those cases.
- */
-export function useRefreshPaymentStatus(orderNumber: string) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: () =>
-      apiFetch<PaymentRefreshResponse>(
-        `/ticket/order/${encodeURIComponent(orderNumber)}/payment/refresh`,
-        { method: "POST" },
-      ),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.order(orderNumber) }),
   });
 }
 
@@ -254,30 +226,15 @@ export function useStartCheckout(orderNumber: string) {
   });
 }
 
-/**
- * Re-issues the QR at the 7-minute mark (POST /ticket/checkout/:order_id/refresh-qr).
- * On failure the old QR stays on screen — the server kept it live too.
- */
-export function useRefreshQR(orderNumber: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () =>
-      apiFetch<CheckoutQRResponse>(
-        `/ticket/checkout/${encodeURIComponent(orderNumber)}/refresh-qr`,
-        { method: "POST" },
-      ),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.order(orderNumber) }),
-    retry: false,
-  });
-}
-
 export function useGuestResendTicketEmail(orderNumber: string) {
   return useMutation({
     mutationFn: () =>
       apiFetch<PublicResendResponse>(`/ticket/resend-email`, {
         method: "POST",
-        body: JSON.stringify({ order_id: orderNumber }),
+        // Pass the object, not a string: apiFetch serializes what it is given.
+        // Pre-stringifying sends a JSON *string* as the whole body, which the
+        // server cannot bind — it answered "accepted" and sent nothing.
+        body: { order_id: orderNumber },
       }),
     retry: false,
   });
@@ -606,5 +563,52 @@ export function useDeleteFee() {
         method: "DELETE",
       }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminFees }),
+  });
+}
+
+// --- Admin: one order's payment story (spec 012 US6) -----------------------
+//
+// Both of these are reads, and that is the design rather than an omission. When
+// a guest's notification is lost the order expires and its seats go back on
+// sale; the recovery is for ops to top the quota up and ask the gateway to
+// resend that transaction's notification, which settles the order through the
+// ordinary path. Nothing in this app records that a payment happened — the
+// gateway stays the single source of payment truth.
+
+/**
+ * Every notification recorded against one order — accepted and refused, newest
+ * first — so it can be matched against the gateway's own dashboard before a
+ * resend is requested.
+ */
+export function useOrderNotifications(orderId: string) {
+  return useQuery({
+    queryKey: queryKeys.adminOrderNotifications(orderId),
+    queryFn: () =>
+      adminFetch<PaymentNotification[]>(
+        `/admin/payment/order/${encodeURIComponent(orderId)}/notifications`,
+      ),
+    enabled: orderId !== "",
+    // Live operational state: never served from a cache.
+    staleTime: 0,
+  });
+}
+
+/**
+ * What the order holds per ticket type against what remains.
+ *
+ * This is the figure that sizes a quota top-up, and it is not available
+ * anywhere else: the sold count on the ticket-type editor counts released
+ * orders too, so it overstates what has actually been sold and would lead an
+ * operator to add too few seats.
+ */
+export function useOrderHolds(orderId: string) {
+  return useQuery({
+    queryKey: queryKeys.adminOrderHolds(orderId),
+    queryFn: () =>
+      adminFetch<PaymentOrderHold[]>(
+        `/admin/payment/order/${encodeURIComponent(orderId)}/holds`,
+      ),
+    enabled: orderId !== "",
+    staleTime: 0,
   });
 }

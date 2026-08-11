@@ -36,6 +36,17 @@ SELECT id, name FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 -- name: ListEventIDsByTicketTypeIDs :many
 SELECT DISTINCT event_id FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 
+-- name: ListTicketTypeQuotasByIDs :many
+-- Remaining quota per ticket type. `quota` is the REMAINING counter (constitution,
+-- Critical Data Flow Rules), not the original allocation.
+--
+-- The payment domain reads this to size the shortfall when a redelivered
+-- notification cannot settle an expired order (FR-019c), and to show an operator
+-- what an order holds against what is left before they request a resend
+-- (FR-022e). It is deliberately NOT the sold-count shown on the ticket-type
+-- editor, which counts released orders and so overstates what has been sold.
+SELECT id, name, quota FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
+
 -- Both tables belong to this domain, so the JOIN stays inside the boundary the
 -- order domain is not allowed to cross itself.
 -- name: ListTicketTypeDisplaysByIDs :many

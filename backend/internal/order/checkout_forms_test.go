@@ -71,7 +71,11 @@ func TestCheckoutOrderSavesFormsAndStartsPayment(t *testing.T) {
 	assert.Equal(t, orderNumber, resp.OrderID)
 	assert.Equal(t, f.gateway.qrString, resp.QRString)
 	assert.Equal(t, "/api/v1/ticket/order/"+orderNumber+"/qris.png", resp.QRImageURL)
-	assert.Equal(t, 7*60, resp.QRRefreshAfterSeconds, "default QR_REFRESH_AFTER is 7m")
+	// FR-009: the deadline is the gateway's own, not a window this system chose.
+	// A response echoing PAYMENT_WINDOW instead would be the exact silent failure
+	// the gateway-owned expiry exists to remove.
+	assert.Equal(t, f.gateway.expiresAt, resp.ExpiresAt,
+		"the countdown must come from the gateway, not from PAYMENT_WINDOW")
 
 	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
 	require.NoError(t, err)

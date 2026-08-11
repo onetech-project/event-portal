@@ -5,15 +5,11 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
 )
-
-// minPaymentExpiry is the floor the payment provider itself documents: below 15
-// minutes its expiry scheduler stops expiring transactions reliably, which would
-// leave a code payable after the countdown we showed the guest hit zero.
-const minPaymentExpiry = 15 * time.Minute
 
 // Config holds every setting the API needs. Values are read once at startup so a
 // misconfigured deployment fails fast rather than at first request.
@@ -27,19 +23,22 @@ type Config struct {
 	JWTSecret string
 	JWTTTL    time.Duration
 
-	MidtransServerKey    string
-	MidtransClientKey    string
-	MidtransIsProduction bool
-	// MidtransBaseURL overrides the Core API endpoint. Left empty it is derived
-	// from MidtransIsProduction; setting it lets local and CI runs point at a stub
-	// gateway so the full purchase flow can be exercised without the network.
-	MidtransBaseURL string
+	// PGBaseURL is the payment gateway's address. Required, with no compiled-in
+	// default and no environment selector (FR-026, FR-026a): the deployment says
+	// where the gateway is, and nothing here invents one. Pointing it at a stub is
+	// how the full purchase flow is exercised offline (FR-008a).
+	PGBaseURL string
+	// PGServerKey and PGClientKey travel in the session-open body as
+	// ac.cr.{client_secret,client_id}. The gateway checks they are present, not
+	// what they are, so they grant no privilege — but they must never reach a log,
+	// an error message, or a guest-facing response (FR-029).
+	PGServerKey string
+	PGClientKey string
+	// PGCallbackToken is the bearer token the gateway presents on the inbound
+	// notification endpoint. This side issues it; a mismatch is the only case
+	// where the callback answers non-200 (FR-012).
+	PGCallbackToken string
 
-	// PaymentExpiry is how long a QRIS code stays payable. The provider's own
-	// expiry scheduler is only reliable at 15 minutes or more, so anything shorter
-	// is rejected outright rather than silently producing codes that outlive the
-	// deadline we show the guest.
-	PaymentExpiry time.Duration
 	// PaymentSweepInterval is how often abandoned orders past their deadline are
 	// expired and their quota returned. It bounds how stale quota can get when no
 	// provider notification arrives.
@@ -49,16 +48,12 @@ type Config struct {
 	// must start payment. Booking writes payment_expires_at = now()+BookingHold;
 	// the same sweeper that expires unpaid payment windows reclaims lapsed holds.
 	BookingHold time.Duration
-	// PaymentWindow is the server-owned payment deadline stamped when the guest
-	// continues to payment. It is deliberately shorter than PaymentExpiry (the
-	// gateway-side QR validity): the sweeper expires the order first, and a
-	// payment landing in the gap goes through the webhook-after-expiry
-	// reconciliation path instead of silently succeeding.
+	// PaymentWindow is no longer the payment deadline — the gateway returns that
+	// and it is adopted verbatim (FR-009). Two uses survive: the fallback deadline
+	// when no usable expiry came back (which also raises a signal, FR-009b), and
+	// the expectation an adopted expiry is measured against so a materially
+	// different one is noticed rather than silently accepted (FR-009d).
 	PaymentWindow time.Duration
-	// QRRefreshAfter is when the client swaps in a fresh QR during the payment
-	// window. Purely a frontend timer — served to the client in the checkout
-	// response; no background job runs on it.
-	QRRefreshAfter time.Duration
 
 	SMTPHost     string
 	SMTPPort     int
@@ -192,17 +187,15 @@ func Load() (*Config, error) {
 		JWTSecret: l.required("JWT_SECRET"),
 		JWTTTL:    l.duration("JWT_TTL", 12*time.Hour),
 
-		MidtransServerKey:    l.str("MIDTRANS_SERVER_KEY", ""),
-		MidtransClientKey:    l.str("MIDTRANS_CLIENT_KEY", ""),
-		MidtransIsProduction: l.boolean("MIDTRANS_IS_PRODUCTION", false),
-		MidtransBaseURL:      l.str("MIDTRANS_BASE_URL", ""),
+		PGBaseURL:       l.required("PG_BASE_URL"),
+		PGServerKey:     l.str("PG_SERVER_KEY", ""),
+		PGClientKey:     l.str("PG_CLIENT_KEY", ""),
+		PGCallbackToken: l.required("PG_CALLBACK_TOKEN"),
 
-		PaymentExpiry:        l.duration("PAYMENT_EXPIRY", 15*time.Minute),
 		PaymentSweepInterval: l.duration("PAYMENT_SWEEP_INTERVAL", 30*time.Second),
 
-		BookingHold:    l.duration("BOOKING_HOLD", time.Hour),
-		PaymentWindow:  l.duration("PAYMENT_WINDOW", 14*time.Minute),
-		QRRefreshAfter: l.duration("QR_REFRESH_AFTER", 7*time.Minute),
+		BookingHold:   l.duration("BOOKING_HOLD", time.Hour),
+		PaymentWindow: l.duration("PAYMENT_WINDOW", 15*time.Minute),
 
 		SMTPHost:     l.str("SMTP_HOST", "localhost"),
 		SMTPPort:     l.integer("SMTP_PORT", 1025),
@@ -231,11 +224,13 @@ func Load() (*Config, error) {
 	// Checked after loading rather than inside the duration helper: a bad value
 	// must be reported alongside every other configuration problem, not instead of
 	// them.
-	if cfg.PaymentExpiry < minPaymentExpiry {
-		l.errs = append(l.errs, fmt.Errorf(
-			"PAYMENT_EXPIRY must be at least %s (the payment provider's expiry scheduler is unreliable below that), got %s",
-			minPaymentExpiry, cfg.PaymentExpiry))
-	}
+	//
+	// The QR_REFRESH_AFTER < PAYMENT_WINDOW < PAYMENT_EXPIRY interdependency that
+	// used to live here is deliberately DELETED rather than loosened (FR-030).
+	// None of the three still means what it did: the first is no longer sent, the
+	// second is no longer ours to decide, and the third has nothing to drive. A
+	// check comparing values that have lost their old meaning is worse than no
+	// check, because it still looks like it is protecting something.
 	if cfg.PaymentSweepInterval <= 0 {
 		l.errs = append(l.errs, fmt.Errorf(
 			"PAYMENT_SWEEP_INTERVAL must be positive, got %s", cfg.PaymentSweepInterval))
@@ -251,19 +246,18 @@ func Load() (*Config, error) {
 		l.errs = append(l.errs, fmt.Errorf(
 			"CACHE_TTL must be positive, got %s", cfg.CacheTTL))
 	}
-	// The server deadline must sit strictly inside the gateway-side QR validity,
-	// otherwise a QR could outlive the order it belongs to (research R2).
-	if cfg.PaymentWindow <= 0 || cfg.PaymentWindow >= cfg.PaymentExpiry {
+	if cfg.PaymentWindow <= 0 {
 		l.errs = append(l.errs, fmt.Errorf(
-			"PAYMENT_WINDOW must be positive and shorter than PAYMENT_EXPIRY (%s), got %s",
-			cfg.PaymentExpiry, cfg.PaymentWindow))
+			"PAYMENT_WINDOW must be positive, got %s", cfg.PaymentWindow))
 	}
-	// The refresh must land while the window is still open, or the client would
-	// swap in a QR for an order the sweeper is about to expire.
-	if cfg.QRRefreshAfter <= 0 || cfg.QRRefreshAfter >= cfg.PaymentWindow {
-		l.errs = append(l.errs, fmt.Errorf(
-			"QR_REFRESH_AFTER must be positive and shorter than PAYMENT_WINDOW (%s), got %s",
-			cfg.PaymentWindow, cfg.QRRefreshAfter))
+	// A present-but-unusable address must stop the deployment too (FR-027).
+	// Configuration is read only at startup, so there is no last-known-good to
+	// fall back to at request time — the alternative to refusing here is failing
+	// on the first guest's checkout.
+	if cfg.PGBaseURL != "" {
+		if err := validateBaseURL(cfg.PGBaseURL); err != nil {
+			l.errs = append(l.errs, fmt.Errorf("PG_BASE_URL %w", err))
+		}
 	}
 
 	if len(l.errs) > 0 {
@@ -274,4 +268,24 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s", msg)
 	}
 	return cfg, nil
+}
+
+// validateBaseURL reports why an address cannot be used as a gateway endpoint.
+//
+// url.Parse alone is far too permissive to be a check — it accepts "not a url"
+// happily as a relative path — so the scheme and host are asserted explicitly.
+// The message names the problem rather than just the variable, because the
+// operator reading it at boot cannot see the value from the log line alone.
+func validateBaseURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("is not a usable address: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("must be an http:// or https:// address, got %q", raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("has no host, got %q", raw)
+	}
+	return nil
 }

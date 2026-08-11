@@ -168,6 +168,14 @@ func (s *Service) TicketTypeNames(ctx context.Context, ids []uuid.UUID) (map[uui
 	return s.repo.TicketTypeNamesByIDs(ctx, ids)
 }
 
+// TicketTypeQuotas reports how many seats each of the given ticket types has
+// left. Read-only, and outside any transaction: it informs an operator, it does
+// not guard a deduction — CheckAndDeductQuota is what makes overselling
+// impossible, and it does so under a row lock this cannot and must not hold.
+func (s *Service) TicketTypeQuotas(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]TicketTypeQuotaRecord, error) {
+	return s.repo.TicketTypeQuotasByIDs(ctx, ids)
+}
+
 // TicketTypeDisplays resolves ticket type ids to their display labels and owning
 // event, so the guest-facing order page can name what was bought and which event
 // it belongs to without reading this domain's tables directly.

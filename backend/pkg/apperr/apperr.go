@@ -19,12 +19,40 @@ const (
 	CodeTicketTypeNotFound      = "TICKET_TYPE_NOT_FOUND"
 	CodeEventNotFound           = "EVENT_NOT_FOUND"
 	CodePaymentInitiationFailed = "PAYMENT_INITIATION_FAILED"
-	// CodePaymentStatusUnavailable reports that the payment provider could not be
-	// reached for a status check. The order is untouched; the caller may retry.
-	CodePaymentStatusUnavailable = "PAYMENT_STATUS_UNAVAILABLE"
+	// CodePaymentSessionDuplicate reports that the gateway had already issued a
+	// code for this order's reference and will not issue another.
+	//
+	// It is separate from CodePaymentInitiationFailed because the guest's
+	// instruction differs: a generic failure is worth retrying, this one never is.
+	// No call returns an existing code, so the order can never be paid — its seats
+	// are released and the guest must start again (FR-007d, FR-007e).
+	CodePaymentSessionDuplicate = "PAYMENT_SESSION_DUPLICATE"
 	CodeTicketNotFound          = "TICKET_NOT_FOUND"
 	CodeRateLimited             = "RATE_LIMITED"
-	CodeInvalidSignature        = "INVALID_SIGNATURE"
+	// CodeInvalidSignature reports a notification this system could not
+	// authenticate. Under the Manjo contract that means a missing or wrong bearer
+	// token; the code keeps its name because clients branch on it.
+	CodeInvalidSignature = "INVALID_SIGNATURE"
+
+	// CodeTicketsUnavailable reports a redelivered notification that could not
+	// settle its order because the ticket type no longer covers the order's hold.
+	//
+	// It is the only code in this registry whose HTTP status is a success. FR-019c
+	// requires it: a non-200 would spend the gateway's three retries on an attempt
+	// guaranteed to fail identically, and the notification would be lost at the end
+	// of it. The status line therefore cannot carry the refusal, so the envelope's
+	// numeric sub-code does (FR-019e) — see Numeric.
+	CodeTicketsUnavailable = "TICKETS_UNAVAILABLE"
+
+	// The rest of the 200 band: notifications this system recorded but
+	// deliberately did not act on, each answered 200 because a retry cannot change
+	// any of them (FR-012c). They carry a code rather than a bare success so the
+	// caller learns what the operator already learns from the signal (FR-012g).
+	CodeNotificationOrderUnknown   = "NOTIFICATION_ORDER_UNKNOWN"
+	CodeNotificationNotDeposit     = "NOTIFICATION_NOT_DEPOSIT"
+	CodeNotificationStatusUnknown  = "NOTIFICATION_STATUS_UNKNOWN"
+	CodeNotificationContradiction  = "NOTIFICATION_CONTRADICTS_PAID"
+	CodeNotificationOrderCancelled = "NOTIFICATION_ORDER_CANCELLED"
 
 	// Admin management (specs/002).
 	CodeInvalidCredentials  = "INVALID_CREDENTIALS"
@@ -101,8 +129,30 @@ func Numeric(status int, code string) int {
 		return 429001
 	case CodeInternal:
 		return 500000
-	case CodePaymentInitiationFailed, CodePaymentStatusUnavailable:
+	case CodePaymentInitiationFailed:
 		return 502001
+	// A duplicate reference is a conflict, not a gateway fault: the gateway
+	// answered correctly and the answer is final.
+	case CodePaymentSessionDuplicate:
+		return 409006
+	// The 200 band: outcomes that must not be retried and so cannot use a failing
+	// status line. Registering each is load-bearing rather than tidy — the default
+	// below is status*1000, so an unregistered code on a 200 renders 200000,
+	// byte-identical to httpx.SuccessCode. It would then announce itself as a
+	// success, and no test asserting on the status line would catch it, because
+	// 200 is correct in every one of these cases by design (FR-019e, FR-012g).
+	case CodeTicketsUnavailable:
+		return 200001
+	case CodeNotificationOrderUnknown:
+		return 200002
+	case CodeNotificationNotDeposit:
+		return 200003
+	case CodeNotificationStatusUnknown:
+		return 200004
+	case CodeNotificationContradiction:
+		return 200005
+	case CodeNotificationOrderCancelled:
+		return 200006
 	default:
 		return status * 1000
 	}
