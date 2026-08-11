@@ -53,6 +53,13 @@ export const config = {
   /** Whether this run expects the Redis cache to be on. */
   cacheEnabled: env("E2E_CACHE_ENABLED", "true") === "true",
 
+  /**
+   * Milliseconds to pause before every browser operation, so a headed run is
+   * watchable at human speed. 0 (the default) is full speed; the timeouts in
+   * playwright.config.ts scale with this so a slow run does not time out.
+   */
+  slowMo: Math.max(0, Number(env("E2E_SLOW_MO", "0")) || 0),
+
   /** Set when the suite starts the servers itself (the default). */
   manageServers: env("E2E_MANAGE_SERVERS", "true") === "true",
 } as const;

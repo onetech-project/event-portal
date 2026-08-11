@@ -7,6 +7,7 @@
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
+    "test:slow": "E2E_SLOW_MO=500 playwright test --headed",
     "test:ui": "playwright test --ui",
     "test:debug": "PWDEBUG=1 playwright test",
     "report": "playwright show-report",

@@ -46,12 +46,27 @@ because the suite runs `next dev` from that directory.
 cd e2e
 npm test                 # headless, all specs
 npm run test:headed      # watch it drive the browser
+npm run test:slow        # headed, slowed to human speed (E2E_SLOW_MO=500)
 npm run test:ui          # Playwright's interactive runner
 npm run report           # open the HTML report from the last run
 
 npx playwright test --grep "Guest purchase"        # one describe block
 npx playwright test specs/cache-refresh.spec.ts    # one file
 ```
+
+### Watching the flow
+
+`E2E_SLOW_MO` pauses that many milliseconds before every browser operation, so
+the run is followable by eye. Pick your own pace:
+
+```bash
+E2E_SLOW_MO=250 npx playwright test --headed --grep "Guest purchase"
+```
+
+The per-test, expect, action and navigation timeouts all scale with it, and so
+does the API's `BOOKING_HOLD` — otherwise a checkout you are watching would run
+past its 30-second seat hold and fail for reasons unrelated to the code. Leave
+it unset (or 0) for normal and CI runs; nothing changes at full speed.
 
 The runner starts three processes itself and shuts them down afterwards:
 

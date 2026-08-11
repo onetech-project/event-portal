@@ -17,6 +17,16 @@ import { config as env } from "./support/env";
 const backendDir = "../backend";
 const frontendDir = "../frontend";
 
+/**
+ * E2E_SLOW_MO pauses before every browser operation so a headed run can be
+ * watched. Each pause is spent inside the test, so the timeouts have to grow
+ * with it — at the 500ms default of `npm run test:slow` a spec does a few
+ * hundred operations, which is minutes, not seconds.
+ */
+const slowMo = env.slowMo;
+const slowFactor = slowMo > 0 ? 1 + slowMo / 125 : 1;
+const scaled = (ms: number) => Math.round(ms * slowFactor);
+
 export default defineConfig({
   testDir: "./specs",
   outputDir: "./test-results",
@@ -31,8 +41,8 @@ export default defineConfig({
 
   // Generous: a cold `next dev` compiles routes on first visit, and the
   // post-payment chain (tickets, PDF, SMTP) is asynchronous by design.
-  timeout: 90_000,
-  expect: { timeout: 15_000 },
+  timeout: scaled(90_000),
+  expect: { timeout: scaled(15_000) },
 
   reporter: process.env.CI
     ? [["github"], ["html", { open: "never" }], ["list"]]
@@ -43,8 +53,9 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
-    actionTimeout: 15_000,
-    navigationTimeout: 30_000,
+    actionTimeout: scaled(15_000),
+    navigationTimeout: scaled(30_000),
+    launchOptions: { slowMo },
   },
 
   projects: [
@@ -95,7 +106,10 @@ export default defineConfig({
             // still above PAYMENT_EXPIRY's documented 15-minute floor.
             PAYMENT_EXPIRY: "15m",
             PAYMENT_WINDOW: "14m",
-            BOOKING_HOLD: "30s",
+            // Grows with E2E_SLOW_MO: a watched checkout takes far longer than
+            // 30s to click through, and an expired hold would fail the run for
+            // a reason that has nothing to do with the code under test.
+            BOOKING_HOLD: `${Math.round(scaled(30_000) / 1000)}s`,
             PAYMENT_SWEEP_INTERVAL: "3s",
 
             REDIS_URL: env.cacheEnabled ? env.redisURL : "",
