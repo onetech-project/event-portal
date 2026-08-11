@@ -33,10 +33,14 @@ redelivered notification settles the order through the ordinary path.
 
 T090–T125 below are the delta. The completed baseline is recorded at the bottom.
 
+A second increment, **T126–T144**, was added on 2026-08-11 after a defect in the confirmation screen's
+ticket-email resend. It is self-contained at the end of this file, with its own dependencies, parallel
+opportunities, and strategy.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can run in parallel (different files, no dependency on incomplete work)
-- **[Story]**: US1–US6, mapping to the user stories in [spec.md](./spec.md)
+- **[Story]**: US1–US6, mapping to the user stories in [spec.md](./spec.md). Increment 2 uses `[RESEND]` instead — that work has no user story of its own, and borrowing a number that does not describe it would be worse than saying so.
 
 ## Path Conventions
 
@@ -349,3 +353,213 @@ mid-window contradicts FR-010's one-order-one-code.
 - **Two frontend tests fail, and predate this work.** `components/booking/selection-summary.test.tsx`
   fails identically on a stashed clean tree; both are about booking totals and touch nothing this
   feature changed.
+
+---
+
+# Increment 2 (2026-08-11): the resend cooldown a guest can see
+
+**Trigger**: an observed defect, not a planned gap. The confirmation screen's *Resend email* sent
+nothing on the first press and left no log; the second press was refused as rate-limited; the button
+then stayed dead until reload. Clarification session 2026-08-11 turned that into FR-021j–q, SC-022–024,
+and six edge cases.
+
+**Story label**: these tasks carry `[RESEND]` rather than `[US*]`. The increment has no user story of
+its own — flagged during clarification, left open by the plan — because the endpoint belongs to spec
+008 (FR-022) while the screen that carries it is built here. The label keeps the grouping honest rather
+than borrowing a story number that does not describe this work.
+
+**Baseline**: T090–T125 complete. This increment is T126–T144.
+
+**Read first**: [research.md](./research.md) R13–R15, [contracts/api.md](./contracts/api.md)
+"`POST /api/v1/ticket/resend-email`", [data-model.md](./data-model.md) "Domain types (Go) — resend
+cooldown", [quickstart.md](./quickstart.md) Scenario 8.
+
+---
+
+## Phase 16: Foundational — make the request reach the handler at all
+
+**Purpose**: One line has been silently defeating this endpoint. Everything else in this increment is
+about the *next* such bug being a five-minute diagnosis, so it must not be built on top of a call that
+never arrives.
+
+**⚠️ CRITICAL**: T126 must land before any of the cooldown work, and it is shippable on its own.
+
+- [X] T126 [RESEND] Fix the double-encoded request body in `frontend/lib/queries.ts` (line ~234): `useGuestResendTicketEmail` passes `body: JSON.stringify({ order_id: orderNumber })` while `apiFetch` stringifies whatever it receives (`frontend/lib/api-client.ts` line ~82), so the wire carries a JSON *string* and `c.Bind` fails server-side. Pass the object — `body: { order_id: orderNumber }`. This one change restores resend by itself; verify by pressing the button once and finding a `ticket email delivered` line in the server log
+- [X] T127 [P] [RESEND] Pin the wire shape in `frontend/lib/api-client.test.ts`: assert that a `body` given as an object reaches `fetch` as JSON that parses back to that object, and that no caller pre-stringifies. `apiFetch`'s `body?: unknown` signature makes this mistake invisible at the call site, which is exactly why it survived — the guard belongs where the contract is, not at each caller
+- [X] T128 [RESEND] Add `backend/pkg/httpx/cooldown.go`: a keyed token bucket over `golang.org/x/time/rate` exposing `NewCooldown(requestsPerSecond float64, burst int, expiresIn time.Duration) *Cooldown` and `Take(key string) (allowed bool, retryAfter time.Duration)`. Derive `retryAfter` from `rate.Limiter.TokensAt(now)` as `(1 - tokens) / limit` — a pure read, no `Reserve`/`Cancel` dance (research R13). Called after a successful take it yields the full window just started, which is what the accepted response must carry (FR-021j). Evict idle keys after `expiresIn`, and guard the map for concurrent callers the way the existing limiter store does
+- [X] T129 [P] [RESEND] Test `backend/pkg/httpx/cooldown_test.go`: seconds present and correct on **both** answers; the refused value strictly decreasing across successive attempts (a constant equal to the window means the remainder is being reported as the window); distinct keys never interfering; and the eviction invariant — `expiresIn` strictly greater than the window, so no key is forgiven mid-cooldown
+
+**Checkpoint**: Resend works again for a guest, and a cooldown that can report itself exists but is not yet wired.
+
+---
+
+## Phase 17: The endpoint's contract
+
+**Goal**: Every answer states the wait, a body the server cannot key costs nobody anything, and every
+attempt leaves a trace.
+
+**Independent Test**: Press resend twice in quick succession — the first `202` carries
+`retry_after_seconds: 60`, the second `429` carries a smaller, falling number. Send a malformed body
+for order A and confirm a resend for order B is still accepted in the same window. Confirm all four
+accepted outcomes return byte-identical bodies while producing four distinct log lines.
+
+- [X] T130 [P] [RESEND] Add a `RetryAfterSeconds int` field, tagged `json:"retry_after_seconds"`, to `PublicResendResponse` in `backend/internal/notification/dto.go`. Leave `PublicResendMessage` a constant and say why in the doc comment: the non-disclosure property depends on every accepted outcome returning the same sentence, and the new field is safe beside it precisely because it is a property of the cooldown, which every attempt spends alike (FR-021m), not of what the attempt found
+- [X] T131 [RESEND] Rewrite `resendPublic` in `backend/internal/notification/handler.go` (lines ~50–79) as five ordered steps, and keep the order — it *is* the requirement: (1) bind; on error or empty `order_id` return `apperr.BadRequest(apperr.CodeValidation, …)` **without touching the cooldown** (FR-021k); (2) `cooldown.Take(orderNumber)`; when refused return `apperr.New(http.StatusTooManyRequests, apperr.CodeRateLimited, …).WithData(retryAfter)` (FR-021j); (3) look the order up; (4) send; (5) return the one accepted body carrying the seconds. Steps 3–5 all answer identically (FR-021l). Delete the comment claiming "a parse error is as silent as an unknown order" — that is the behaviour being removed
+- [X] T132 [RESEND] Log every branch in `backend/internal/notification/handler.go` with its real outcome and the order number — `delivered`, `order unknown`, `order not payable`, `send failed`, `refused for cooldown`, `body unreadable` (FR-021n). Info level for the ordinary ones, warn for a send that failed. The wire stays silent; the logs do not. The existing single `WarnContext` covers only one of the six, which is why the observed failure looked like a press that never happened
+- [X] T133 [RESEND] Change `RegisterPublicRoutes` in `backend/internal/notification/handler.go` from `(g *echo.Group, mw ...echo.MiddlewareFunc)` to take the `*httpx.Cooldown` directly. The variadic middleware parameter existed to inject exactly this dependency; it is now the wrong shape, because the handler needs the number and the middleware cannot hand it one
+- [X] T134 [RESEND] Rewire the composition root in `backend/cmd/api/main.go` (lines ~273–279): build the cooldown from the unchanged `guestResendRate` / `guestResendBurst` / `rateLimitWindow` constants, pass it to `RegisterPublicRoutes`, and mount the route on the ordinary `api` group — the separate `guestResend` group existed only to scope the middleware and now has nothing to scope. Update the constants' comment: it explains a per-order bucket, which is still true, but no longer explains a middleware
+- [X] T135 [RESEND] Delete `RateLimitPerBodyField` and `bodyField` from `backend/pkg/httpx/rate_limit.go` and their cases from `backend/pkg/httpx/rate_limit_test.go` (research R14). Its documented fallback — "a request whose body is missing, unparseable, or lacks the field falls into a shared bucket" — is the defect, not an implementation slip, so it is removed rather than repaired. `RateLimitPerIP` and `RateLimitBy` stay untouched; they have other callers and no equivalent flaw
+- [X] T136 [RESEND] Rewrite the guest cases in `backend/internal/notification/public_handler_test.go` around the six-outcome table in [data-model.md](./data-model.md). Two assertions carry the whole increment and must both be present: **byte-identical bodies** across all four accepted outcomes (the disclosure rule), and **a malformed request for order A leaving order B acceptable in the same window** (the shared bucket, which no existing test would have caught). Also assert the `400` spends nothing, that a `429` carries a falling `retry_after_seconds` in `data`, and that an attempt sending no mail still spends the window (FR-021m)
+
+**Checkpoint**: The server can be asked "how long?" and answers truthfully, and one caller's malformed request is one caller's problem.
+
+---
+
+## Phase 18: The countdown on the confirmation screen
+
+**Goal**: The guest sees when they can ask again, and the button comes back by itself.
+
+**Independent Test**: Press resend, watch a countdown run down and the button re-arm at zero with no
+reload. Reload mid-cooldown and confirm the button is armed, the press returns `429`, and the countdown
+resumes from the server's remaining seconds rather than restarting at 60.
+
+- [X] T137 [P] [RESEND] Add `retry_after_seconds: number` to `PublicResendResponse` in `frontend/lib/types.ts`
+- [X] T138 [RESEND] Rewrite `ResendRow` in `frontend/components/order/order-confirmation.tsx` (lines ~106–152) around a countdown seeded from the server: take the seconds from `resend.data.retry_after_seconds` on success and from `(resend.error as ApiError).data` on a 429 (`ApiError.data` already carries the envelope's detail payload — see `frontend/lib/api-client.ts` line ~152), tick it down locally, and **re-enable the button at zero** (FR-021o). Today `disabled={resend.isPending || rateLimited}` has nothing that ever clears `rateLimited`, which is why the control died permanently. Do **not** reuse `ExpiryCountdown`: it corrects device skew against an absolute instant, and a duration needs no such correction (research R13)
+- [X] T139 [RESEND] Keep the cooldown out of storage and out of cross-tab state in `frontend/components/order/order-confirmation.tsx` (FR-021p) — component state only, so a fresh load arms the button and the first press resolves the truth. A remembered deadline can outlive a server restart and hold a guest back from a resend the server would have accepted
+- [X] T140 [RESEND] Separate the two messages in `frontend/components/order/order-confirmation.tsx` (FR-021q): a cooldown refusal reads as a wait and names the remaining time; a genuine send failure reads as a failure. They have opposite remedies, and the current copy — "Just sent. Please wait a minute before asking again." — states a fixed minute the server no longer requires anyone to guess at
+- [X] T141 [P] [RESEND] Extend `frontend/app/(public)/events/[slug]/orders/[orderNumber]/success/page.test.tsx` (the resend cases begin around line ~200): a countdown appearing from the accepted response's seconds; the button re-arming at zero with fake timers; a 429's `data.retry_after_seconds` driving the countdown rather than a hardcoded 60; and nothing written to `localStorage` or `sessionStorage`
+
+**Checkpoint**: A guest whose email did not arrive can always ask again, and always knows when.
+
+---
+
+## Phase 19: Polish & Cross-Cutting Concerns
+
+- [X] T142 [P] [RESEND] Walk [quickstart.md](./quickstart.md) Scenario 8 end to end against a running stack — all nine steps, including the two `curl` calls that prove a malformed body no longer throttles a different order
+- [X] T143 [RESEND] Run the regression greps from [quickstart.md](./quickstart.md): `rg "RateLimitPerBodyField|bodyField" backend/ --glob '!vendor'` and `rg "body: JSON.stringify" frontend/ --glob '!node_modules'` must both return nothing
+- [X] T144 [RESEND] Run `go test ./...` in `backend/` and the Vitest suite plus `next build` in `frontend/`. Two frontend failures in `components/booking/selection-summary.test.tsx` predate this work and are unrelated — confirm the count has not grown rather than that it is zero
+
+---
+
+## Increment 2 — Dependencies & Execution Order
+
+### Phase Dependencies
+
+- **Phase 16**: T126 blocks everything, and blocks nothing in return — ship it first and alone. T128 is independent of T126 and can be written alongside it. T127 and T129 are separate test files.
+- **Phase 17**: needs T128. Internally sequential where files overlap: T131 → T132 → T133 (all `handler.go`) → T134 (`main.go`) → T135 (the deletion, which only compiles once T134 stops calling it). T130 is a separate file and parallel to all of it; T136 follows the handler.
+- **Phase 18**: needs Phase 17 on the wire. T137 is parallel to everything; T138 → T139 → T140 all touch `ResendRow`; T141 follows.
+- **Phase 19**: after both.
+
+### Critical Path
+
+```
+T126 → resend works again
+T128 → T131 → T132 → T133 → T134 → T135 → the server states the wait
+                                       ↓
+                              T138 → T140 → the guest can see it
+```
+
+### Parallel Opportunities
+
+- **Phase 16**: T126 (frontend) and T128 (backend) are different languages, let alone different files. T127 and T129 are their tests.
+- **Phase 17**: T130 (DTO) runs alongside the whole handler sequence. T136 can be written against the contract before the handler is finished.
+- **Phase 18**: T137 (types) is parallel to everything; T141 is a separate test file.
+- **Cross-phase**: Phase 18's T137 can land as soon as T130 fixes the shape.
+
+---
+
+## Increment 2 — Implementation Strategy
+
+### MVP scope
+
+**T126 alone.** It is one line, it restores a broken user-facing capability, and it needs none of the
+rest. Landing it separately also keeps the diagnosis honest in the history: the outage was an encoding
+bug, and the cooldown work is what makes the next one visible rather than what fixes this one.
+
+**Then T128 + Phase 17.** At that point the limit is truthful and no longer system-wide, which is the
+part that affects other guests. The countdown is still absent, but the button no longer dies —
+a refusal is just a refusal.
+
+**Then Phase 18** for the countdown the request actually started from.
+
+### What is deliberately not in this list
+
+- **Changing the window.** One send per order per minute is unchanged. The defect was never about its
+  length, and nothing observed suggests 60 seconds is wrong.
+- **Alerting on repeated accepted-but-undelivered resends.** T132 puts the outcome in the logs, so the
+  signal now exists in the data; turning it into an alert is a monitoring decision this list does not
+  make. Recorded here so it is a choice rather than an oversight.
+- **A user story for the resend flow.** Raised at clarification, left open by the plan, still open.
+  The `[RESEND]` label is the workaround, not the resolution.
+- **Touching the admin resend** (`POST /admin/orders/:id/resend-email`). It is authenticated and
+  unlimited, and nothing in this increment changes that.
+
+---
+
+## Increment 2 record (2026-08-11)
+
+All 19 tasks complete. Backend: full suite green, `go vet` clean. Frontend: 273 pass, lint clean,
+`next build` clean. Four frontend tests fail and were verified to fail identically at `HEAD` with this
+increment's five files stashed — `lib/booking-stage.test.ts` (1),
+`components/booking/selection-summary.test.tsx` (2), and the order page's dialog test (1). None are in
+files this increment touches. Net +7 passing tests.
+
+### Walked against a live server, not only against fakes
+
+The stack was already up, so Scenario 8's server-side steps ran for real against `ticketing-postgres`
+and mailpit on a spare port. Every one behaved as specified:
+
+| Step | Result |
+| --- | --- |
+| First press, real paid order | `202`, `retry_after_seconds: 60`, an email delivered, and **a log line** |
+| Immediate second press | `429`, `retry_after_seconds: 60` |
+| Third press 3 s later | `429`, `retry_after_seconds: 57` — the remainder, not the window |
+| The double-encoded body verbatim | `400 VALIDATION_ERROR`, plus four other malformed shapes |
+| Unrelated order in the same window | `202` — one caller's malformed request throttles nobody |
+| Fictional order, twice | `202` then `429` — an attempt that sends no mail still spends the window |
+| Accepted bodies compared | byte-identical between a real paid order and an unknown one |
+
+### Three things worth recording
+
+**1. The bug was one line, and the diagnosis was the expensive part.** `queries.ts` pre-stringified a
+body `apiFetch` stringifies again. The endpoint had been answering "accepted" and sending nothing
+since that call was written. What made it cost an afternoon was not the bug but that it left no
+evidence: no log line, and a success message on screen. T132 is the task that actually pays for
+itself.
+
+**2. The shared bucket was worse than it looked.** `RateLimitPerBodyField` dropped every request it
+could not key into one bucket for the whole system, so the malformed press throttled *every* order for
+a minute, not just the one being resent. That is why the symptom read as "it always says rate limited"
+rather than as a client bug. Verified gone: a malformed request now leaves an unrelated order
+acceptable in the same window, asserted in both the handler test and the live walkthrough.
+
+**3. The countdown moved out of an effect during review.** The first implementation seeded
+`secondsLeft` from a `useEffect` watching the mutation result; `react-hooks/set-state-in-effect`
+rejected it, correctly. It is now seeded from `mutate`'s own `onSuccess`/`onError`, which is what the
+countdown is — a reaction to a response, not state kept in sync with a render.
+
+### Still open, deliberately
+
+- **No alert on repeated accepted-but-undelivered resends.** Every attempt now carries its outcome in
+  the logs, so the signal exists in the data; nothing turns it into an alert.
+- **The window is unchanged** at one send per order per minute. Nothing observed suggests it is wrong.
+- **The resend flow still has no user story.** Raised at clarification, left open by the plan, carried
+  by `[RESEND]` here.
+
+### Follow-up (2026-08-11, found in manual testing)
+
+The countdown did not appear and the button fired twelve 429s in two seconds. Two causes, one of them
+mine.
+
+**The API under test was the old binary.** Its `202` body carried no `retry_after_seconds`, and a
+`{"nope":1}` body still answered `202` where the new handler answers `400`. The frontend had the new
+code, the server did not — which is why the button no longer locked up but also never counted down.
+Restarting the API resolves that half.
+
+**A missing number left the button live — a real gap, not just deploy skew.** `retryAfterSeconds`
+returned `0` when the payload had no field, `startCountdown` ignored zero, and nothing held the
+control. That is the original machine-gun loop reached by a different route, and a proxy or an error
+path could produce it against a current server too. `ResendRow` now falls back to a short floor
+(`FALLBACK_COOLDOWN_SECONDS`, 5s) whenever the server names no wait — on the acceptance as well as the
+refusal. Recorded as **FR-021j-i**, with two tests. The floor is deliberately far shorter than any
+real window: it stops a burst without inventing a deadline a guest could be stranded behind.

@@ -231,7 +231,10 @@ export function useGuestResendTicketEmail(orderNumber: string) {
     mutationFn: () =>
       apiFetch<PublicResendResponse>(`/ticket/resend-email`, {
         method: "POST",
-        body: JSON.stringify({ order_id: orderNumber }),
+        // Pass the object, not a string: apiFetch serializes what it is given.
+        // Pre-stringifying sends a JSON *string* as the whole body, which the
+        // server cannot bind — it answered "accepted" and sent nothing.
+        body: { order_id: orderNumber },
       }),
     retry: false,
   });

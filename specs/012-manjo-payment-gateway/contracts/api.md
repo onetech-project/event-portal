@@ -86,6 +86,36 @@ already correct. Two things become load-bearing rather than incidental:
   `EventSource` does not retry a non-200 — so the client must treat refusal as a failure state, not
   wait for a reconnect (FR-021i). The cap now reads 10 per address.
 
+### `POST /api/v1/ticket/resend-email` — guest ticket-email resend
+
+The endpoint is spec 008's (FR-022). What changes here is how it reports its cooldown and what it does
+with a request it cannot key.
+
+**Request** — unchanged: `{"order_id": "ORD-…"}`, carrying the order **number**. No address field is
+read, so no caller can redirect the mail.
+
+**Responses**:
+
+| Case | Status | Body |
+| --- | --- | --- |
+| Accepted — any outcome the disclosure rule covers | `202` | `{"message": "<the constant sentence>", "retry_after_seconds": 60}` |
+| Cooldown still running | `429` `RATE_LIMITED` (429001) | `data: {"retry_after_seconds": n}` |
+| Body unreadable, or `order_id` missing/empty | `400` `VALIDATION_ERROR` (400001) | error envelope, no detail |
+
+Three properties this pins down:
+
+- **The seconds are on both answers** (FR-021j). An acceptance reports the window it has just started;
+  a refusal reports what is left of the one already running. The client never computes the wait.
+- **`400` is new, and it is not a disclosure leak** (FR-021k, FR-021l). It reports that the *request*
+  was unreadable, which says nothing about any order. A well-formed but unknown order number still
+  answers `202` with the same bytes as a successful send — that is the case the silence exists for.
+- **A `400` spends nothing.** The cooldown is consulted only after the body is understood, so no
+  malformed request can cost any order its window. There is no longer a bucket shared between
+  requests the server could not key.
+
+Every attempt is logged server-side with its real outcome (FR-021n). The wire stays silent; the logs
+do not.
+
 ---
 
 ## Removed
@@ -118,3 +148,9 @@ an expired order, and the guest's instruction differs from both.
 
 `qr_refresh_after_seconds` disappears from two responses the frontend reads. That is the one place
 this feature can break a running page, so backend and frontend removal must ship together.
+
+`retry_after_seconds` is additive on the resend response, so it cannot break a running page. The
+resend request body, however, is currently sent double-encoded — `apiFetch` stringifies a value the
+caller had already stringified — which is why the endpoint has been answering `202` while sending
+nothing. That fix stands alone and does not wait for the rest: **land it first**, or the cooldown work
+ships on top of a call that never reaches the handler's send path at all.

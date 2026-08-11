@@ -399,3 +399,104 @@ undetectable by construction. R5's fallback ("verify against a real session-open
 therefore not achievable as stated; there is nothing to verify against. The mapping stays as
 implemented, and the consequence is recorded rather than papered over: if it is backwards, nothing in
 this system or in the gateway will say so.
+
+---
+
+## R13. The cooldown cannot stay an Echo rate-limiter middleware
+
+**Decision**: Replace the middleware on the guest resend route with a small keyed cooldown in
+`pkg/httpx`, consulted from the handler. Its one method answers both questions at once —
+`Take(key) (allowed bool, retryAfter time.Duration)` — and the handler puts the seconds into whichever
+response it returns.
+
+**Rationale**: two requirements make the middleware shape unworkable, and neither is satisfiable by
+configuring it differently.
+
+- FR-021j needs the remaining seconds on the **accepted** answer as well as the refused one. Echo's
+  `middleware.RateLimiterStore` exposes only `Allow(identifier) (bool, error)`. A middleware can
+  refuse a request but cannot hand the handler a number, and the accepted path never passes through
+  the limiter's own response at all.
+- FR-021k needs the body checked **before** any allowance is spent. A middleware runs first by
+  definition, so an unreadable body has already been keyed and counted before the handler sees it.
+
+Reading the remaining time is straightforward and non-mutating: `rate.Limiter.TokensAt(now)` returns
+the fractional token count, so `wait = (1 - tokens) / limit` whenever it is below one. Go 1.26's
+vendored `golang.org/x/time/rate` has it (`rate.go:86`). Called again immediately after a successful
+take, the same expression yields the full window the acceptance has just started — which is exactly
+what FR-021j asks the accepted response to carry, with no separate constant to keep in step.
+
+**Alternatives considered**:
+
+- *Keep the middleware and stash the remaining time in the Echo context.* Rejected: it addresses only
+  the first requirement. The bucket is still spent before the body is validated, which is FR-021k's
+  whole point.
+- *`Reserve()` the next token and `Cancel()` it to read the delay.* Rejected: mutate-then-undo where a
+  pure read exists, and `Cancel` restores the token only when no later reservation has intervened —
+  a correctness footnote this needs no part of.
+- *Read `Retry-After` from a header instead.* Rejected upstream, in the spec: a cross-origin page
+  cannot read a header that is not named in `Access-Control-Expose-Headers`, and the envelope already
+  carries per-error detail in `data` (`PAYMENT_ALREADY_STARTED` puts the QR payload there). The field
+  costs nothing new.
+
+**Eviction**: idle keys are dropped after the existing `rateLimitWindow` of 3 minutes. That must stay
+strictly greater than the cooldown itself — evicting a key mid-cooldown would silently forgive it. At
+3 minutes against a 60-second window there is ample margin, and the invariant belongs in a test rather
+than in a comment.
+
+**On the client side, do not reuse `ExpiryCountdown`.** It takes an absolute ISO deadline plus the
+server's clock at the moment it sent one, and corrects for device skew — the right design for the
+payment deadline, where the instant is what both sides must agree on. The cooldown returns a
+*duration*, which is skew-proof by construction: there is no shared instant to disagree about. Reusing
+the component would mean synthesising an `expiresAt`/`serverTime` pair to feed machinery that then
+cancels itself out. A plain local ticker over the returned seconds is both smaller and more accurate
+here, and the difference is a real one rather than a stylistic preference.
+
+---
+
+## R14. `RateLimitPerBodyField` is deleted, not repaired
+
+**Decision**: Remove `RateLimitPerBodyField` and its `bodyField` helper from `pkg/httpx` entirely.
+`RateLimitPerIP` and `RateLimitBy` stay; they have other callers and no equivalent flaw.
+
+**Rationale**: the guest resend was its only user, and the behaviour that made it wrong is not a bug
+inside it but its stated design — "a request whose body is missing, unparseable, or lacks the field
+falls into a shared bucket rather than bypassing the limit". One shared bucket across every caller and
+every order means a single malformed request throttles the whole system for the window. That is what
+FR-021k forbids, and with the cooldown moved into the handler (R13) there is nothing left for the
+middleware to do. `bodyField` goes with it: buffering and restoring the request body existed solely so
+the middleware could peek at it before the handler bound it.
+
+The shared bucket is also why the observed defect looked like a rate-limit problem rather than an
+encoding one. A per-order key would have made the first malformed press harmless to everyone else.
+
+**Alternatives considered**: keep the middleware for a future caller — rejected. Nothing else needs
+per-body keying, and leaving a helper whose documented fallback is a system-wide bucket invites the
+same failure the next time someone reaches for it.
+
+---
+
+## R15. The double-encoded request body
+
+**Finding**: `useGuestResendTicketEmail` passed `body: JSON.stringify({ order_id: orderNumber })` while
+`apiFetch` stringifies whatever it is given (`api-client.ts:82`). The request therefore carried a JSON
+*string* — `"{\"order_id\":\"ORD-…\"}"` — not an object.
+
+Every symptom follows from that one line:
+
+| Observed | Cause |
+| --- | --- |
+| First press sent nothing, logged nothing | `c.Bind` fails on a string body; the handler's silent branch answers 202 |
+| Second press refused | the unreadable first request was counted against the shared bucket (R14) |
+| Refusal never cleared | the screen disables the button on a 429 with nothing to re-enable it |
+
+**Decision**: pass the object. `apiFetch` owns serialisation, and this is the only site in the frontend
+that pre-stringified — verified across `lib/`, `components/`, and `app/`, one match, now zero.
+
+**Worth stating plainly**: this fix alone makes resend work again. Everything R13 and R14 describe is
+about the next such bug being visible in a log line instead of costing an afternoon, and about one
+caller's mistake staying one caller's problem. The requirements are not a workaround for this defect;
+they are what would have made it a five-minute diagnosis.
+
+**Guard**: `apiFetch`'s contract (`body?: unknown`, stringified internally) makes the mistake easy to
+repeat and impossible to see at the call site. A test asserting the wire body of the resend request
+parses to an object with `order_id` pins the behaviour where it actually broke.

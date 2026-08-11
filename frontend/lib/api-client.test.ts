@@ -61,6 +61,40 @@ describe("apiFetch", () => {
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
   });
 
+  // apiFetch owns serialization, and its `body?: unknown` signature makes a
+  // caller that pre-stringifies look identical at the call site. It is not:
+  // JSON.stringify of a string produces a quoted string, so the whole body
+  // becomes a JSON string rather than an object and no server can bind it. That
+  // is exactly how the guest ticket-email resend spent a release answering
+  // "accepted" while sending nothing.
+  it("sends an object body as a JSON object, not a JSON string", async () => {
+    const spy = mockFetch(envelope({ message: "ok" }, 202));
+
+    await apiFetch("/ticket/resend-email", {
+      method: "POST",
+      body: { order_id: "ORD-20260811-S8HD72" },
+    });
+
+    const sent: unknown = JSON.parse(spy.mock.calls[0][1].body);
+    expect(typeof sent).toBe("object");
+    expect(sent).toEqual({ order_id: "ORD-20260811-S8HD72" });
+  });
+
+  // The failure mode above, stated as its own assertion so a regression names
+  // itself rather than surfacing as a puzzling 400 somewhere else.
+  it("does not double-encode a body a caller already stringified", async () => {
+    const spy = mockFetch(envelope({ message: "ok" }, 202));
+
+    await apiFetch("/ticket/resend-email", {
+      method: "POST",
+      body: JSON.stringify({ order_id: "ORD-1" }),
+    });
+
+    // Documents the trap rather than blessing it: a pre-stringified body
+    // arrives as a string, which is why callers must pass the object.
+    expect(typeof JSON.parse(spy.mock.calls[0][1].body)).toBe("string");
+  });
+
   it("throws an ApiError carrying the numeric envelope code", async () => {
     mockFetch(
       jsonResponse(

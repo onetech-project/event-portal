@@ -46,7 +46,9 @@ const (
 	// The guest resend sends real mail without any authentication, so it is
 	// limited per order — one a minute, no burst. Keying on the order rather than
 	// the caller is the point: the inbox being protected is the buyer's, and a
-	// per-IP limit would let a few hosts flood one buyer between them.
+	// per-IP limit would let a few hosts flood one buyer between them. The window
+	// is also what the confirmation screen counts down from, so changing it
+	// changes what a guest is told, not only what they are allowed.
 	guestResendRate  = 1.0 / 60.0
 	guestResendBurst = 1
 
@@ -270,13 +272,16 @@ func run(log *logger.Logger) error {
 		httpx.RateLimitPerIP(gatewayCallRate, gatewayCallBurst, rateLimitWindow))
 	orderHandler.RegisterCheckoutRoutes(gatewayCalls)
 
-	// The guest resend on the confirmation screen. Limited per order number —
-	// carried in the body's order_id field — and mounted on its own group: on
-	// `api` the limiter would also throttle the order polling that runs every
-	// few seconds by design (spec FR-025).
-	guestResend := e.Group("/api/v1",
-		httpx.RateLimitPerBodyField("order_id", guestResendRate, guestResendBurst, rateLimitWindow))
-	notification.NewHandler(notificationSvc).RegisterPublicRoutes(guestResend)
+	// The guest resend on the confirmation screen. Limited per order number, which
+	// the handler reads from the body and hands to the cooldown itself — no
+	// middleware and so no separate group, because the limit now has to answer
+	// "how long?" as well as "may I?" (spec 012 FR-021j).
+	//
+	// rateLimitWindow doubles as the cooldown's idle-eviction period here, and it
+	// must stay longer than the window itself: evicting a key mid-cooldown would
+	// forgive it silently. Three minutes against sixty seconds.
+	notification.NewHandler(notificationSvc).RegisterPublicRoutes(api,
+		httpx.NewCooldown(guestResendRate, guestResendBurst, rateLimitWindow))
 
 	// Abandoned orders release their seats without anyone opening the page.
 	sweeper := payment.NewSweeper(paymentSvc, cfg.PaymentSweepInterval)

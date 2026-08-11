@@ -195,36 +195,57 @@ describe("confirmation — a paid order", () => {
 });
 
 describe("confirmation — resending the email", () => {
-  it("reports success once the resend goes through", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) =>
-        Promise.resolve(
-          url.includes("/resend-email")
-            ? jsonResponse({ message: "If that order exists, its ticket email has been sent again." }, 202)
-            : envelope(PAID),
-        ),
+  /** Routes the order read one way and the resend the other. */
+  function stubResend(resend: Response | (() => Response)) {
+    const spy = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve(
+        String(url).includes("/resend-email")
+          ? (typeof resend === "function" ? resend() : resend)
+          : envelope(PAID),
       ),
     );
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  }
+
+  /** An accepted resend, carrying the window it has just started (FR-021j). */
+  function accepted(retryAfterSeconds: number) {
+    return envelope({
+      message: "If that order exists, its ticket email has been sent again.",
+      retry_after_seconds: retryAfterSeconds,
+    });
+  }
+
+  /** A refusal, carrying what is left of the window already running. */
+  function refused(retryAfterSeconds: number) {
+    return jsonResponse(
+      {
+        code: 429001,
+        message: "That email was just sent. Please wait before asking again.",
+        data: { retry_after_seconds: retryAfterSeconds },
+      },
+      429,
+    );
+  }
+
+  async function pressResend() {
+    await userEvent.click(await screen.findByRole("button", { name: /resend email/i }));
+  }
+
+  it("reports success once the resend goes through", async () => {
+    stubResend(accepted(60));
 
     renderDone();
-    await userEvent.click(await screen.findByRole("button", { name: /resend email/i }));
+    await pressResend();
 
     expect(await screen.findByText(/sent again/i)).toBeInTheDocument();
   });
 
   it("sends only the order number — never an address", async () => {
-    const fetchSpy = vi.fn().mockImplementation((url: string) =>
-      Promise.resolve(
-        url.includes("/resend-email")
-          ? jsonResponse({ message: "ok" }, 202)
-          : envelope(PAID),
-      ),
-    );
-    vi.stubGlobal("fetch", fetchSpy);
+    const fetchSpy = stubResend(accepted(60));
 
     renderDone();
-    await userEvent.click(await screen.findByRole("button", { name: /resend email/i }));
+    await pressResend();
 
     await waitFor(() => {
       const call = fetchSpy.mock.calls.find((args) =>
@@ -239,24 +260,106 @@ describe("confirmation — resending the email", () => {
     });
   });
 
-  // A 429 is "too soon", not "broken" — the endpoint allows one send a minute.
-  it("shows a cooldown rather than an error when asked too often", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) =>
-        Promise.resolve(
-          url.includes("/resend-email")
-            ? jsonResponse({ error_code: "RATE_LIMITED", message: "Too many requests." }, 429)
-            : envelope(PAID),
-        ),
-      ),
-    );
+  // The defect this whole increment started from: the body was serialised twice,
+  // so the wire carried a JSON string and the server bound nothing — answering
+  // "accepted" while sending no mail at all.
+  it("sends the order number as a JSON object, not a JSON string", async () => {
+    const fetchSpy = stubResend(accepted(60));
 
     renderDone();
-    await userEvent.click(await screen.findByRole("button", { name: /resend email/i }));
+    await pressResend();
 
-    expect(await screen.findByText(/please wait a minute/i)).toBeInTheDocument();
+    await waitFor(() => {
+      const call = fetchSpy.mock.calls.find((args) =>
+        String(args[0]).includes("/resend-email"),
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ order_id: PAID.order_id });
+    });
+  });
+
+  // FR-021j: the countdown is seeded by the server on the *acceptance*, so it
+  // starts from a send rather than waiting for a refusal to reveal it.
+  it("counts down from the seconds the accepted response carries", async () => {
+    stubResend(accepted(45));
+
+    renderDone();
+    await pressResend();
+
+    expect(await screen.findByText(/ask again in 4[45]s/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /resend email/i })).toBeDisabled();
+  });
+
+  // A 429 is "too soon", not "broken" — opposite remedies, so they must not read
+  // alike (FR-021q). And the wait comes from the server's number, never from a
+  // window compiled into the page.
+  it("shows a cooldown rather than an error when asked too often", async () => {
+    stubResend(refused(37));
+
+    renderDone();
+    await pressResend();
+
+    expect(await screen.findByText(/just sent/i)).toBeInTheDocument();
+    expect(await screen.findByText(/ask again in 3[67]s/i)).toBeInTheDocument();
     expect(screen.queryByText(/could not send/i)).not.toBeInTheDocument();
+  });
+
+  // FR-021o: the button comes back on its own. Before this, a single 429
+  // disabled it for the life of the page — the guest whose email never arrived
+  // had no way left to ask.
+  it("re-arms the button by itself when the countdown ends", async () => {
+    stubResend(refused(1));
+
+    renderDone();
+    await pressResend();
+
+    const button = await screen.findByRole("button", { name: /resend email/i });
+    await waitFor(() => expect(button).toBeDisabled());
+    await waitFor(() => expect(button).toBeEnabled(), { timeout: 3000 });
+    expect(screen.queryByText(/just sent/i)).not.toBeInTheDocument();
+  });
+
+  // A server that names no wait must still not leave the button live. Without a
+  // floor, a held key turns into a burst of refusals — which is how this was
+  // caught: a frontend carrying the countdown was pointed at an API that predated
+  // it, and fired twelve 429s in two seconds.
+  it("holds the button briefly when a refusal names no wait", async () => {
+    stubResend(jsonResponse({ code: 429001, message: "Too many requests.", data: null }, 429));
+
+    renderDone();
+    await pressResend();
+
+    const button = await screen.findByRole("button", { name: /resend email/i });
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(screen.getByText(/ask again in [1-5]s/i)).toBeInTheDocument();
+  });
+
+  // The same floor applies to an acceptance that omits the field, so an older
+  // server degrades to one press every few seconds rather than to no limit.
+  it("holds the button briefly when an acceptance names no wait", async () => {
+    stubResend(envelope({ message: "If that order exists, its ticket email has been sent again." }));
+
+    renderDone();
+    await pressResend();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /resend email/i })).toBeDisabled(),
+    );
+  });
+
+  // FR-021p: the cooldown lives in the server's memory and does not survive a
+  // restart, so a deadline the browser remembered could outlast the limit it
+  // describes. A fresh load arms the button; the first press resolves the truth.
+  it("keeps the cooldown out of browser storage", async () => {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    stubResend(accepted(60));
+
+    renderDone();
+    await pressResend();
+
+    await screen.findByText(/ask again in/i);
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
   });
 });
 

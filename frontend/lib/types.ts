@@ -150,7 +150,20 @@ export type PublicOrderItem = {
  * neither the recipient nor whether the order exists, and answers the same way
  * either side of both.
  */
-export type PublicResendResponse = { message: string };
+export type PublicResendResponse = {
+  message: string;
+  /**
+   * Whole seconds before another resend for this order will be accepted. Present
+   * on the acceptance too, so the countdown starts from a send rather than from
+   * a refusal (spec 012 FR-021j). The screen never computes this locally: a
+   * guessed wait re-enables the button whenever the two clocks disagree, which
+   * turns the next press into a second refusal.
+   */
+  retry_after_seconds: number;
+};
+
+/** The 429's detail payload, carried in the envelope's data field. */
+export type ResendRetryAfter = { retry_after_seconds: number };
 
 /** One attendee slot on the 008 guest order read — details null until checkout. */
 export type TicketOrderSlot = {

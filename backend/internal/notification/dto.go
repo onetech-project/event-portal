@@ -24,11 +24,33 @@ type PublicResendRequest struct {
 // it names neither the recipient nor whether the order exists. Every outcome that
 // is not a rate-limit returns this same body, which is what stops the endpoint
 // from being used to probe which order numbers are real (spec FR-026).
+//
+// RetryAfterSeconds is safe to carry alongside that silence precisely because it
+// is identical across every accepted outcome: it describes the cooldown, which
+// every attempt spends alike (spec 012 FR-021m), not what the attempt found. It
+// is what the confirmation screen counts down from, so the wait is never guessed
+// locally (FR-021j).
 type PublicResendResponse struct {
-	Message string `json:"message"`
+	Message           string `json:"message"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+}
+
+// PublicRetryAfter is the detail body carried by the 429, in the envelope's data
+// slot — the same place PAYMENT_ALREADY_STARTED puts the current QR payload.
+//
+// A header would have been the other option and was rejected: a cross-origin page
+// cannot read one that is not named in Access-Control-Expose-Headers, and the
+// envelope already has a place for per-error detail.
+type PublicRetryAfter struct {
+	RetryAfterSeconds int `json:"retry_after_seconds"`
 }
 
 // PublicResendMessage is the single sentence that endpoint ever returns. It is a
 // constant because the non-disclosure property depends on every path returning
 // exactly the same bytes.
 const PublicResendMessage = "If that order exists, its ticket email has been sent again."
+
+// PublicResendRateLimitedMessage is what a caller inside the cooldown is told.
+// It reads as a wait rather than as a failure (FR-021q): the two have opposite
+// remedies, and a guest who cannot tell them apart stops trying.
+const PublicResendRateLimitedMessage = "That email was just sent. Please wait before asking again."

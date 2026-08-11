@@ -12,6 +12,8 @@ Three capabilities are withdrawn because the new contract cannot support them or
 
 The whole feature is additive-and-subtractive within `internal/payment` plus a thin frontend change. **It requires no database migration**: gateway configuration moves to environment variables, and what this system concludes about a notification rides on marker rows in the existing `payments` audit table — the same technique the retired `QR_REISSUED` marker already used.
 
+**Late addition (clarification 2026-08-11)**: the confirmation screen's ticket-email resend gains a cooldown the guest can see. The endpoint belongs to spec 008; what is built here is the contract that makes its limit legible — the remaining seconds on every answer, a validation refusal for a body that cannot be keyed, a log line per attempt, and a countdown that re-arms itself. It reaches `internal/notification` and `pkg/httpx` rather than `internal/payment`, and it carries a one-line frontend bug fix that must land ahead of it: the resend body is currently double-encoded, so the endpoint has been answering "accepted" while sending nothing. Still no migration.
+
 ## Technical Context
 
 **Language/Version**: Go 1.26.5 (backend), TypeScript / Next.js App Router (frontend)
@@ -38,12 +40,12 @@ The whole feature is additive-and-subtractive within `internal/payment` plus a t
 
 | Principle | Verdict | Evidence |
 | --- | --- | --- |
-| I. Modular Monolith | **PASS** | All work lands in `internal/payment/`, with edges in `internal/order/` (DTO fields) and `pkg/config/`. No new domain. |
+| I. Modular Monolith | **PASS** | All gateway work lands in `internal/payment/`, with edges in `internal/order/` (DTO fields) and `pkg/config/`. The resend cooldown touches `internal/notification/` and `pkg/httpx/` instead — a second existing domain and a shared transport helper. No new domain either way. |
 | II. Domain Isolation | **PASS** — with a design constraint | The per-order payment history must not JOIN `payments` to `orders`, and neither must the seats-held-versus-remaining view. Resolved in Phase 1: what this system concludes about a notification is *recorded* where the order status is already in hand, so the history is a pure `payments` query; order details and remaining quota come through the order- and event-provider interfaces. See [data-model.md](./data-model.md). |
-| III. DTO Isolation | **PASS** | New/changed shapes go in `payment/dto.go` and `order/dto.go`; no sqlc struct crosses the wire. |
+| III. DTO Isolation | **PASS** | New/changed shapes go in `payment/dto.go`, `order/dto.go`, and `notification/dto.go`; no sqlc struct crosses the wire. `retry_after_seconds` is a computed transport value with no storage behind it. |
 | IV. Transactional Integrity & Idempotency | **PASS** — after a MINOR amendment | FR-008 keeps `CreateTransaction` outside any transaction. FR-016/FR-016a match the constitution's "already `PAID` → 200 without reprocessing" verbatim. Manjo's `Reject`/`Cancel`/`Expired` map onto the constitution's `deny`/`cancel`/`failure`/`expire` outcomes with the same atomic status-plus-quota transition. Post-payment work stays in the non-blocking goroutine — now load-bearing, because the gateway allows only 5 s. **FR-019 needed the principle extended**: it introduces the first webhook outcome that *deducts* quota rather than restoring it, which the original enumeration did not contemplate. Amended in 3.1.0 with the all-or-nothing re-deduction rule and the prohibition on any non-webhook route to `PAID`. |
 | V. Payment Gateway Abstraction | **PASS** — interface narrows | `Gateway` keeps `CreateTransaction` and `VerifyWebhook` (the two the constitution names). `FetchStatus` is **removed** because the Manjo contract has no equivalent (FR-022). Removing a method the constitution does not require is not a deviation; the `order` domain is untouched by it. |
-| VI. Guest-First MVP Scope | **PASS** | Guest flow stays account-free. Refunds are *not* implemented — refunding stays a human decision taken outside this system, which is the existing posture, not new scope. Nor is the recovery flow: the customer's proof, the operator's judgement, and the resend request all happen outside this app, which gains only two read-only views. |
+| VI. Guest-First MVP Scope | **PASS** | Guest flow stays account-free. Refunds are *not* implemented — refunding stays a human decision taken outside this system, which is the existing posture, not new scope. Nor is the recovery flow: the customer's proof, the operator's judgement, and the resend request all happen outside this app, which gains only two read-only views. The resend cooldown stays process-local for the same reason every other limiter here does: Redis is out of scope, so one instance limits independently. |
 | Tech Stack: "initial concrete implementation is Midtrans SNAP Sandbox" | **DEVIATION — amendment required** | See Complexity Tracking. |
 | Critical Data Flow: fee presentation, quota semantics, one-email delivery | **PASS** | Untouched. FR-002b confirms existing fee math rather than changing it. |
 | SCHEMA.md is source of truth; schema changes update it | **PASS (vacuous)** | No schema change, so nothing to sync. |
@@ -51,6 +53,8 @@ The whole feature is additive-and-subtractive within `internal/payment` plus a t
 ### Post-Phase-1 re-check
 
 Re-evaluated after design: **all gates still pass**, one of them only after an amendment. The design decision that could have broken Principle II — reading an order's payment history and what it holds — was resolved by recording conclusions at detection time and taking order and quota details through the provider interfaces, rather than deriving either from a cross-domain JOIN. Principle IV needed genuine extension rather than reinterpretation, and got it (3.1.0). No new violation appeared.
+
+Re-checked again after the 2026-08-11 clarification: **still all pass, no amendment needed.** The cooldown is transport state in a shared helper and a handler decision in `notification`; it crosses no domain boundary, adds no table, and changes no order lifecycle. The one thing worth stating rather than assuming: moving the limit out of middleware and into the handler does not weaken it. The window is consulted before the order lookup, so every attempt past the body check still spends it (FR-021m), and the key is the order number exactly as before — what changes is that a request the server cannot key now costs nobody anything instead of costing everybody a window.
 
 ## Project Structure
 
@@ -74,9 +78,18 @@ specs/012-manjo-payment-gateway/
 
 ```text
 backend/
-├── cmd/api/main.go                     # CHANGED: wire manjo gateway; drop refresh + status routes
+├── cmd/api/main.go                     # CHANGED: wire manjo gateway; drop refresh + status routes;
+│                                       #          build the resend Cooldown, drop its route group
 ├── pkg/config/config.go                # CHANGED: PG_* vars; drop IS_PRODUCTION, QR_REFRESH_AFTER;
 │                                       #          collapse PAYMENT_EXPIRY + PAYMENT_WINDOW
+├── pkg/httpx/
+│   ├── cooldown.go                     # NEW: keyed bucket reporting its own remaining time
+│   ├── cooldown_test.go                # NEW: seconds on both answers; eviction > window
+│   └── rate_limit.go                   # CHANGED: RateLimitPerBodyField + bodyField DELETED
+├── internal/notification/
+│   ├── handler.go                      # CHANGED: bind → 400; cooldown → 429; log every outcome
+│   ├── dto.go                          # CHANGED: PublicResendResponse gains retry_after_seconds
+│   └── public_handler_test.go          # CHANGED: per-outcome table incl. the shared-bucket regression
 ├── internal/payment/
 │   ├── manjo.go                        # NEW: Gateway impl — session open, callback verify+parse
 │   ├── manjo_test.go                   # NEW: httptest stub, table-driven
@@ -97,11 +110,19 @@ backend/
 └── migrations/                         # UNCHANGED — no migration in this feature
 
 frontend/
-├── lib/queries.ts                      # CHANGED: drop the 3s interval; keep the endpoint
+├── lib/queries.ts                      # CHANGED: drop the 3s interval; keep the endpoint;
+│                                       #          FIX the double-encoded resend body (land first)
 ├── lib/checkout-status.ts              # CHANGED: liveness watchdog + degraded-mode fallback
+├── lib/types.ts                        # CHANGED: PublicResendResponse gains retry_after_seconds
+├── components/order/order-confirmation.tsx  # CHANGED: ResendRow — server-driven countdown that
+│                                       #          re-arms itself; wait ≠ failure wording
 ├── app/(public)/…/checkout/page.tsx    # CHANGED: QRIS frame, CTA states; drop refresh timer
 └── app/(admin)/admin/orders/           # CHANGED: per-order payment history + seats held vs remaining
 ```
+
+**Sequencing note**: the `queries.ts` body fix is independent of everything else here and restores a
+broken user-facing capability by itself. It should land as its own change ahead of the cooldown work —
+otherwise the new behaviour is built and tested on top of a call that never reaches the send path.
 
 **Structure Decision**: Existing web-application layout. This feature is deliberately concentrated in `backend/internal/payment/` — the domain the constitution designates for gateway-specific logic — so that the `order` domain's only changes are the removal of a DTO field and a timer it no longer needs.
 

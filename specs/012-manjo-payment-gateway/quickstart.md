@@ -182,6 +182,50 @@ a payment happened. The gateway settles the order; ops only makes it possible.
 3. Confirm the retry budget is bounded well inside a guest's patience. If it approaches the gateway's
    own 10-second pacing, FR-007c is violated.
 
+## Scenario 8 — Resend cooldown on the confirmation screen (FR-021j–q)
+
+Start from a paid order, on its confirmation screen. Step 1 is the one that would have caught the
+defect this scenario exists because of.
+
+1. **The request reaches the handler at all.** Press *Resend email* once and watch the server log.
+   Expect a line naming the order and the outcome `delivered`, and an email. A `202` with no log line
+   is the failure mode that hid a double-encoded body for an afternoon — the wire body must parse to
+   an object with `order_id`, not to a string.
+2. **The seconds arrive on the acceptance.** Same press: the `202` body carries
+   `retry_after_seconds` (60), and the button goes into a visible countdown rather than staying
+   pressable (FR-021j).
+3. **The refusal carries what is left.** Press again immediately via `curl`. Expect `429`,
+   `RATE_LIMITED`, and `data.retry_after_seconds` **below** 60 and falling between attempts — a
+   constant 60 means the remaining time is being reported as the window, not as the remainder.
+4. **The button re-arms itself.** Let the countdown finish with the page untouched. The button must
+   become usable again with no reload and no further press, and the next press must send (FR-021o).
+   This is the exact behaviour that was missing: a 429 disabled the control permanently.
+5. **Nothing is remembered across loads** (FR-021p). Press once, then reload immediately. The button
+   is armed; pressing it returns `429` with the true remaining seconds, and the countdown resumes from
+   *that* number. Confirm nothing was written to browser storage.
+6. **A malformed body refuses only itself** (FR-021k, FR-021l). This is the regression that matters
+   most, because its absence is invisible until two guests are on the site at once:
+
+   ```fish
+   # unreadable body → 400, and no allowance spent anywhere
+   curl -i -X POST http://localhost:8080/api/v1/ticket/resend-email \
+     -H 'Content-Type: application/json' -d '"{\"order_id\":\"ORD-A\"}"'
+
+   # a DIFFERENT order must still be accepted in the same window
+   curl -i -X POST http://localhost:8080/api/v1/ticket/resend-email \
+     -H 'Content-Type: application/json' -d '{"order_id":"ORD-B"}'
+   ```
+
+   Expect `400` then `202`. A `429` on the second call means the shared bucket survived.
+7. **An unknown order is still indistinguishable from a send** (FR-021l). Post a well-formed but
+   fictional order number. Expect `202`, the same sentence, the same `retry_after_seconds`, byte for
+   byte identical to step 1's body — and a log line reading `order unknown`.
+8. **Every attempt spends the window** (FR-021m). Post the fictional number twice. The second is
+   `429`: an outcome that sent no mail still counts, or order-number probing is unlimited.
+9. **A cooldown refusal does not read as a failure** (FR-021q). Compare the screen at step 3 against
+   the screen when the mailer is stubbed to error: one says when to come back, the other says it could
+   not send. If they look alike, the guest cannot tell waiting from broken.
+
 ---
 
 ## Regression checks
@@ -207,7 +251,21 @@ curl -i -X POST http://localhost:8080/api/v1/admin/payment/reconciliation/<id>/c
 # and nothing may remain that records a payment on a person's word (FR-022d)
 rg -i "worklist|MANUAL_RECONCILED|ORPHAN_PAYMENT|ConfirmPayment" backend/ frontend/ \
   --glob '!vendor' --glob '!node_modules'   # no match
+
+# the shared-bucket limiter must be gone, not merely unwired (FR-021k)
+rg "func RateLimitPerBodyField|func bodyField|httpx\.RateLimitPerBodyField" \
+  backend/ --glob '!vendor'                                      # no match
+
+# and no source file may pre-stringify a body apiFetch will stringify again
+rg "body: JSON.stringify" frontend/lib frontend/components frontend/app \
+  --glob '!*.test.*' --glob '!node_modules'                      # no match
 ```
+
+Both greps name the *definition or call site* rather than the string, because two
+deliberate mentions survive and should: a comment in `backend/pkg/httpx/cooldown_test.go`
+explaining what the withdrawn helper got wrong, and a test in
+`frontend/lib/api-client.test.ts` that pins the double-encoding trap by demonstrating it.
+A grep that flagged those would train the next reader to ignore it.
 
 And confirm no migration was added: `git diff --stat backend/migrations/` must be empty, and
 `SCHEMA.md` unchanged.

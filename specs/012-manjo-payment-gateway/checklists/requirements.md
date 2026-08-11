@@ -277,3 +277,52 @@ both are about the quota top-up in step 6 rather than about this system's paymen
 - Package orders hold quota in every constituent ticket type, and the hold is reconstructed from the
   package's *current* composition. A composition edit between expiry and redelivery would make the
   re-deduction differ from what expiry released.
+
+### Iteration 10 — 2026-08-11 (ticket-email resend cooldown)
+
+**Result**: 16/16 → 16/16. No checkbox changed state; no regressions.
+
+Five questions asked and answered, all prompted by an observed defect rather than by a gap someone
+noticed while reading. Added FR-021j–q, six edge cases, and SC-022–024.
+
+**The defect, because the requirements only make sense against it**: the confirmation screen's
+resend sent nothing on the first press and left no log, then answered the second press as
+rate-limited and disabled the button for good. Three separate faults stacked:
+
+- The request body was encoded twice, so the field the endpoint keys its limit on was not present.
+- An unkeyable request fell into a single bucket shared by every caller and every order, so one
+  malformed request throttled the whole system for a window. That is what "it *always* says rate
+  limited" was.
+- An unreadable body was answered as accepted with no log written, so the screen reported a send
+  that never happened and nothing server-side disagreed.
+
+Each answer closes one of those, and none of the five is a preference — each names a behaviour whose
+absence produced the observed failure.
+
+**Scope note**: the endpoint itself belongs to spec 008 (FR-022), which requires only that resend
+"MUST be rate-limited against abuse" and says nothing about what the guest is told or what the
+limit does when it cannot identify an order. The confirmation screen that carries the control is
+built in this feature, so the requirements are recorded here and cross-referenced to 008 rather
+than duplicated into it.
+
+**Notes on borderline items**:
+
+- The new block has no user story of its own, and its acceptance rests on the requirements' own
+  MUSTs plus SC-022–024. Every other requirement block in this spec is anchored to a story. Left as
+  is because a clarification pass adds no story headings; flagged for `/speckit-plan` to decide
+  whether the resend flow warrants one.
+- The clarification bullet names a concrete response field (`retry_after_seconds`) because that is
+  how the answer was given. FR-021j itself is deliberately field-name-neutral — it requires the
+  number to be carried, not a particular spelling — so the requirement stays free of the wire detail
+  while the recorded answer stays faithful.
+- FR-021m accepts a real cost rather than hiding it: a send that fails on our side still spends the
+  guest's window. The alternative leaves order-number probing unlimited, and the identical-answer
+  rule means the guest cannot be told which of the two happened either way.
+
+**Carried into planning, not resolved here**:
+
+- Nothing yet detects an order whose resends are repeatedly accepted while the mail never lands.
+  Every attempt is now logged with its outcome (FR-021n), so the signal exists in the data; no
+  requirement turns it into an alert.
+- The window's length is unchanged at one send per order per minute. It was not questioned because
+  the defect was never about the duration.

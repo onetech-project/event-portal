@@ -192,3 +192,72 @@ Three invariants the diagram encodes:
 | `EXPIRED` + `Completed` + quota covers the hold ⇒ `PAID`, seats re-taken, tickets issued | FR-019, FR-019b | service |
 | `EXPIRED` + `Completed` + quota short ⇒ unchanged, recorded, signalled, 200 with an error body | FR-019c | service |
 | `CANCELLED` + `Completed` ⇒ never revived; recorded, signalled, 200 | FR-019d | service |
+
+## Domain types (Go) — resend cooldown
+
+No schema change here either. The cooldown is process-local state with the same lifetime and the same
+accepted trade-off as every other limiter in this system: one instance limits independently, per
+Constitution VI's exclusion of Redis.
+
+### `httpx.Cooldown` (new, `pkg/httpx`)
+
+A keyed token bucket that reports its own remaining time.
+
+```
+NewCooldown(requestsPerSecond float64, burst int, expiresIn time.Duration) *Cooldown
+(*Cooldown) Take(key string) (allowed bool, retryAfter time.Duration)
+```
+
+| Aspect | Value |
+| --- | --- |
+| Key | the order number, exactly as the request carried it |
+| Configured as | `guestResendRate` 1/60, `guestResendBurst` 1 — unchanged from today |
+| `retryAfter` when allowed | the full window the take has just started (FR-021j) |
+| `retryAfter` when refused | what is left of the window already running (FR-021j) |
+| Derivation | `rate.Limiter.TokensAt(now)`; `(1 - tokens) / limit` — see [research R13](./research.md) |
+| Idle eviction | `expiresIn`, which MUST exceed the window; 3 min against 60 s today |
+| Not a middleware | the handler needs the number on both answers, and the body must be checked before any allowance is spent (FR-021j, FR-021k) |
+
+`RateLimitPerBodyField` and `bodyField` are **deleted** ([research R14](./research.md)).
+`RateLimitPerIP` and `RateLimitBy` are untouched.
+
+### DTO changes (`internal/notification`)
+
+| Type | Change |
+| --- | --- |
+| `PublicResendResponse` | gains `retry_after_seconds int` alongside `message` |
+| `PublicResendMessage` | unchanged, and still a constant — the non-disclosure property still depends on every non-refused outcome returning the same sentence |
+| 429 body | carries `{"retry_after_seconds": n}` in the envelope's `data`, via `apperr.Error.Data` — the same slot `PAYMENT_ALREADY_STARTED` already uses for detail |
+
+`retry_after_seconds` is safe to put on the accepted response precisely because it is identical across
+every accepted outcome: it is a property of the cooldown, which every attempt spends alike (FR-021m),
+not of whether the order was found or the mail went out.
+
+### Resend outcomes
+
+One row per branch, because the disclosure rule and the accounting rule cut across each other
+differently in each.
+
+| Outcome | Status | Body | Spends cooldown | Logged as |
+| --- | --- | --- | --- | --- |
+| Body unreadable or `order_id` empty | `400` `VALIDATION_ERROR` | error envelope | **no** (FR-021k) | `body unreadable` |
+| Cooldown still running | `429` `RATE_LIMITED` | `data.retry_after_seconds` | already spent | `refused for cooldown` |
+| Order number not found | `202` | the constant sentence + seconds | yes | `order unknown` |
+| Order found, not `PAID` | `202` | identical | yes | `order not payable` |
+| Send failed | `202` | identical | yes | `send failed` |
+| Delivered | `202` | identical | yes | `delivered` |
+
+The four `202` rows are byte-identical to a caller (FR-021l). They are four distinct log lines to an
+operator (FR-021n). That split is the whole design: the endpoint discloses nothing and explains
+everything.
+
+### Validation rules — resend
+
+| Rule | Source | Enforced where |
+| --- | --- | --- |
+| Unreadable body ⇒ `400`, no allowance spent, no bucket touched | FR-021k | handler, before the cooldown |
+| Every attempt past the body check spends the window, whatever its outcome | FR-021m | handler, before the order lookup |
+| Cooldown keyed per order, never shared between orders or callers | FR-021k | `Cooldown.Take` |
+| Every attempt logged with its real outcome and order number | FR-021n | handler, every branch |
+| Identical body across all accepted outcomes | FR-021l | handler, single response constructor |
+| Idle eviction strictly longer than the window | R13 | `NewCooldown` wiring, asserted in test |
