@@ -97,7 +97,7 @@ func TestCheckAndDeductQuotaDecrementsRemainingQuota(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "deduct", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "100000.00", 10)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		return repo.CheckAndDeductQuota(ctx, tx, tt.ID, 3)
 	})
 
@@ -113,7 +113,7 @@ func TestCheckAndDeductQuotaRejectsMoreThanRemaining(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "oversell", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "100000.00", 2)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		return repo.CheckAndDeductQuota(ctx, tx, tt.ID, 3)
 	})
 
@@ -137,7 +137,7 @@ func TestCheckAndDeductQuotaIsAtomicUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+			results[i] = db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 				return repo.CheckAndDeductQuota(ctx, tx, tt.ID, 1)
 			})
 		}()
@@ -166,7 +166,7 @@ func TestCheckAndDeductQuotaReportsUnknownTicketType(t *testing.T) {
 	missing := ev.ID // a valid UUID that is not a ticket type id
 	_ = tt
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		return repo.CheckAndDeductQuota(ctx, tx, missing, 1)
 	})
 
@@ -182,7 +182,7 @@ func TestRestoreQuotaAddsBackTheReservedAmount(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "restore", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "100000.00", 10)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		if err := repo.CheckAndDeductQuota(ctx, tx, tt.ID, 4); err != nil {
 			return err
 		}
@@ -201,7 +201,7 @@ func TestDeductRollsBackWithItsTransaction(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "rollback", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "100000.00", 10)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		if err := repo.CheckAndDeductQuota(ctx, tx, tt.ID, 4); err != nil {
 			return err
 		}
@@ -318,7 +318,7 @@ func TestPackageComponentFromAnotherEventFailsAtTheDatabase(t *testing.T) {
 	_ = testsupport.SeedTicketType(t, pool, eventA.ID, "Day 1", "30000.00", 10)
 	ttInB := testsupport.SeedTicketType(t, pool, eventB.ID, "Day 2", "30000.00", 10)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		pkg, err := repo.CreatePackage(ctx, tx, event.AdminPackageParams{
 			EventID:    eventA.ID,
 			Name:       "Cross-event bundle",

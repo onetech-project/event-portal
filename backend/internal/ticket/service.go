@@ -82,7 +82,7 @@ func (s *Service) GenerateForOrder(ctx context.Context, orderID uuid.UUID, atten
 		return []Record{}, nil
 	}
 
-	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		for _, attendeeID := range attendeeIDs {
 			if err := s.createOneTicket(ctx, tx, orderID, attendeeID); err != nil {
 				return err

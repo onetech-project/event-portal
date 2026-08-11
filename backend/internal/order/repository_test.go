@@ -27,7 +27,7 @@ func TestCreateBookedOrderPersistsAPendingOrderWithoutBuyerOrPayment(t *testing.
 	ctx := context.Background()
 
 	var created order.OrderRecord
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		created, err = repo.CreateBookedOrder(ctx, tx, "ORD-20260731-ABCDEF",
 			decimal.RequireFromString("300000.00"), decimal.RequireFromString("300000.00"),
@@ -54,7 +54,7 @@ func TestOrderStatusIsExchangedByNameThroughEveryReadPath(t *testing.T) {
 	ctx := context.Background()
 
 	var created order.OrderRecord
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		created, err = repo.CreateBookedOrder(ctx, tx, "ORD-STATUS-NAME",
 			decimal.RequireFromString("100000.00"), decimal.RequireFromString("100000.00"),
@@ -74,7 +74,7 @@ func TestOrderStatusIsExchangedByNameThroughEveryReadPath(t *testing.T) {
 
 	// The transition takes a name too — the caller never learns an id exists.
 	var moved bool
-	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		moved, err = repo.UpdateOrderStatusIfPending(ctx, tx, created.ID, "PAID")
 		return err
@@ -89,7 +89,7 @@ func TestOrderStatusIsExchangedByNameThroughEveryReadPath(t *testing.T) {
 	// And the guard still holds: a second transition finds nothing PENDING,
 	// which is what makes a replayed webhook a no-op.
 	var again bool
-	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err = db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		again, err = repo.UpdateOrderStatusIfPending(ctx, tx, created.ID, "CANCELLED")
 		return err
@@ -104,7 +104,7 @@ func TestCreateBookedOrderRejectsADuplicateOrderNumber(t *testing.T) {
 	ctx := context.Background()
 	testsupport.SeedOrder(t, pool, "ORD-DUP", "PENDING")
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := repo.CreateBookedOrder(ctx, tx, "ORD-DUP",
 			decimal.NewFromInt(1), decimal.NewFromInt(1), time.Now().Add(time.Hour))
 		return err
@@ -120,7 +120,7 @@ func TestBookedOrderItemsAndSlotsShareTheOrdersTransaction(t *testing.T) {
 	ev := testsupport.SeedEvent(t, pool, "tx-shape", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		created, err := repo.CreateBookedOrder(ctx, tx, "ORD-ROLLBACK",
 			decimal.NewFromInt(300000), decimal.NewFromInt(300000), time.Now().Add(time.Hour))
 		if err != nil {
@@ -161,7 +161,7 @@ func TestUpdatePaymentDetailsStampsTheWholePaymentInstruction(t *testing.T) {
 	seeded := testsupport.SeedOrder(t, pool, "ORD-PAYURL", "PENDING")
 	expiresAt := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
 			PaymentURL: "https://pay.example.com/x",
 			Provider:   "midtrans",
@@ -191,7 +191,7 @@ func TestUpdatePaymentDetailsLeavesEmptyInstructionFieldsNull(t *testing.T) {
 	ctx := context.Background()
 	seeded := testsupport.SeedOrder(t, pool, "ORD-NOQR", "PENDING")
 
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		return repo.UpdatePaymentDetails(ctx, tx, seeded.ID, order.PaymentDetails{
 			PaymentURL: "https://pay.example.com/x",
 			Provider:   "midtrans",
@@ -265,12 +265,12 @@ func TestUpdateOrderStatusIfPendingAppliesTheTransitionOnce(t *testing.T) {
 	seeded := testsupport.SeedOrder(t, pool, "ORD-ONCE", "PENDING")
 
 	var first, second bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		first, err = repo.UpdateOrderStatusIfPending(ctx, tx, seeded.ID, "CANCELLED")
 		return err
 	}))
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		second, err = repo.UpdateOrderStatusIfPending(ctx, tx, seeded.ID, "CANCELLED")
 		return err
@@ -287,7 +287,7 @@ func TestUpdateOrderStatusIfPendingLeavesAPaidOrderAlone(t *testing.T) {
 	seeded := testsupport.SeedOrder(t, pool, "ORD-PAID", "PAID")
 
 	var applied bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		applied, err = repo.UpdateOrderStatusIfPending(ctx, tx, seeded.ID, "EXPIRED")
 		return err
@@ -378,7 +378,7 @@ func TestHasOrdersForTicketTypeDetectsAnOrderItemReference(t *testing.T) {
 	testsupport.SeedOrderItem(t, pool, ord.ID, tt.ID, 1)
 
 	var has bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		has, err = repo.HasOrdersForTicketType(ctx, tx, tt.ID)
 		return err
@@ -400,7 +400,7 @@ func TestHasOrdersForTicketTypeDetectsAnAttendeeOnlyReference(t *testing.T) {
 	testsupport.SeedAttendee(t, pool, ord.ID, tt.ID, "Andi", "andi@example.com")
 
 	var has bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		has, err = repo.HasOrdersForTicketType(ctx, tx, tt.ID)
 		return err
@@ -417,7 +417,7 @@ func TestHasOrdersForTicketTypeIsFalseForAnUnsoldType(t *testing.T) {
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
 
 	var has bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		has, err = repo.HasOrdersForTicketType(ctx, tx, tt.ID)
 		return err
@@ -437,7 +437,7 @@ func TestHasOrdersForTicketTypesChecksTheWholeSet(t *testing.T) {
 	testsupport.SeedOrderItem(t, pool, ord.ID, sold.ID, 1)
 
 	var hasAll, hasCleanOnly bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		if hasAll, err = repo.HasOrdersForTicketTypes(ctx, tx, []uuid.UUID{clean.ID, sold.ID}); err != nil {
 			return err
@@ -455,7 +455,7 @@ func TestHasOrdersForTicketTypesIsFalseForAnEmptySet(t *testing.T) {
 	ctx := context.Background()
 
 	var has bool
-	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		has, err = repo.HasOrdersForTicketTypes(ctx, tx, nil)
 		return err
@@ -518,7 +518,7 @@ func TestListQuotaHoldsByOrderIDExpandsPackageLines(t *testing.T) {
 	testsupport.SeedOrderItem(t, pool, ord.ID, ttC.ID, 3)
 
 	var holds []order.QuotaHold
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 		var e error
 		holds, e = repo.ListQuotaHoldsByOrderID(ctx, tx, ord.ID)
 		return e

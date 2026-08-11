@@ -46,7 +46,7 @@ func TestCreateTicketStoresTheCodeAndLeavesTheQRURLNull(t *testing.T) {
 	f := newTicketFixture(t)
 	ctx := context.Background()
 
-	err := db.InTx(ctx, f.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, f.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return f.repo.CreateTicket(ctx, tx, "ABC234DEFG", f.orderID, f.attendee)
 	})
 	require.NoError(t, err)
@@ -67,11 +67,11 @@ func TestCreateTicketRejectsADuplicateCode(t *testing.T) {
 	f := newTicketFixture(t)
 	ctx := context.Background()
 
-	require.NoError(t, db.InTx(ctx, f.pool, func(tx pgx.Tx) error {
+	require.NoError(t, db.InTx(ctx, f.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return f.repo.CreateTicket(ctx, tx, "DUPCODE234", f.orderID, f.attendee)
 	}))
 
-	err := db.InTx(ctx, f.pool, func(tx pgx.Tx) error {
+	err := db.InTx(ctx, f.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return f.repo.CreateTicket(ctx, tx, "DUPCODE234", f.orderID, f.attendee)
 	})
 

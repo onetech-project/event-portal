@@ -84,7 +84,27 @@ type Config struct {
 	TraceSampleRatio float64
 	// MetricsEnabled exposes GET /metrics for Prometheus to scrape.
 	MetricsEnabled bool
+
+	// Cache (Constitution Principle VII). Redis is a read cache in front of the
+	// list endpoints and nothing else: it is a soft dependency, and the API must
+	// start and serve with it absent.
+	//
+	// RedisURL empty is treated exactly like CacheEnabled=false — there is no
+	// third state where caching is on but has nowhere to go.
+	RedisURL string
+	// CacheEnabled is the kill switch. False returns the system to direct
+	// database reads on every request with no other behavioural difference.
+	CacheEnabled bool
+	// CacheTTL bounds how long a cached entry can survive. It is a BACKSTOP for
+	// an invalidation that was somehow missed, not the freshness mechanism —
+	// correctness comes from invalidating on commit.
+	CacheTTL time.Duration
 }
+
+// CacheActive reports whether the cache should be built at all. Both the empty
+// URL and the explicit kill switch collapse to the same answer so callers never
+// have to test two things.
+func (c *Config) CacheActive() bool { return c.CacheEnabled && c.RedisURL != "" }
 
 type loader struct {
 	errs []error
@@ -202,6 +222,10 @@ func Load() (*Config, error) {
 		// hides exactly the rare failure you went looking for.
 		TraceSampleRatio: l.float("OTEL_TRACES_SAMPLER_ARG", 1.0),
 		MetricsEnabled:   l.boolean("METRICS_ENABLED", true),
+
+		RedisURL:     l.str("REDIS_URL", "redis://localhost:6379/0"),
+		CacheEnabled: l.boolean("CACHE_ENABLED", true),
+		CacheTTL:     l.duration("CACHE_TTL", 10*time.Minute),
 	}
 
 	// Checked after loading rather than inside the duration helper: a bad value
@@ -219,6 +243,13 @@ func Load() (*Config, error) {
 	if cfg.BookingHold <= 0 {
 		l.errs = append(l.errs, fmt.Errorf(
 			"BOOKING_HOLD must be positive, got %s", cfg.BookingHold))
+	}
+	// A non-positive TTL would write entries that expire immediately or never —
+	// the first silently disables the cache, the second removes the backstop that
+	// bounds a missed invalidation. Only checked when the cache is actually on.
+	if cfg.CacheActive() && cfg.CacheTTL <= 0 {
+		l.errs = append(l.errs, fmt.Errorf(
+			"CACHE_TTL must be positive, got %s", cfg.CacheTTL))
 	}
 	// The server deadline must sit strictly inside the gateway-side QR validity,
 	// otherwise a QR could outlive the order it belongs to (research R2).

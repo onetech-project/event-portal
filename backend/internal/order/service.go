@@ -12,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
 	"github.com/manjo/ticketing/backend/pkg/logger"
 	"github.com/manjo/ticketing/backend/pkg/money"
@@ -40,6 +41,7 @@ type Service struct {
 	log     *logger.Logger
 	now     func() time.Time
 	timers  Timers
+	cache   cache.Lists
 }
 
 // NewService builds the order service. Timers default to the contract values;
@@ -52,6 +54,7 @@ func NewService(pool db.Beginner, repo *Repository, events EventProvider, gatewa
 		gateway: gateway,
 		log:     log,
 		now:     time.Now,
+		cache:   cache.NoOp{},
 		timers: Timers{
 			BookingHold:    time.Hour,
 			PaymentWindow:  14 * time.Minute,
@@ -64,6 +67,15 @@ func NewService(pool db.Beginner, repo *Repository, events EventProvider, gatewa
 // for chaining at the composition root.
 func (s *Service) WithTimers(t Timers) *Service {
 	s.timers = t
+	return s
+}
+
+// WithCache installs the list cache (Constitution Principle VII). Booking moves
+// quota, so this domain invalidates the event scope as well as the order one.
+func (s *Service) WithCache(c cache.Lists) *Service {
+	if c != nil {
+		s.cache = c
+	}
 	return s
 }
 
@@ -128,7 +140,7 @@ func (s *Service) bookOnce(ctx context.Context, req BookRequest) (OrderRecord, e
 	}
 
 	var created OrderRecord
-	txErr := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	txErr := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		now := s.now()
 
 		expanded := make([]ExpandedItem, 0, len(req.Items))
@@ -225,6 +237,21 @@ func (s *Service) bookOnce(ctx context.Context, req BookRequest) (OrderRecord, e
 				}
 			}
 		}
+
+		// The highest-frequency invalidation in the system, and the one that most
+		// needs to stay outside the lock window.
+		//
+		// This registers the work; it does not do it. The quota-deducting UPDATE
+		// above holds a row lock until COMMIT, so issuing a Redis command here
+		// would serialise every concurrent buyer of the same ticket type behind a
+		// network round-trip — the same collapse Principle IV bans gateway calls
+		// to prevent, and what Principle VII's transaction-boundary rule forbids.
+		// InvalidateAfterCommit defers it past COMMIT; the cache client also
+		// refuses outright on a transaction context, so a future refactor that
+		// inlines it fails loudly instead of quietly halving checkout throughput.
+		//
+		// Both scopes: quota moved (event) and an order appeared (orders).
+		cache.InvalidateAfterCommit(ctx, s.cache, cache.Orders(), cache.Event(req.EventID))
 		return nil
 	})
 	if txErr != nil {
@@ -390,7 +417,7 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 	// TX-D: primary-contact snapshot + every slot, atomically — a retried
 	// checkout overwrites.
 	var paymentItems []PaymentItem
-	if err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	if err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		updated, err := s.repo.UpdateOrderBuyer(ctx, tx, ord.ID, BuyerDetails{
 			Name:  primary.Name,
 			Email: primary.Email,
@@ -452,7 +479,7 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 	// so our deadline always falls inside it.
 	deadline := s.now().Add(s.timers.PaymentWindow)
 	var stamped bool
-	if err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	if err := db.InTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		stamped, err = s.repo.UpdatePaymentDetailsIfUnstarted(ctx, tx, ord.ID, PaymentDetails{
 			PaymentURL: session.QRImageURL,
@@ -460,7 +487,14 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 			QRString:   session.QRString,
 			ExpiresAt:  deadline,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		// The admin order table shows provider, payment deadline and buyer
+		// details, all of which this checkout wrote. Orders scope only — no quota
+		// moved here.
+		cache.InvalidateAfterCommit(ctx, s.cache, cache.Orders())
+		return nil
 	}); err != nil {
 		// The session exists but we could not record it; the order stays PENDING
 		// and a retry hits the idempotent branch or re-creates. The webhook
