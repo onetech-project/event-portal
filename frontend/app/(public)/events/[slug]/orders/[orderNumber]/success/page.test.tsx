@@ -39,6 +39,7 @@ const PAID: TicketOrderDetail = {
       quantity: 2,
       unit_price: "200000.00",
       subtotal: "400000.00",
+      admission_starts: ["2026-09-01T12:00:00Z"],
     },
     {
       kind: "package",
@@ -47,6 +48,7 @@ const PAID: TicketOrderDetail = {
       quantity: 1,
       unit_price: "150000.00",
       subtotal: "150000.00",
+      admission_starts: ["2026-09-01T12:00:00Z"],
     },
   ],
   server_time: "2026-08-01T10:03:00Z",

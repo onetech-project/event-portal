@@ -1,5 +1,82 @@
 <!--
 Sync Impact Report
+Version change: 3.4.0 → 4.0.0 (MAJOR — the fee-presentation rule is redefined in the
+opposite direction: behavior compliant under 3.4.0 — the form-filling step showing the
+fee-inclusive grand total — is non-compliant under 4.0.0. Same reasoning the 2.0.0 and
+3.0.0 bumps recorded: a reversal is a backward-incompatible redefinition, not expanded
+guidance. 2.1.0 took MINOR for this same bullet precisely because it added guidance
+without redefining an existing rule; that justification no longer applies.)
+
+Trigger: clarification of 2026-08-12 (recorded in specs/011-order-buyer-info spec.md,
+Clarifications): the order page's summary "includes the fee, it's supposed to be raw,
+only on the checkout page the fee will be added on the total_amount". 2.1.0 suppressed
+the itemized rows on the form-filling step but left the fee-inclusive figure standing,
+so the guest committing to Continue to Payment was shown a total whose breakdown that
+same rule had just removed. The figure now matches what the step can account for — the
+ticket subtotal — and the grand total first appears on the awaiting-payment step, where
+its breakdown appears with it.
+
+Modified sections:
+  - Critical Data Flow Rules, fee-presentation bullet — the form-filling step shows the
+    pre-fee ticket subtotal, not the grand total, and no fee-inclusive figure appears
+    before the awaiting-payment step. The "includes all taxes and fees" note is replaced
+    by one stating that taxes and fees are added at the next step, because the old
+    wording above a fee-free figure understates what the guest will be charged. The
+    heading stays "Total Payment" on both steps; the note carries the distinction. The
+    null-subtotal fallback (orders predating fees) is stated rather than left implicit.
+    The display-only clause is strengthened, not weakened: the frozen `order_fees` math,
+    the stored total, the amount charged, and the gateway's gross amount are all
+    explicitly unchanged.
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - No impact — verified rather than assumed: `grep -i fee` returns nothing in
+    ARCHITECTURE.md or PRD.md, and SCHEMA.md describes only the `fees` / `order_fees`
+    tables, which a display rule does not touch. This is the same finding the 2.1.0
+    report recorded for this bullet.
+  - spec 011 (specs/011-order-buyer-info) FR-016 plus new FR-016a/b/c, User Story 4, and
+    SC-005 / SC-005a amended in the same change, as 2.1.0 did for this bullet.
+
+Templates requiring follow-up: none.
+
+Follow-up TODOs: none for governance. Principle VIII leaves the implementation change
+owing an `e2e/` scenario asserting the form-step figure equals the subtotal while the
+awaiting-payment figure equals subtotal + fees; the guest journey asserts no order-page
+total today, so nothing there would currently catch a regression.
+-->
+
+<!--
+Sync Impact Report
+Version change: 3.3.0 → 3.4.0 (MINOR — materially expanded guidance. No principle is
+removed or redefined: the admission-window outcomes govern a case the previous
+enumeration simply did not contemplate, and every ticket that validated before this
+amendment still validates the same way, because migration 0014 backfills each ticket
+type's window from its parent event.)
+
+Trigger: spec 015 (Per-Ticket Event Dates). `ticket_types` gains an `event_start` /
+`event_end` pair — when a ticket ADMITS its holder, as distinct from the `sales_start` /
+`sales_end` pair that says only when it can be bought. A three-day festival's Day 1 and
+Day 2 passes previously both advertised, and both printed, the parent event's opening
+date.
+
+Modified sections:
+  - Critical Data Flow Rules, admin ticket validation — the outcome set grows from
+    three to five. `Not yet valid` and `Expired` join `Valid`, `Already Used` and
+    `Invalid`, with an explicit precedence and an explicit statement that the window
+    admits no tolerance. The irreversibility of `Used` is unchanged.
+  - Critical Data Flow Rules — a new bullet on which date each surface names: a
+    ticket's date comes from its ticket type, an event's from the event.
+
+Templates requiring updates: none. The plan template's Constitution Check already
+carries the Principle VIII row this change exercises.
+
+Follow-up TODOs: none. `PRD.md` §1.4 and `SCHEMA.md` are updated in this same change,
+as Governance requires.
+-->
+
+<!--
+Sync Impact Report
 Version change: 3.2.0 → 3.3.0 (MINOR — materially expanded guidance. No principle is
 removed or redefined and nothing compliant under 3.2.0 becomes non-compliant: the new
 paragraph governs a webhook outcome the previous text simply did not contemplate.)
@@ -588,18 +665,43 @@ purchase flow at all.
   that email has been delivered; a failure leaves it FALSE so resend stays armed.
   Resend (guest and admin) targets the same single address.
 * Admin ticket validation: lookup by manual `Ticket Code` (primary) or camera QR scan
-  (secondary) MUST resolve to one of `Valid`, `Already Used`, `Invalid`; marking a
-  ticket `Used` MUST be irreversible through the validation flow.
+  (secondary) MUST resolve to one of `Valid`, `Already Used`, `Invalid`, `Not yet valid`,
+  or `Expired`; marking a ticket `Used` MUST be irreversible through the validation flow.
+  The last two are the admission-window outcomes (spec 015): a ticket admits only between
+  its ticket type's `event_start` and `event_end`, both endpoints inclusive, with **no
+  grace period on either side** — which makes `event_start` the moment admission opens
+  rather than showtime, and the admin authoring surface MUST say so. Precedence is
+  `Invalid` (unknown or revoked), then `Already Used`, then the window, then `Valid`: a
+  ticket that was already admitted reports that even when it is also out of window.
+  An out-of-window outcome MUST name the window the ticket does apply to, MUST NOT offer
+  the used transition, and the mark-used endpoint MUST refuse it independently of the UI
+  — hiding a button is not enforcement. `Invalid` MUST continue to disclose nothing about
+  an unknown code, the window included.
+* Ticket dates vs event dates: a surface naming the date of a **ticket** MUST name that
+  ticket type's admission window — the order summary's per-line date and range, the
+  issued PDF, and the ticket email. A surface naming the date of the **event** — the
+  event list, the event detail header, the countdown — MUST continue to name the event's
+  own `start_date`/`end_date`. A ticket type's window MUST fall inside its parent event's
+  dates, enforced on the ticket-type write only: enforcing it on the event write as well
+  deadlocks a reschedule, since neither the event nor its ticket types could move first.
+  An event edit that strands a window MUST warn rather than refuse, and MUST NOT cascade
+  onto any ticket type's stored window.
 * Quota (`ticket_types.quota`) MUST never go negative; enforce via the `CHECK (quota
   >= 0)` constraint and atomic deduction inside the checkout transaction (Principle
   IV) — application code MUST NOT rely on optimistic checks alone.
 * Fee presentation: on the order page's form-filling (registration) step, the Order
-  Summary panel MUST NOT itemize fees — no Ticket Total or per-fee rows — it shows
-  only the grand Total Payment, labeled as including all taxes and fees. The itemized
-  breakdown (ticket total, each frozen per-order fee, grand total) remains on the
-  awaiting-payment step's summary and is mandatory in the receipt email. This is a
-  display rule only: the frozen `order_fees` math and the totals themselves are
-  unchanged.
+  Summary panel MUST show the pre-fee ticket subtotal and MUST NOT surface fees in any
+  form — neither itemized rows nor a fee-inclusive figure. The panel keeps the heading
+  "Total Payment", and the note beneath it MUST state that taxes and fees are added at
+  the next step; it MUST NOT claim the figure already includes them, since above a
+  fee-free number that wording understates what the guest is about to be charged. The
+  grand total, and the itemized breakdown that justifies it (ticket total, each frozen
+  per-order fee, grand total), MUST appear together on the awaiting-payment step's
+  summary and are mandatory in the receipt email — the grand total MUST NOT appear
+  before that step, unaccompanied by the breakdown. An order carrying no subtotal of its
+  own (one predating fees) MUST fall back to its stored total, which for such orders
+  already excludes fees. This is a display rule only: the frozen `order_fees` math, the
+  stored total, the amount charged, and the gateway's gross amount are all unchanged.
 * Cache coherence: every flow above that writes to `events`, `ticket_types`, packages,
   `orders`, `order_items`, or `attendees` — including quota deduction at booking and
   quota restoration on `expire`/`cancel`/`deny`/`failure` — MUST invalidate the cached
@@ -640,4 +742,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 3.3.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-11
+**Version**: 4.0.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-12

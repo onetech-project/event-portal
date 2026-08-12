@@ -271,6 +271,57 @@ Backend touchpoints are the `p.status = 'ACTIVE'` filters in `internal/event/que
 
 ---
 
+## R25. Track C needs no backend change: `subtotal` and `fees` already ship on the guest order read
+
+**Decision**: implement FR-016 entirely in the frontend. No endpoint, DTO field, query, or migration.
+
+**Rationale**: `TicketOrderDetail` has carried `subtotal *money.Money` and `fees []PublicOrderFee` since migration `000010` (`backend/internal/order/dto.go:334-336`), and the frontend type mirrors them (`frontend/lib/types.ts:246-250`, `subtotal: string | null`). The form-filling step therefore already receives the pre-fee figure it is now required to render — it simply renders the other one. Confirmed by reading both sides rather than inferring from the panel: the panel's existing breakdown block (`order-summary-panel.tsx:135-148`) already consumes `order.subtotal` on the payment phase, so the field is not merely present, it is proven live.
+
+**Consequence**: the whole of Track C is `git diff --stat` over `frontend/` and `e2e/`. Any backend edit appearing in a Track C commit is out of scope by definition and should be challenged in review.
+
+**Alternatives considered**: adding a dedicated `display_total` to the DTO so the frontend does not choose — rejected, it puts a presentation decision in the wire contract (Principle III cuts the other way: the wire carries facts, the client decides what to show). Computing the subtotal client-side by summing `items[].subtotal` — rejected, it would silently disagree with the server's frozen figure on any rounding difference, and the authoritative value is already present.
+
+---
+
+## R26. The `showFeeBreakdown` boolean becomes `phase: "registration" | "payment"`
+
+**Decision**: rename the panel's prop rather than overloading it. The two call sites pass `phase="registration"` (`visitor-form.tsx:314`) and `phase="payment"` (`checkout/page.tsx:222`); the panel derives both the headline figure and the presence of the breakdown rows from it.
+
+**Rationale**: after FR-016 the flag no longer governs only the rows — it also selects which money figure the panel's closing line shows. A boolean named `showFeeBreakdown` that silently swaps the total is precisely the kind of misdescription the surrounding code comments elsewhere call out, and the next reader would reasonably set it to `true` to itemize without expecting the headline number to change. Naming the phase makes the two behaviours obviously one decision, which is what the constitution's amended bullet says they are.
+
+**Cost**: 1 component signature, 2 call sites, and the assertions that reference the prop. The checkout call site currently relies on the default (`showFeeBreakdown = true`) and must become explicit — a defaulted phase would reintroduce the same ambiguity at a different name.
+
+**Alternatives considered**: keep the boolean and add a second one (`showGrandTotal`) — rejected, two booleans admit four states of which two are meaningless (itemized rows above a subtotal; no rows above a grand total), and nothing would prevent them. Keep the boolean and change its meaning silently — rejected, it is the cheapest option today and the most expensive one to read later.
+
+---
+
+## R27. Nothing currently proves the two figures differ — every naive test passes against unfixed code
+
+**Decision**: every Track C test is written against data where `subtotal ≠ total_amount`, and the e2e scenario arranges a fee through the real admin API before it books.
+
+**Rationale**: this is the finding that changes how Track C is tested, and it was verified rather than assumed:
+
+- **Unit fixtures.** `order-summary-panel.test.tsx:25-27` sets `total_amount: "150000.00"`, `subtotal: "150000.00"`, `fees: []`. A test asserting "the form step shows the subtotal" passes identically before and after the fix.
+- **The e2e database has no fees at all.** `e2e/support/db.ts:44-45` TRUNCATEs `fees` along with the rest of the fixture tables. Migration `000010` seeds `PPN 11%` and `Admin Fee 1200`, but the reset removes them, so every e2e order books with an empty fee set and `total_amount == subtotal`. This also explains the reported screenshot, where the panel's Rp 480.000 is exactly the three ticket prices summed — on that data the defect is invisible.
+
+So the assertion has to be arranged into existence. `POST /api/v1/admin/fees` exists (`backend/internal/order/admin_handler.go:34`) and is the sanctioned route: AGENTS.md forbids writing order/payment state straight into the database from a test, and arranging through the real API is also what keeps the cache honest.
+
+**Consequence**: Principle VIII's "confirm it fails against the unfixed code" is not a formality here — it is the only thing separating a real regression test from one that would have passed all along.
+
+**Alternatives considered**: seeding a fee in `db.ts` for all runs — rejected, it changes every existing money assertion in the suite at once. Asserting on the rendered label instead of the amount — rejected, it proves the copy changed and not the figure, which is the part that costs a buyer money.
+
+---
+
+## R28. `Rp 0` is a legitimate subtotal; the null-subtotal fallback is the only special case
+
+**Decision**: the form step renders `subtotal ?? total_amount` (FR-016c) — nullish coalescing, not a falsy check.
+
+**Rationale**: `subtotal` is `string | null` on the wire, and `"0.00"` is falsy-adjacent territory in JS once it passes through any loose check. A free order (fully discounted, or a zero-priced type) has a real `"0.00"` subtotal that must render as `Rp 0`, not fall through to the total. Only `null` — an order predating migration `000010` — takes the fallback, and for those orders the stored total already excludes fees, so the fallback shows the same number the rule asks for rather than approximating it.
+
+**Alternatives considered**: `subtotal || total_amount` — rejected for the `"0.00"` case above. Treating a null subtotal as an error and hiding the total line — rejected, it blanks a figure on a live order to satisfy a rule about a value that order predates.
+
+---
+
 ## Known issues flagged, out of scope
 
 - `lib/booking-stage.ts:28` maps the order route to the "Payment" rail step for both phases (the "Registration" step never lights up). Pre-existing; unchanged.

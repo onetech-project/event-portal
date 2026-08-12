@@ -392,7 +392,8 @@ func (a notificationTicketAdapter) TicketDetailsForOrder(ctx context.Context, or
 			TicketTypeName: detail.TicketTypeName,
 			EventName:      detail.EventName,
 			Venue:          detail.Venue,
-			StartDate:      detail.StartDate,
+			EventStart:     detail.EventStart,
+			EventEnd:       detail.EventEnd,
 		})
 	}
 	return out, nil
@@ -431,13 +432,14 @@ func (a orderEventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []u
 	displays := make(map[uuid.UUID]order.TicketTypeDisplay, len(records))
 	for id, record := range records {
 		displays[id] = order.TicketTypeDisplay{
-			TicketTypeName: record.TicketTypeName,
-			EventName:      record.EventName,
-			EventSlug:      record.EventSlug,
-			EventVenue:     record.EventVenue,
-			EventAddress:   record.EventAddress,
-			EventStartDate: record.EventStartDate,
-			EventEndDate:   record.EventEndDate,
+			TicketTypeName:  record.TicketTypeName,
+			EventName:       record.EventName,
+			EventSlug:       record.EventSlug,
+			EventVenue:      record.EventVenue,
+			EventAddress:    record.EventAddress,
+			EventStartDate:  record.EventStartDate,
+			EventEndDate:    record.EventEndDate,
+			AdmissionStarts: record.AdmissionStarts,
 		}
 	}
 	return displays, nil
@@ -452,13 +454,14 @@ func (a orderEventLookupAdapter) PackageDisplays(ctx context.Context, ids []uuid
 	displays := make(map[uuid.UUID]order.PackageDisplay, len(records))
 	for id, record := range records {
 		displays[id] = order.PackageDisplay{
-			PackageName:    record.PackageName,
-			EventName:      record.EventName,
-			EventSlug:      record.EventSlug,
-			EventVenue:     record.EventVenue,
-			EventAddress:   record.EventAddress,
-			EventStartDate: record.EventStartDate,
-			EventEndDate:   record.EventEndDate,
+			PackageName:     record.PackageName,
+			EventName:       record.EventName,
+			EventSlug:       record.EventSlug,
+			EventVenue:      record.EventVenue,
+			EventAddress:    record.EventAddress,
+			EventStartDate:  record.EventStartDate,
+			EventEndDate:    record.EventEndDate,
+			AdmissionStarts: record.AdmissionStarts,
 		}
 	}
 	return displays, nil

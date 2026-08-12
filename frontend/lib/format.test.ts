@@ -55,7 +55,7 @@ describe("formatDateRange", () => {
 
   it("shows a single date when start and end fall on the same day", () => {
     expect(formatDateRange("2026-09-26T05:00:00Z", "2026-09-26T10:00:00Z")).toMatch(
-      /^26 Sep(t)? 2026$/,
+      /^26 Sept? 2026$/,
     );
   });
 
@@ -63,7 +63,7 @@ describe("formatDateRange", () => {
     const formatted = formatDateRange("2026-09-28T05:00:00Z", "2026-10-02T05:00:00Z");
 
     expect(formatted).toMatch(/Sep/);
-    expect(formatted).toMatch(/Okt/);
+    expect(formatted).toMatch(/Oct/);
   });
 
   it("spells the year on both sides when the range crosses one", () => {
@@ -110,3 +110,19 @@ function toDateTimeLocalForTest(iso: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+// Spec 015 FR-012b. Dates moved to English; money did not, and must not — a
+// locale sweep that catches this formatter renders "Rp 170,400" for an amount
+// Indonesian buyers read as "Rp 170.400", misstating what they are about to pay.
+describe("formatCurrency stays Indonesian", () => {
+  it("uses a dot as the thousands separator", () => {
+    const formatted = formatCurrency("170400.00");
+
+    expect(formatted).toContain("170.400");
+    expect(formatted).not.toContain("170,400");
+  });
+
+  it("still renders whole rupiah without decimals", () => {
+    expect(formatCurrency("150000.00")).toContain("150.000");
+  });
+});

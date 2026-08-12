@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { adminLogin, adminOrders, createSellableEvent } from "../support/api";
+import {
+  adminLogin,
+  adminOrders,
+  createSellableEvent,
+  isoHoursFromNow,
+  updateEvent,
+  updateTicketTypeWindow,
+} from "../support/api";
 import {
   orderStatusOf,
   quotaOf,
@@ -87,9 +94,16 @@ test.describe("Admin console", () => {
   });
 
   test("validating a ticket marks it used, and a second attempt is refused", async ({ page }) => {
+    // The event is RUNNING: validation admits no tolerance (spec 015 FR-014),
+    // so the default +30d seed would make this ticket NOT_YET_VALID and the
+    // scenario would be testing the window rather than the admit transition.
     const { event, ticketType } = await createSellableEvent(token, {
       slug: "uat-validation",
       quota: 5,
+      startDate: isoHoursFromNow(-1),
+      endDate: isoHoursFromNow(6),
+      eventStart: isoHoursFromNow(-1),
+      eventEnd: isoHoursFromNow(6),
     });
 
     const guest = new GuestJourney(page);
@@ -156,6 +170,163 @@ test.describe("Admin console", () => {
     await expect(page.getByRole("button", { name: "Mark used" })).toBeHidden();
   });
 
+
+  /**
+   * Spec 015 US3. A ticket admits on the day its ticket type says, and the gate
+   * refuses it on any other. Validation admits NO tolerance (FR-014), so the
+   * event window an admin sets is the moment admission opens, not showtime.
+   *
+   * These fail against unfixed code, where validation consults no date at all
+   * and reports a plain "Valid" whenever the code exists and is unused.
+   */
+  test("a ticket whose day has not arrived is refused at the gate", async ({ page }) => {
+    // The event — and the ticket — sit entirely in the future.
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-not-yet",
+      quota: 3,
+      startDate: isoHoursFromNow(24),
+      endDate: isoHoursFromNow(72),
+      eventStart: isoHoursFromNow(48),
+      eventEnd: isoHoursFromNow(60),
+    });
+
+    const code = await issueOneTicket(page, event.slug, ticketType.name);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openValidation();
+
+    const form = page.getByRole("form", { name: /validate ticket/i });
+    await form.getByRole("textbox").fill(code);
+    await form.getByRole("button", { name: "Check ticket" }).click();
+
+    await expect(page.getByText("Not yet valid", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Mark used" })).toBeHidden();
+
+    // Refused, and still admissible on the right day.
+    expect(await ticketStatusOf(code)).toBe("ACTIVE");
+  });
+
+  test("a ticket whose day has passed is refused at the gate", async ({ page }) => {
+    // Sales are still open — the two windows are independent (FR-003) — but the
+    // day this ticket admits to is behind us.
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-expired-window",
+      quota: 3,
+      startDate: isoHoursFromNow(-72),
+      endDate: isoHoursFromNow(72),
+      eventStart: isoHoursFromNow(-48),
+      eventEnd: isoHoursFromNow(-24),
+    });
+
+    const code = await issueOneTicket(page, event.slug, ticketType.name);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openValidation();
+
+    const form = page.getByRole("form", { name: /validate ticket/i });
+    await form.getByRole("textbox").fill(code);
+    await form.getByRole("button", { name: "Check ticket" }).click();
+
+    await expect(page.getByText("Expired", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Mark used" })).toBeHidden();
+    expect(await ticketStatusOf(code)).toBe("ACTIVE");
+  });
+
+  // FR-017: hiding the button is not the enforcement. The endpoint must refuse
+  // an out-of-window ticket even when called directly.
+  test("marking an out-of-window ticket used is refused by the endpoint", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-direct-admit",
+      quota: 3,
+      startDate: isoHoursFromNow(24),
+      endDate: isoHoursFromNow(72),
+      eventStart: isoHoursFromNow(48),
+      eventEnd: isoHoursFromNow(60),
+    });
+
+    const code = await issueOneTicket(page, event.slug, ticketType.name);
+
+    const response = await fetch(
+      `${config.apiURL}/admin/tickets/${encodeURIComponent(code)}/use`,
+      { method: "POST", headers: { authorization: `Bearer ${token}` } },
+    );
+
+    expect(response.status).toBe(409);
+    expect(await ticketStatusOf(code)).toBe("ACTIVE");
+  });
+
+
+  /**
+   * Spec 015 FR-005a/b. Containment is enforced in ONE direction: a ticket type
+   * cannot be saved outside its event, but the event can be moved out from under
+   * its ticket types. That asymmetry is deliberate — enforcing both ways
+   * deadlocks a reschedule, because neither the event nor its tickets could move
+   * first. So the event edit succeeds and the console warns instead.
+   */
+  test("rescheduling an event warns about stranded ticket types instead of refusing", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-reschedule",
+      quota: 4,
+      startDate: isoHoursFromNow(24),
+      endDate: isoHoursFromNow(96),
+      eventStart: isoHoursFromNow(48),
+      eventEnd: isoHoursFromNow(60),
+    });
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    // No warning while every window sits inside the event.
+    await admin.openEvent(event.id);
+    await expect(page.getByText(/admits on days the event no longer runs/i)).toBeHidden();
+
+    // Widening can never strand anything.
+    const widened = await updateEvent(token, event.id, {
+      name: `UAT ${event.slug}`,
+      slug: event.slug,
+      status: "PUBLISHED",
+      start_date: isoHoursFromNow(24),
+      end_date: isoHoursFromNow(120),
+    });
+    expect(widened.status).toBe(200);
+
+    await admin.openEvent(event.id);
+    await expect(page.getByText(/admits on days the event no longer runs/i)).toBeHidden();
+
+    // Moving the event away does — and is still allowed.
+    const moved = await updateEvent(token, event.id, {
+      name: `UAT ${event.slug}`,
+      slug: event.slug,
+      status: "PUBLISHED",
+      start_date: isoHoursFromNow(240),
+      end_date: isoHoursFromNow(312),
+    });
+    expect(moved.status).toBe(200);
+
+    await admin.openEvent(event.id);
+    await expect(page.getByText(/admits on days the event no longer runs/i)).toBeVisible();
+    await expect(page.getByText(ticketType.name, { exact: false }).first()).toBeVisible();
+
+    // And the recovery direction now works: the ticket follows the event.
+    await updateTicketTypeWindow(token, ticketType.id, {
+      eventId: event.id,
+      name: ticketType.name,
+      price: "150000.00",
+      quota: 4,
+      salesStart: isoHoursFromNow(-1),
+      salesEnd: isoHoursFromNow(300),
+      eventStart: isoHoursFromNow(264),
+      eventEnd: isoHoursFromNow(288),
+    });
+
+    await admin.openEvent(event.id);
+    await expect(page.getByText(/admits on days the event no longer runs/i)).toBeHidden();
+  });
+
   test("an event with orders cannot be deleted", async ({ page }) => {
     const { event, ticketType } = await createSellableEvent(token, {
       slug: "uat-delete-guard",
@@ -181,3 +352,31 @@ test.describe("Admin console", () => {
     expect(orders.length).toBe(1);
   });
 });
+
+/**
+ * Drives the real purchase journey to a settled order and returns its one
+ * issued ticket code. Arranged entirely through the UI and the real webhook —
+ * writing a ticket row directly would skip the cache invalidation the rest of
+ * the system depends on (Principle VIII).
+ */
+async function issueOneTicket(
+  page: import("@playwright/test").Page,
+  slug: string,
+  ticketName: string,
+): Promise<string> {
+  const guest = new GuestJourney(page);
+  await guest.openTicketSelection(slug);
+  await guest.selectQuantity(ticketName, 1);
+  const orderNumber = await guest.agreeToTermsAndBook();
+  await guest.fillHolder(0, defaultHolder);
+  await guest.payWithQris();
+
+  await settleOrder(orderNumber);
+
+  const [code] = await waitFor(
+    () => ticketCodesFor(orderNumber),
+    (c) => c.length === 1,
+    { what: "the ticket to be issued" },
+  );
+  return code;
+}

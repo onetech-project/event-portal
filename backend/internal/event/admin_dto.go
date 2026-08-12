@@ -66,6 +66,12 @@ type TicketTypeAdminView struct {
 	Sold        int         `json:"sold"`
 	SalesStart  time.Time   `json:"sales_start"`
 	SalesEnd    time.Time   `json:"sales_end"`
+	// EventStart/EventEnd bound when a ticket of this type ADMITS its holder, as
+	// opposed to when it may be bought (spec 015). The admin event page derives
+	// its stranded-window warning by comparing these against the parent event's
+	// own dates, which EventAdminDetail already carries.
+	EventStart time.Time `json:"event_start"`
+	EventEnd   time.Time `json:"event_end"`
 }
 
 // EventRequest is the create/update body for an event. Both verbs take the same
@@ -138,6 +144,12 @@ type TicketTypeRequest struct {
 	Quota       int32       `json:"quota"`
 	SalesStart  time.Time   `json:"sales_start"`
 	SalesEnd    time.Time   `json:"sales_end"`
+	// EventStart is the instant admission OPENS for this ticket, not showtime:
+	// validation admits no tolerance (spec 015 FR-014), so an admin who sets it
+	// to showtime turns away every early arrival. Whether the window sits inside
+	// the parent event's dates is checked by the service, which has the event.
+	EventStart time.Time `json:"event_start"`
+	EventEnd   time.Time `json:"event_end"`
 }
 
 // Validate checks the fields that do not require a database lookup. Whether
@@ -161,6 +173,18 @@ func (r TicketTypeRequest) Validate(requireEventID bool) error {
 	if r.SalesEnd.Before(r.SalesStart) {
 		return apperr.BadRequest(apperr.CodeInvalidDateRange, "sales_end must not be before sales_start.")
 	}
+	if r.EventStart.IsZero() || r.EventEnd.IsZero() {
+		return apperr.BadRequest(apperr.CodeValidation, "event_start and event_end are required.")
+	}
+	// Not before, rather than not at-or-before: equal endpoints are a legal
+	// zero-length window, the same rule an event's own dates follow. Migration
+	// 0014 backfilled every existing ticket type from its parent event, so a
+	// stricter rule here would reject rows the migration itself created.
+	if r.EventEnd.Before(r.EventStart) {
+		return apperr.BadRequest(apperr.CodeInvalidDateRange, "event_end must not be before event_start.")
+	}
+	// Nothing relates the two windows: a ticket may stay on sale after the day it
+	// admits to (spec 015 FR-003).
 	return nil
 }
 

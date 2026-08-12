@@ -27,6 +27,8 @@ const ticketTypes: TicketTypeAdminView[] = [
     sold: 3,
     sales_start: "2026-07-01T00:00:00Z",
     sales_end: "2026-08-31T00:00:00Z",
+    event_start: "2026-09-01T12:00:00Z",
+    event_end: "2026-09-01T23:00:00Z",
   },
   {
     id: DAY_2,
@@ -38,6 +40,8 @@ const ticketTypes: TicketTypeAdminView[] = [
     sold: 0,
     sales_start: "2026-07-01T00:00:00Z",
     sales_end: "2026-08-31T00:00:00Z",
+    event_start: "2026-09-01T12:00:00Z",
+    event_end: "2026-09-01T23:00:00Z",
   },
 ];
 

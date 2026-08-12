@@ -9,9 +9,11 @@ import {
   health,
   metricValue,
   metrics,
+  isoHoursFromNow,
   publicTicketTypes,
   putTerms,
   updateEvent,
+  updateTicketTypeWindow,
 } from "../support/api";
 import { quotaOf, resetDatabase, seedAdmin } from "../support/db";
 import { config } from "../support/env";
@@ -103,6 +105,40 @@ test.describe("Read cache stays invisible to users", () => {
     expect(await quotaOf(ticketType.id)).toBe(5);
     // …and so did what the guest is shown, with no TTL in between.
     expect((await publicTicketTypes(event.slug))[0].quota_remaining).toBe(5);
+  });
+
+
+  // Spec 015 FR-008. The admission window is a guest-visible field on the same
+  // cached DTO as quota, so an edit to it must survive the cache exactly as a
+  // quota movement does.
+  test("an edited admission window is visible on the next read of the ticket list", async () => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-cache-window",
+      quota: 4,
+      startDate: isoHoursFromNow(24),
+      endDate: isoHoursFromNow(96),
+      eventStart: isoHoursFromNow(48),
+      eventEnd: isoHoursFromNow(60),
+    });
+
+    // Warm the ticket list, and record what it says the ticket admits.
+    const before = (await publicTicketTypes(event.slug))[0].event_start;
+    expect(before).toBeTruthy();
+
+    // Move the admission window a day later, inside the same event.
+    await updateTicketTypeWindow(token, ticketType.id, {
+      eventId: event.id,
+      name: ticketType.name,
+      price: "150000.00",
+      quota: 4,
+      salesStart: isoHoursFromNow(-1),
+      salesEnd: isoHoursFromNow(90),
+      eventStart: isoHoursFromNow(72),
+      eventEnd: isoHoursFromNow(84),
+    });
+
+    const after = (await publicTicketTypes(event.slug))[0].event_start;
+    expect(after).not.toBe(before);
   });
 
   test("one event's writes leave another event's cached list alone", async ({ page }) => {

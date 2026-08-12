@@ -240,12 +240,17 @@ func (s *Service) CreateTicketType(ctx context.Context, req TicketTypeRequest) (
 	}
 
 	// Checked explicitly so an unknown event_id is a clear 400 rather than a raw
-	// foreign-key violation.
-	if _, err := s.repo.GetEventByID(ctx, req.EventID); err != nil {
+	// foreign-key violation. The row is kept, not discarded: containment needs
+	// the parent's own dates and this is the only read that would fetch them.
+	parent, err := s.repo.GetEventByID(ctx, req.EventID)
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return TicketTypeAdminView{}, apperr.BadRequest(apperr.CodeEventNotFound,
 				fmt.Sprintf("Event %s does not exist.", req.EventID))
 		}
+		return TicketTypeAdminView{}, err
+	}
+	if err := checkEventWindowWithin(req, parent); err != nil {
 		return TicketTypeAdminView{}, err
 	}
 
@@ -257,6 +262,8 @@ func (s *Service) CreateTicketType(ctx context.Context, req TicketTypeRequest) (
 		Quota:       req.Quota,
 		SalesStart:  req.SalesStart,
 		SalesEnd:    req.SalesEnd,
+		EventStart:  req.EventStart,
+		EventEnd:    req.EventEnd,
 	})
 	if err != nil {
 		return TicketTypeAdminView{}, err
@@ -280,6 +287,25 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 		return TicketTypeAdminView{}, err
 	}
 
+	// Unlike create, this path knows nothing about the parent event — event_id is
+	// immutable and ignored on update, so the request cannot be trusted for it.
+	// Resolve the owning event from the stored row to check containment BEFORE
+	// the write; afterwards the old window is gone and the check is unprovable.
+	existing, err := s.repo.GetTicketTypeAdmin(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return TicketTypeAdminView{}, ticketTypeNotFound()
+	}
+	if err != nil {
+		return TicketTypeAdminView{}, err
+	}
+	parent, err := s.repo.GetEventByID(ctx, existing.EventID)
+	if err != nil {
+		return TicketTypeAdminView{}, err
+	}
+	if err := checkEventWindowWithin(req, parent); err != nil {
+		return TicketTypeAdminView{}, err
+	}
+
 	updated, err := s.repo.UpdateTicketType(ctx, id, AdminTicketTypeParams{
 		Name:        req.Name,
 		Description: normalizeOptionalText(req.Description),
@@ -287,6 +313,8 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 		Quota:       req.Quota,
 		SalesStart:  req.SalesStart,
 		SalesEnd:    req.SalesEnd,
+		EventStart:  req.EventStart,
+		EventEnd:    req.EventEnd,
 	})
 	if errors.Is(err, ErrNotFound) {
 		return TicketTypeAdminView{}, ticketTypeNotFound()
@@ -409,7 +437,32 @@ func toTicketTypeView(row TicketTypeRow, sold int) TicketTypeAdminView {
 		Sold:        sold,
 		SalesStart:  row.SalesStart,
 		SalesEnd:    row.SalesEnd,
+		EventStart:  row.EventStart,
+		EventEnd:    row.EventEnd,
 	}
+}
+
+// checkEventWindowWithin refuses a ticket type whose admission window falls
+// outside its parent event's own dates (spec 015 FR-005).
+//
+// Deliberately one-directional. The mirror-image rule — refusing an EVENT edit
+// that would strand an existing ticket window — is NOT enforced, because the two
+// together deadlock a genuine reschedule: an event running 1-2 August cannot move
+// to 5-6 August while its tickets sit at 1-2, and its tickets cannot move to 5-6
+// while the event still says 1-2. Neither can go first. Leaving the event edit
+// unguarded forces the one order that works — move the event, then its ticket
+// types — and the admin console warns about the windows stranded in between
+// (FR-005a, FR-005b).
+func checkEventWindowWithin(req TicketTypeRequest, parent EventAdminView) error {
+	if req.EventStart.Before(parent.StartDate) || req.EventEnd.After(parent.EndDate) {
+		return apperr.BadRequest(apperr.CodeInvalidDateRange,
+			"event_start and event_end must fall within the event's own dates.").
+			WithData(map[string]any{
+				"event_start_date": parent.StartDate,
+				"event_end_date":   parent.EndDate,
+			})
+	}
+	return nil
 }
 
 // normalizeOptionalText collapses a whitespace-only optional field to nil.

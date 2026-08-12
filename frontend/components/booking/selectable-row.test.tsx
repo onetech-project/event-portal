@@ -7,7 +7,14 @@ import type { PackageSummary, SelectableItem, TicketTypeSummary } from "@/lib/ty
 
 const DAY1 = "11111111-1111-1111-1111-111111111111";
 const BUNDLE = "33333333-3333-3333-3333-333333333333";
-const OPEN = { sales_start: "2020-01-01T00:00:00Z", sales_end: "2030-01-01T00:00:00Z" };
+// The sales window (open) plus the admission window every ticket type now
+// carries (spec 015). Neither constrains the other.
+const OPEN = {
+  sales_start: "2020-01-01T00:00:00Z",
+  sales_end: "2030-01-01T00:00:00Z",
+  event_start: "2026-04-26T09:00:00Z",
+  event_end: "2026-04-26T23:00:00Z",
+};
 const NOW = new Date("2026-04-01T00:00:00Z").getTime();
 
 function ticketItem(overrides: Partial<TicketTypeSummary> = {}): SelectableItem {

@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { EventContentManager } from "@/components/admin/content-block-form";
 import { RichTextEditor } from "@/components/admin/rich-text-editor";
 import { ApiError } from "@/lib/api-client";
+import { strandedTicketTypes } from "@/lib/event-window";
 import { formatCurrency, formatDateTime, toApiDateTime, toDateTimeLocal } from "@/lib/format";
 import {
   useAdminEvent,
@@ -177,6 +178,7 @@ function TicketTypesSection({ event }: Readonly<{ event: EventAdminDetail }>) {
   const remove = useDeleteTicketType(event.id);
 
   const error = remove.error instanceof ApiError ? remove.error : null;
+  const stranded = strandedTicketTypes(event, event.ticket_types);
 
   return (
     <section>
@@ -196,6 +198,24 @@ function TicketTypesSection({ event }: Readonly<{ event: EventAdminDetail }>) {
       {error ? (
         <div className="mb-4">
           <StatusAlert>{error.message}</StatusAlert>
+        </div>
+      ) : null}
+
+      {/* Stranded admission windows (spec 015 FR-005b). Moving or shortening an
+          event is deliberately NOT refused — refusing it would deadlock a
+          reschedule, since the tickets cannot move ahead of the event either.
+          So the save goes through and this names what to fix next. It persists
+          until every window is back inside the event's dates. */}
+      {stranded.length > 0 ? (
+        <div className="mb-4">
+          <StatusAlert tone="info">
+            {stranded.length === 1 ? "This ticket type admits" : "These ticket types admit"}{" "}
+            on days the event no longer runs (
+            {formatDateTime(event.start_date)} — {formatDateTime(event.end_date)}):{" "}
+            <strong>{stranded.map((t) => t.name).join(", ")}</strong>. Edit{" "}
+            {stranded.length === 1 ? "it" : "each of them"} so the admission window falls
+            inside the event.
+          </StatusAlert>
         </div>
       ) : null}
 
@@ -242,6 +262,13 @@ function TicketTypesSection({ event }: Readonly<{ event: EventAdminDetail }>) {
                 <p className="text-xs text-muted-foreground">
                   On sale {formatDateTime(ticketType.sales_start)} —{" "}
                   {formatDateTime(ticketType.sales_end)}
+                </p>
+                {/* The admission window, kept visually distinct from the sales
+                    line above: confusing the two is the whole failure mode this
+                    labelling guards against (spec 015 FR-007). */}
+                <p className="text-xs text-muted-foreground">
+                  Admits {formatDateTime(ticketType.event_start)} —{" "}
+                  {formatDateTime(ticketType.event_end)}
                 </p>
               </div>
 

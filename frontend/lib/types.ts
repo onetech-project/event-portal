@@ -27,8 +27,12 @@ export type TicketTypeSummary = {
   price: string;
   /** The remaining quota. 0 means sold out. */
   quota_remaining: number;
+  /** When this type may be BOUGHT — gates row availability, prints nowhere. */
   sales_start: string;
   sales_end: string;
+  /** When a ticket of this type ADMITS its holder (spec 015). */
+  event_start: string;
+  event_end: string;
 };
 
 /**
@@ -173,6 +177,15 @@ export type PublicOrderItem = {
   quantity: number;
   unit_price: string;
   subtotal: string;
+  /**
+   * The days this line admits on, ascending (spec 015 FR-021a): one for a ticket
+   * line, one per distinct constituent for a bundle.
+   *
+   * A list, not a single date — a bundle admits on every day its parts admit,
+   * and collapsing that to one value hid the second day. Two lines of one order
+   * can differ, which is why this lives here and not on the order's event block.
+   */
+  admission_starts: string[];
 };
 
 /**
@@ -349,8 +362,17 @@ export type TicketTypeAdminView = {
   quota: number;
   /** Derived, read-only sold count. */
   sold: number;
+  /** When this type may be BOUGHT. */
   sales_start: string;
   sales_end: string;
+  /**
+   * When a ticket of this type ADMITS its holder (spec 015). event_start is the
+   * instant admission opens, not showtime — validation admits no tolerance.
+   * Must sit inside the parent event's own dates; the admin event page derives
+   * its stranded-window warning by comparing the two.
+   */
+  event_start: string;
+  event_end: string;
 };
 
 export type EventAdminDetail = EventAdminView & {
@@ -405,11 +427,19 @@ export type AttendeeSummary = {
 };
 
 export type ValidationResult = {
-  result: "VALID" | "ALREADY_USED" | "INVALID";
+  /**
+   * NOT_YET_VALID / EXPIRED are the admission-window outcomes (spec 015). The
+   * server decides which — the not-yet/passed call must never be derived here by
+   * comparing the window to the gate device's own clock.
+   */
+  result: "VALID" | "ALREADY_USED" | "INVALID" | "NOT_YET_VALID" | "EXPIRED";
   ticket_code: string;
   attendee_name: string | null;
   ticket_type_name: string | null;
   event_name: string | null;
+  /** The window this ticket does apply to. Null on INVALID, which discloses nothing. */
+  event_start: string | null;
+  event_end: string | null;
 };
 
 export type MarkUsedResponse = {

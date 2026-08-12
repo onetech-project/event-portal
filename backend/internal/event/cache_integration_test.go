@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/manjo/ticketing/backend/internal/event"
@@ -269,4 +271,124 @@ func publishedEventRequest(slug string) event.EventRequest {
 		BannerURL:   &banner,
 		Status:      "PUBLISHED",
 	}
+}
+
+// --- Ticket-type CRUD invalidation ----------------------------------------
+//
+// This file previously covered only the event catalogue: nothing anywhere
+// asserted that creating, editing or deleting a TICKET TYPE invalidates the
+// per-event ticket list. The only things standing between a ticket-type change
+// and a stale guest-facing list were the generation bump on three admin paths
+// and a 10-minute TTL, neither of which was pinned by a test.
+//
+// Spec 015 makes that gap sharper by adding two guest-visible fields to exactly
+// that cached DTO, so it is closed here rather than widened.
+
+func ticketListCached(t *testing.T, c *cache.Redis, eventID uuid.UUID) bool {
+	t.Helper()
+	_, ok, err := c.Get(context.Background(), cache.TicketTypesPublicKey(eventID))
+	require.NoError(t, err)
+	return ok
+}
+
+func TestCreatingATicketTypeInvalidatesTheEventTicketList(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "cache-tt-create", "PUBLISHED")
+	testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	warm, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-create")
+	require.NoError(t, err)
+	require.Len(t, warm, 1)
+	require.True(t, ticketListCached(t, c, ev.ID), "the read should have populated the key")
+
+	req := validTicketTypeRequest()
+	req.EventID = ev.ID
+	req.Name = "VIP"
+	_, err = svc.CreateTicketType(ctx, req)
+	require.NoError(t, err)
+
+	assert.False(t, ticketListCached(t, c, ev.ID),
+		"the create must orphan the cached list, or the new type stays invisible")
+
+	after, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-create")
+	require.NoError(t, err)
+	assert.Len(t, after, 2)
+}
+
+func TestUpdatingATicketTypeEventWindowInvalidatesTheList(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "cache-tt-window", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	warm, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-window")
+	require.NoError(t, err)
+	require.Len(t, warm, 1)
+	before := warm[0].EventStart
+
+	req := validTicketTypeRequest()
+	req.Name = "Regular"
+	req.EventStart = before.Add(2 * time.Hour)
+	req.EventEnd = before.Add(6 * time.Hour)
+	_, err = svc.UpdateTicketType(ctx, tt.ID, req)
+	require.NoError(t, err)
+
+	assert.False(t, ticketListCached(t, c, ev.ID))
+
+	after, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-window")
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	assert.False(t, after[0].EventStart.Equal(before),
+		"an edited admission window must be visible on the very next guest read (spec 015 FR-008)")
+}
+
+func TestDeletingATicketTypeInvalidatesTheEventTicketList(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "cache-tt-delete", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	warm, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-delete")
+	require.NoError(t, err)
+	require.Len(t, warm, 1)
+	require.True(t, ticketListCached(t, c, ev.ID))
+
+	require.NoError(t, svc.DeleteTicketType(ctx, tt.ID))
+
+	assert.False(t, ticketListCached(t, c, ev.ID))
+
+	after, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-delete")
+	require.NoError(t, err)
+	assert.Empty(t, after)
+}
+
+// One event's ticket-type write must leave another event's cached list alone.
+func TestTicketTypeWritesAreScopedToTheirOwnEvent(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	a := testsupport.SeedEvent(t, pool, "cache-scope-a", "PUBLISHED")
+	b := testsupport.SeedEvent(t, pool, "cache-scope-b", "PUBLISHED")
+	testsupport.SeedTicketType(t, pool, a.ID, "Regular", "150000.00", 10)
+	testsupport.SeedTicketType(t, pool, b.ID, "Regular", "150000.00", 10)
+
+	_, err := svc.TicketTypesForEventSlug(ctx, "cache-scope-a")
+	require.NoError(t, err)
+	_, err = svc.TicketTypesForEventSlug(ctx, "cache-scope-b")
+	require.NoError(t, err)
+	require.True(t, ticketListCached(t, c, a.ID))
+	require.True(t, ticketListCached(t, c, b.ID))
+
+	req := validTicketTypeRequest()
+	req.EventID = a.ID
+	req.Name = "VIP"
+	_, err = svc.CreateTicketType(ctx, req)
+	require.NoError(t, err)
+
+	assert.False(t, ticketListCached(t, c, a.ID), "the written event's list is orphaned")
+	assert.True(t, ticketListCached(t, c, b.ID), "the other event's list is untouched")
 }

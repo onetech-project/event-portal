@@ -3,7 +3,8 @@
 import { CalendarDays, Lock, MapPin, ReceiptText } from "lucide-react";
 
 import { TicketNotch } from "@/components/booking/ticket-notch";
-import { formatCurrency, formatDate, formatDateRange } from "@/lib/format";
+import { formatAdmissionDates } from "@/lib/admission-dates";
+import { formatCurrency, formatDateRange } from "@/lib/format";
 import type { TicketOrderDetail } from "@/lib/types";
 
 /**
@@ -24,19 +25,39 @@ export function OrderSummaryPanel({
   order,
   beforeTotal,
   afterTotal,
-  showFeeBreakdown = true,
+  phase,
 }: {
   order: TicketOrderDetail;
   beforeTotal?: React.ReactNode;
   afterTotal?: React.ReactNode;
   /**
-   * Itemize Ticket Total + the per-fee rows above the grand total. The
-   * registration phase passes false: while the forms are being filled the
-   * summary carries the grand total alone (constitution v2.1.0 fee
-   * presentation, spec 011 FR-016).
+   * Which step is rendering. This selects BOTH the itemized fee rows and the
+   * figure on the closing line, because after spec 011 FR-016 the two are one
+   * decision (constitution v4.0.0, fee presentation):
+   *
+   * - `registration` — the pre-fee subtotal, no fee rows, and a note saying the
+   *   fees arrive at the next step.
+   * - `payment` — the fee-inclusive total, itemized above it.
+   *
+   * Deliberately has no default. Its predecessor was a `showFeeBreakdown`
+   * boolean, and the moment the flag also began selecting the headline figure
+   * that name described half of what it did.
    */
-  showFeeBreakdown?: boolean;
+  phase: "registration" | "payment";
 }) {
+  // FR-016: the forms step shows the pre-fee subtotal, and the fee-inclusive
+  // total first appears on the payment step, where the breakdown explaining it
+  // appears with it.
+  //
+  // `??` and not `||`: "0.00" is a real subtotal — a free order must render
+  // Rp 0, not fall through to the total. Only a null subtotal takes the
+  // fallback, and those orders predate fees, so their stored total already
+  // excludes fees and the fallback is exact rather than approximate (FR-016c).
+  const headline =
+    phase === "registration"
+      ? (order.subtotal ?? order.total_amount)
+      : order.total_amount;
+
   return (
     <div className="rounded-xl border bg-card">
       {/* Icon chip + title (Figma 206-3145). NOTE: spec 011 FR-013 also calls
@@ -80,10 +101,7 @@ export function OrderSummaryPanel({
               />
               <span>
                 <span className="block font-medium">
-                  {formatDateRange(
-                    order.event.start_date,
-                    order.event.end_date,
-                  )}
+                  {formatDateRange(order.event.start_date, order.event.end_date)}
                 </span>
                 <span className="block text-xs text-muted-foreground">
                   Gate opens at {gateTime(order.event.start_date)}
@@ -106,8 +124,15 @@ export function OrderSummaryPanel({
                       ? item.package_name
                       : item.ticket_type_name}
                   </p>
-                  <p className="text-muted-foreground text-xs font-normal">
-                    {formatDate(order.event.start_date)}
+                  {/* Every day this line admits on (spec 015 FR-010, FR-021a).
+                      Two lines of one order can differ — a Day 1 pass and a Day 2
+                      pass — and a bundle names both of its days on one line,
+                      which reading a single collapsed date used to hide. */}
+                  <p
+                    data-testid="order-line-date"
+                    className="text-muted-foreground text-xs font-normal"
+                  >
+                    {formatAdmissionDates(item.admission_starts)}
                   </p>
                 </span>
                 <span className="flex shrink-0 flex-col items-end gap-1">
@@ -123,11 +148,12 @@ export function OrderSummaryPanel({
           </ul>
         </div>
         {/* Payment breakdown (spec 011 FR-016): Ticket Total then the frozen
-            per-fee rows (collectively the "Tax & Service Fee"). The
-            registration phase opts out entirely (showFeeBreakdown=false) and
-            orders that predate fees (null subtotal) have nothing to itemize —
-            both collapse to the grand total alone. */}
-        {showFeeBreakdown && order.subtotal !== null ? (
+            per-fee rows (collectively the "Tax & Service Fee"). This belongs to
+            the payment phase alone — the registration phase shows no fee in any
+            form, neither itemized here nor folded into the closing figure. An
+            order predating fees (null subtotal) has nothing to itemize either,
+            and collapses to its total. */}
+        {phase === "payment" && order.subtotal !== null ? (
           <dl className="space-y-1.5 pb-3 text-sm bg-slate-50 p-3 rounded-lg border-slate-500">
             <div className="flex items-baseline justify-between">
               <dt className="text-muted-foreground">Subtotal ({order.items.length} items)</dt>
@@ -158,12 +184,19 @@ export function OrderSummaryPanel({
             <p className="text-xs font-semibold uppercase text-muted-foreground">
               Total payment
             </p>
+            {/* The heading above stays "Total payment" on both phases
+                (FR-016a); this line is what distinguishes them. On the forms
+                step the old "Includes all taxes and fees" would sit above a
+                fee-free number and understate what the guest is about to be
+                charged. */}
             <p className="text-xs text-muted-foreground">
-              Includes all taxes and fees
+              {phase === "registration"
+                ? "Excludes taxes and fees"
+                : "Includes all taxes and fees"}
             </p>
           </div>
-          <p className="text-xl font-bold text-brand">
-            {formatCurrency(order.total_amount)}
+          <p data-testid="order-total-figure" className="text-xl font-bold text-brand">
+            {formatCurrency(headline)}
           </p>
         </div>
 

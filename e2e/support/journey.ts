@@ -251,4 +251,8 @@ export class AdminConsole {
   async openEvents(): Promise<void> {
     await this.page.goto("/admin/events");
   }
+
+  async openEvent(eventId: string): Promise<void> {
+    await this.page.goto(`/admin/events/${eventId}`);
+  }
 }

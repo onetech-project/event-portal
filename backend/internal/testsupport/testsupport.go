@@ -90,7 +90,8 @@ type TicketType struct {
 	Quota   int32
 }
 
-// SeedTicketType inserts a ticket type whose sales window is currently open.
+// SeedTicketType inserts a ticket type whose sales window is currently open. Its
+// event (admission) window matches SeedEvent's +30d/+31d, so containment holds.
 func SeedTicketType(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, price string, quota int32) TicketType {
 	t.Helper()
 
@@ -99,8 +100,9 @@ func SeedTicketType(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name st
 
 	var id uuid.UUID
 	err = pool.QueryRow(context.Background(), `
-		INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end)
-		VALUES ($1, $2, $3, $4, now() - interval '1 day', now() + interval '29 days')
+		INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end, event_start, event_end)
+		VALUES ($1, $2, $3, $4, now() - interval '1 day', now() + interval '29 days',
+		        now() + interval '30 days', now() + interval '31 days')
 		RETURNING id`, eventID, name, amount, quota).Scan(&id)
 	require.NoError(t, err)
 
@@ -115,8 +117,8 @@ func SeedTicketTypeWindow(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, n
 	var id uuid.UUID
 	price := decimal.NewFromInt(100000)
 	err := pool.QueryRow(context.Background(), `
-		INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end, event_start, event_end)
+		VALUES ($1, $2, $3, $4, $5, $6, now() + interval '30 days', now() + interval '31 days')
 		RETURNING id`, eventID, name, price, quota, start, end).Scan(&id)
 	require.NoError(t, err)
 

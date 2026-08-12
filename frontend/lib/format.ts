@@ -1,3 +1,8 @@
+// Stays id-ID while dates move to English (spec 015 FR-012b). id-ID renders
+// "Rp 170.400", where the dot is a THOUSANDS separator; en-GB renders
+// "Rp 170,400" for the same amount. Both are legible, but the buyers this
+// product serves read dot-as-thousands, and a locale sweep that catches this
+// formatter would misstate the sum they are about to pay.
 const currencyFormatter = new Intl.NumberFormat("id-ID", {
   style: "currency",
   currency: "IDR",
@@ -6,7 +11,12 @@ const currencyFormatter = new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 2,
 });
 
-const dateTimeFormatter = new Intl.DateTimeFormat("id-ID", {
+// Dates render in English, day-first (spec 015 FR-012a). en-GB rather than en-US
+// because it keeps the day-first order id-ID already produced, so nothing shifts
+// position in the layouts built around it.
+//
+// Money and counts below deliberately stay on id-ID — see formatCurrency.
+const dateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
   dateStyle: "medium",
   timeStyle: "short",
 });
@@ -38,9 +48,9 @@ export function formatDateRange(start: string, end: string): string {
     return `${formatDateTime(start)} - ${formatDateTime(end)}`;
   }
 
-  const day = new Intl.DateTimeFormat("id-ID", { day: "numeric" });
-  const dayMonth = new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "short" });
-  const full = new Intl.DateTimeFormat("id-ID", {
+  const day = new Intl.DateTimeFormat("en-GB", { day: "numeric" });
+  const dayMonth = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" });
+  const full = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
     year: "numeric",
@@ -101,7 +111,7 @@ export function formatDate(timestamp: string | null | undefined): string {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return timestamp;
 
-  return new Intl.DateTimeFormat("id-ID", { dateStyle: "medium" }).format(date);
+  return new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(date);
 }
 
 /**

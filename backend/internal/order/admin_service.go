@@ -27,6 +27,11 @@ type TicketTypeDisplay struct {
 	EventAddress   string
 	EventStartDate time.Time
 	EventEndDate   time.Time
+	// AdmissionStarts are the days this line admits on — one for a ticket type.
+	// Distinct from the event's dates above: a multi-day event's Day 1 and Day 2
+	// passes share an event but admit on different days, and an order line must
+	// name its own (spec 015).
+	AdmissionStarts []time.Time
 }
 
 // EventLookup is the contract the order read views need from the event domain,
@@ -60,6 +65,9 @@ type PackageDisplay struct {
 	EventAddress   string
 	EventStartDate time.Time
 	EventEndDate   time.Time
+	// Every distinct day the bundle admits on, derived from its constituents
+	// (spec 015 FR-021a). A single span cannot express Day 1 + Day 2.
+	AdmissionStarts []time.Time
 }
 
 // OrderFilter narrows the admin order list. A nil field means "no filter".

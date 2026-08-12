@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { ValidationResult } from "@/lib/types";
 
@@ -19,13 +20,27 @@ const VERDICTS = {
     label: "Invalid",
     className: "bg-destructive/15 text-destructive",
   },
+  // The admission-window outcomes (spec 015). Amber like ALREADY_USED rather
+  // than destructive: the ticket is genuine, it is simply the wrong day, and the
+  // holder should be directed rather than turned away as a forgery.
+  NOT_YET_VALID: {
+    label: "Not yet valid",
+    className: "bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-100",
+  },
+  EXPIRED: {
+    label: "Expired",
+    className: "bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-100",
+  },
 } as const;
 
 /**
  * The door-side verdict for a scanned or typed ticket code.
  *
  * "Mark used" appears only for a VALID ticket: the transition is irreversible, so
- * the action is never offered where it could not legitimately apply.
+ * the action is never offered where it could not legitimately apply. That covers
+ * the admission-window outcomes for free — a ticket presented on the wrong day is
+ * never VALID — though the endpoint refuses them independently (spec 015 FR-017),
+ * because hiding a button is not enforcement.
  */
 export function ValidationResultCard({
   result,
@@ -66,6 +81,17 @@ export function ValidationResultCard({
               <dt className="text-muted-foreground">Event</dt>
               <dd className="font-medium">{result.event_name}</dd>
             </div>
+            {/* Naming the window the ticket DOES apply to lets the admin direct
+                the holder to the right day instead of only refusing them
+                (spec 015 FR-016). */}
+            {result.event_start && result.event_end ? (
+              <div className="flex justify-between gap-4">
+                <dt className="text-muted-foreground">Admits</dt>
+                <dd className="font-medium">
+                  {formatDateTime(result.event_start)} — {formatDateTime(result.event_end)}
+                </dd>
+              </div>
+            ) : null}
           </dl>
         ) : (
           <p className="text-sm text-muted-foreground">

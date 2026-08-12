@@ -22,7 +22,8 @@ func sampleTickets(n int) []notification.TicketDetail {
 			TicketTypeName: "Regular",
 			EventName:      "Jazz Night 2026",
 			Venue:          "Balai Sarbini",
-			StartDate:      time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC),
+			EventStart:     time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC),
+			EventEnd:       time.Date(2026, 9, 1, 23, 0, 0, 0, time.UTC),
 		})
 	}
 	return out
@@ -105,4 +106,34 @@ func TestRenderQRRejectsAnEmptyCode(t *testing.T) {
 	_, err := notification.RenderQR("")
 
 	require.Error(t, err)
+}
+
+// Spec 015 FR-011: the printed ticket carries the ticket TYPE's admission
+// window, not the parent event's opening date. Before this feature every ticket
+// of a multi-day event printed the same day.
+func TestFormatTicketWindowCollapsesASameDayWindow(t *testing.T) {
+	start := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 2, 23, 0, 0, 0, time.UTC)
+
+	got := notification.FormatTicketWindow(start, end)
+
+	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC - 23:00 UTC", got,
+		"a window inside one day reads as one date with a time range, not two near-identical datetimes")
+}
+
+func TestFormatTicketWindowSpellsOutAMultiDayWindow(t *testing.T) {
+	start := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC)
+
+	got := notification.FormatTicketWindow(start, end)
+
+	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC - Fri, 04 Sep 2026 23:00 UTC", got)
+}
+
+func TestFormatTicketWindowPrintsASingleInstantOnce(t *testing.T) {
+	at := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+
+	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC", notification.FormatTicketWindow(at, at))
+	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC", notification.FormatTicketWindow(at, time.Time{}),
+		"a zero end is not printed as a range")
 }

@@ -71,6 +71,11 @@ export const ticketTypeFormSchema = z
     quota: z.number().int().min(0, "Remaining quota must not be negative."),
     salesStart: trimmedRequired("Sales start"),
     salesEnd: trimmedRequired("Sales end"),
+    // The admission window, independent of the sales window above (spec 015
+    // FR-003). Containment against the parent event's dates is the server's
+    // call — this form has no access to them.
+    eventStart: trimmedRequired("Event start"),
+    eventEnd: trimmedRequired("Event end"),
   })
   .superRefine((value, ctx) => {
     if (new Date(value.salesEnd) < new Date(value.salesStart)) {
@@ -78,6 +83,13 @@ export const ticketTypeFormSchema = z
         code: "custom",
         path: ["salesEnd"],
         message: "Sales must not end before they start.",
+      });
+    }
+    if (new Date(value.eventEnd) < new Date(value.eventStart)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["eventEnd"],
+        message: "The event must not end before it starts.",
       });
     }
   });

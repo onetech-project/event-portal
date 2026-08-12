@@ -83,6 +83,8 @@ describe("ticketTypeFormSchema", () => {
       quota: 100,
       salesStart: "2026-07-01T00:00",
       salesEnd: "2026-08-31T00:00",
+      eventStart: "2026-09-01T09:00",
+      eventEnd: "2026-09-01T23:00",
     };
   }
 
@@ -123,5 +125,67 @@ describe("ticketTypeFormSchema", () => {
 
     expect(result.success).toBe(false);
     expect(JSON.stringify(result.error?.issues)).toContain("salesEnd");
+  });
+});
+
+// The admission window (spec 015): distinct from the sales window above, and
+// required, because a ticket that does not say when it admits cannot be
+// validated at the gate.
+describe("ticketTypeFormSchema event window", () => {
+  function validTicketType() {
+    return {
+      name: "Day 2 Pass",
+      price: "150000",
+      quota: 100,
+      salesStart: "2026-07-01T00:00",
+      salesEnd: "2026-08-31T00:00",
+      eventStart: "2026-09-02T09:00",
+      eventEnd: "2026-09-02T23:00",
+    };
+  }
+
+  it("requires an event start", () => {
+    expect(
+      ticketTypeFormSchema.safeParse({ ...validTicketType(), eventStart: "" }).success,
+    ).toBe(false);
+  });
+
+  it("requires an event end", () => {
+    expect(
+      ticketTypeFormSchema.safeParse({ ...validTicketType(), eventEnd: "" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an event that ends before it starts", () => {
+    const result = ticketTypeFormSchema.safeParse({
+      ...validTicketType(),
+      eventEnd: "2026-09-01T09:00",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes("eventEnd"))).toBe(true);
+    }
+  });
+
+  it("accepts an event window that starts and ends at the same instant", () => {
+    expect(
+      ticketTypeFormSchema.safeParse({
+        ...validTicketType(),
+        eventEnd: "2026-09-02T09:00",
+      }).success,
+    ).toBe(true);
+  });
+
+  // FR-003: the two windows are unrelated. A ticket may still be on sale after
+  // the day it admits to, and this form must not second-guess that.
+  it("does not relate the event window to the sales window", () => {
+    expect(
+      ticketTypeFormSchema.safeParse({
+        ...validTicketType(),
+        eventStart: "2026-01-01T09:00",
+        eventEnd: "2026-01-01T23:00",
+      }).success,
+    ).toBe(true);
   });
 });

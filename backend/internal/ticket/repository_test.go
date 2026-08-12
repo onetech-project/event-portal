@@ -29,6 +29,19 @@ func newTicketFixture(t *testing.T) ticketFixture {
 
 	ev := testsupport.SeedEvent(t, pool, "gate-night", "PUBLISHED")
 	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	// This fixture models a gate, so the event is RUNNING: SeedEvent's default
+	// +30d/+31d would make every ticket NOT_YET_VALID and turn the whole
+	// validation suite into a test of the window check alone (spec 015).
+	// Individual window scenarios override this.
+	_, err := pool.Exec(context.Background(), `
+		UPDATE events SET start_date = now() - interval '1 hour', end_date = now() + interval '1 hour'
+		WHERE id = $1`, ev.ID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `
+		UPDATE ticket_types SET event_start = now() - interval '1 hour', event_end = now() + interval '1 hour'
+		WHERE id = $1`, tt.ID)
+	require.NoError(t, err)
 	ord := testsupport.SeedOrder(t, pool, "ORD-TICKETS", "PAID")
 	attendee := testsupport.SeedAttendee(t, pool, ord.ID, tt.ID, "Budi Santoso", "budi@example.com")
 

@@ -104,7 +104,8 @@ func TestTicketEndpointReturnsTypesWithRemainingQuota(t *testing.T) {
 	require.Len(t, types, 1)
 	first := types[0]
 	assert.ElementsMatch(t,
-		[]string{"id", "name", "description", "price", "quota_remaining", "sales_start", "sales_end"},
+		[]string{"id", "name", "description", "price", "quota_remaining", "sales_start", "sales_end",
+			"event_start", "event_end"},
 		keysOf(first))
 	assert.Nil(t, first["description"],
 		"an unset remark is null, so the card falls back to the standard notice")

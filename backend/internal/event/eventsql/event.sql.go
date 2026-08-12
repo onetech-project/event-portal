@@ -287,9 +287,9 @@ func (q *Queries) CreatePackageComponent(ctx context.Context, arg CreatePackageC
 }
 
 const createTicketType = `-- name: CreateTicketType :one
-INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 `
 
 type CreateTicketTypeParams struct {
@@ -300,6 +300,8 @@ type CreateTicketTypeParams struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 }
 
 type CreateTicketTypeRow struct {
@@ -311,6 +313,8 @@ type CreateTicketTypeRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }
@@ -324,6 +328,8 @@ func (q *Queries) CreateTicketType(ctx context.Context, arg CreateTicketTypePara
 		arg.Quota,
 		arg.SalesStart,
 		arg.SalesEnd,
+		arg.EventStart,
+		arg.EventEnd,
 	)
 	var i CreateTicketTypeRow
 	err := row.Scan(
@@ -335,6 +341,8 @@ func (q *Queries) CreateTicketType(ctx context.Context, arg CreateTicketTypePara
 		&i.Quota,
 		&i.SalesStart,
 		&i.SalesEnd,
+		&i.EventStart,
+		&i.EventEnd,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -650,7 +658,7 @@ func (q *Queries) GetPublishedEventBySlug(ctx context.Context, slug string) (Get
 }
 
 const getTicketTypeAdmin = `-- name: GetTicketTypeAdmin :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 FROM ticket_types
 WHERE id = $1
 `
@@ -664,6 +672,8 @@ type GetTicketTypeAdminRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }
@@ -680,6 +690,8 @@ func (q *Queries) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (GetTick
 		&i.Quota,
 		&i.SalesStart,
 		&i.SalesEnd,
+		&i.EventStart,
+		&i.EventEnd,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -687,7 +699,7 @@ func (q *Queries) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (GetTick
 }
 
 const getTicketTypeByID = `-- name: GetTicketTypeByID :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
 FROM ticket_types
 WHERE id = $1
 `
@@ -701,6 +713,8 @@ type GetTicketTypeByIDRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 }
 
 func (q *Queries) GetTicketTypeByID(ctx context.Context, id uuid.UUID) (GetTicketTypeByIDRow, error) {
@@ -715,6 +729,8 @@ func (q *Queries) GetTicketTypeByID(ctx context.Context, id uuid.UUID) (GetTicke
 		&i.Quota,
 		&i.SalesStart,
 		&i.SalesEnd,
+		&i.EventStart,
+		&i.EventEnd,
 	)
 	return i, err
 }
@@ -897,6 +913,45 @@ func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
 	return items, nil
 }
 
+const listPackageAdmissionStartsByIDs = `-- name: ListPackageAdmissionStartsByIDs :many
+SELECT DISTINCT pt.package_id, tt.event_start
+FROM package_tickets pt
+JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+WHERE pt.package_id = ANY($1::uuid[])
+ORDER BY pt.package_id, tt.event_start
+`
+
+type ListPackageAdmissionStartsByIDsRow struct {
+	PackageID  uuid.UUID
+	EventStart time.Time
+}
+
+// Every distinct day each bundle admits on, one row per (package, start).
+//
+// A separate query rather than an array_agg on the display row: aggregates lose
+// their type in this sqlc configuration (MIN() generated interface{} until it was
+// cast), and two plain queries keep every generated field a bare time.Time. Both
+// tables are event-domain, so the join stays inside the boundary.
+func (q *Queries) ListPackageAdmissionStartsByIDs(ctx context.Context, ids []uuid.UUID) ([]ListPackageAdmissionStartsByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listPackageAdmissionStartsByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPackageAdmissionStartsByIDsRow{}
+	for rows.Next() {
+		var i ListPackageAdmissionStartsByIDsRow
+		if err := rows.Scan(&i.PackageID, &i.EventStart); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPackageComponentsByPackageIDs = `-- name: ListPackageComponentsByPackageIDs :many
 SELECT pt.package_id, pt.ticket_type_id, pt.quantity AS quantity_per_unit,
        tt.name AS ticket_type_name, tt.price, tt.quota, tt.sales_start, tt.sales_end
@@ -970,6 +1025,10 @@ type ListPackageDisplaysByIDsRow struct {
 
 // Both tables belong to this domain, so the JOIN stays inside the boundary the
 // order domain is not allowed to cross itself.
+//
+// Carries no admission window: a bundle admits on every day its parts admit, and
+// a single collapsed span cannot say that (spec 015 FR-021a). The days come from
+// ListPackageAdmissionStartsByIDs below.
 func (q *Queries) ListPackageDisplaysByIDs(ctx context.Context, ids []uuid.UUID) ([]ListPackageDisplaysByIDsRow, error) {
 	rows, err := q.db.Query(ctx, listPackageDisplaysByIDs, ids)
 	if err != nil {
@@ -1258,25 +1317,32 @@ func (q *Queries) ListPublishedPackagesByEventSlug(ctx context.Context, slug str
 const listTicketTypeDisplaysByIDs = `-- name: ListTicketTypeDisplaysByIDs :many
 SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
-       e.start_date AS event_start_date, e.end_date AS event_end_date
+       e.start_date AS event_start_date, e.end_date AS event_end_date,
+       tt.event_start AS ticket_event_start, tt.event_end AS ticket_event_end
 FROM ticket_types tt
 JOIN events e ON e.id = tt.event_id
 WHERE tt.id = ANY($1::uuid[])
 `
 
 type ListTicketTypeDisplaysByIDsRow struct {
-	ID             uuid.UUID
-	Name           string
-	EventName      string
-	EventSlug      string
-	EventVenue     string
-	EventAddress   string
-	EventStartDate time.Time
-	EventEndDate   time.Time
+	ID               uuid.UUID
+	Name             string
+	EventName        string
+	EventSlug        string
+	EventVenue       string
+	EventAddress     string
+	EventStartDate   time.Time
+	EventEndDate     time.Time
+	TicketEventStart time.Time
+	TicketEventEnd   time.Time
 }
 
 // Both tables belong to this domain, so the JOIN stays inside the boundary the
 // order domain is not allowed to cross itself.
+// event_start_date/event_end_date are the EVENT's dates; ticket_event_start/
+// ticket_event_end are this ticket type's own admission window (spec 015). Both
+// pairs travel together because the order page names the event AND each line's
+// own day, and they are not interchangeable.
 func (q *Queries) ListTicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UUID) ([]ListTicketTypeDisplaysByIDsRow, error) {
 	rows, err := q.db.Query(ctx, listTicketTypeDisplaysByIDs, ids)
 	if err != nil {
@@ -1295,6 +1361,8 @@ func (q *Queries) ListTicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UU
 			&i.EventAddress,
 			&i.EventStartDate,
 			&i.EventEndDate,
+			&i.TicketEventStart,
+			&i.TicketEventEnd,
 		); err != nil {
 			return nil, err
 		}
@@ -1399,7 +1467,7 @@ func (q *Queries) ListTicketTypeQuotasByIDs(ctx context.Context, ids []uuid.UUID
 
 const listTicketTypesAdmin = `-- name: ListTicketTypesAdmin :many
 
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY created_at ASC
@@ -1414,6 +1482,8 @@ type ListTicketTypesAdminRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }
@@ -1437,6 +1507,8 @@ func (q *Queries) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID) (
 			&i.Quota,
 			&i.SalesStart,
 			&i.SalesEnd,
+			&i.EventStart,
+			&i.EventEnd,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -1451,7 +1523,7 @@ func (q *Queries) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID) (
 }
 
 const listTicketTypesByEventID = `-- name: ListTicketTypesByEventID :many
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY price ASC, name ASC
@@ -1466,6 +1538,8 @@ type ListTicketTypesByEventIDRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 }
 
 func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUID) ([]ListTicketTypesByEventIDRow, error) {
@@ -1486,6 +1560,8 @@ func (q *Queries) ListTicketTypesByEventID(ctx context.Context, eventID uuid.UUI
 			&i.Quota,
 			&i.SalesStart,
 			&i.SalesEnd,
+			&i.EventStart,
+			&i.EventEnd,
 		); err != nil {
 			return nil, err
 		}
@@ -1751,9 +1827,10 @@ func (q *Queries) UpdatePackage(ctx context.Context, arg UpdatePackageParams) (U
 
 const updateTicketType = `-- name: UpdateTicketType :one
 UPDATE ticket_types
-SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7, updated_at = now()
+SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7,
+    event_start = $8, event_end = $9, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 `
 
 type UpdateTicketTypeParams struct {
@@ -1764,6 +1841,8 @@ type UpdateTicketTypeParams struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 }
 
 type UpdateTicketTypeRow struct {
@@ -1775,6 +1854,8 @@ type UpdateTicketTypeRow struct {
 	Quota       int32
 	SalesStart  time.Time
 	SalesEnd    time.Time
+	EventStart  time.Time
+	EventEnd    time.Time
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 }
@@ -1790,6 +1871,8 @@ func (q *Queries) UpdateTicketType(ctx context.Context, arg UpdateTicketTypePara
 		arg.Quota,
 		arg.SalesStart,
 		arg.SalesEnd,
+		arg.EventStart,
+		arg.EventEnd,
 	)
 	var i UpdateTicketTypeRow
 	err := row.Scan(
@@ -1801,6 +1884,8 @@ func (q *Queries) UpdateTicketType(ctx context.Context, arg UpdateTicketTypePara
 		&i.Quota,
 		&i.SalesStart,
 		&i.SalesEnd,
+		&i.EventStart,
+		&i.EventEnd,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

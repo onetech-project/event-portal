@@ -42,7 +42,7 @@ On both screens — the holder forms (`…/orders/{ORD-…}`) and the QR screen 
 
 - Event name + date shown. (FR-013's Booking ID and FR-014's per-unit price were removed from the panel by hand to match the design — restore them or amend the spec; the UI and the spec currently disagree.)
 - Each line: name, `x{qty}`, and line subtotal.
-- Registration phase: NO itemized fee rows (clarified 2026-08-06, constitution v2.1.0) — only "Total Payment" with its "includes all taxes and fees" note.
+- Registration phase: NO fees at all (clarified 2026-08-12, narrowing 2026-08-06) — no itemized rows AND no fee-inclusive figure. "Total Payment" keeps its heading but shows the pre-fee subtotal, and its note now reads that taxes and fees are added at the next step (FR-016, FR-016a). Display only: the stored total and frozen fee lines are untouched (FR-016b). Orders with a null subtotal fall back to the stored total (FR-016c).
 - QR (awaiting-payment) phase breakdown: "Ticket Total" = pre-fee subtotal; one row per fee (`PPN (11%)`, `Admin Fee` — collectively the spec's "Tax & Service Fee" per the recorded label mapping); "Total Payment" = subtotal + Σ fees (the spec's "Grand Total Payment").
 - QRIS shown selected, not changeable (registration phase).
 
@@ -96,9 +96,41 @@ Run against a database that **already holds** orders, holders, and packages — 
 4. DB: `\d packages` shows `is_active boolean NOT NULL DEFAULT true` and no `status` column or CHECK.
 5. Tickets are untouched (the exclusion FR-029 spells out): `\d tickets` still shows `status VARCHAR(50) … CHECK (status IN ('ACTIVE','USED','REVOKED'))`. Scan a valid pass at `POST /api/v1/admin/tickets/validate` → `VALID`; scan the same pass again → `ALREADY_USED`, **not** the same answer as a revoked pass. A boolean here would have collapsed those two into one.
 
+## Scenario J — The form step shows the raw subtotal (FR-016, FR-016a – FR-016c / SC-005, SC-005a)
+
+**Setup matters more than the steps here.** With no fee configured, `total_amount` equals
+`subtotal` and every step below passes against unfixed code (research R27). Arrange a fee
+first, through the admin API — never by writing the `fees` table.
+
+1. Admin → `POST /api/v1/admin/fees` with a percent fee (e.g. `PPN`, `PERCENT`, `11`).
+   Confirm `GET /api/v1/admin/fees` lists it. **This step is the scenario**; skipping it
+   makes everything after it vacuous.
+2. Book any order — e.g. one ticket at Rp 500.000 — and land on the holder forms.
+3. **Expect** the panel's closing line to read `Total Payment` over **Rp 500.000**, with
+   the sub-line stating that taxes and fees are added at the next step. **Expect** no
+   itemized rows, and **expect** Rp 555.000 to appear nowhere on the page. Against unfixed
+   code the figure is Rp 555.000 and the sub-line claims it includes fees.
+4. `GET /ticket/order/:order_id` → `subtotal: "500000.00"`, `total_amount: "555000.00"`.
+   Both were already there before this change; only which one is rendered moved.
+5. Fill the forms, Continue to Payment. On `/checkout`, **expect** `Subtotal (1 item)`
+   Rp 500.000, a `PPN (11%)` row of Rp 55.000, and `Total Payment` **Rp 555.000** — this
+   screen is unchanged.
+6. **The invariant (SC-005a)**: the QRIS amount presented, and the gateway's gross amount,
+   are **Rp 555.000** — the guest is charged the fee-inclusive total exactly as before.
+   The form step displayed a subtotal; it did not reprice the order.
+7. Settle and open the receipt email → the itemized breakdown and Rp 555.000 total are
+   unchanged.
+8. **Legacy fallback (FR-016c)**: an order with `subtotal: null` (predating fees) still
+   renders a figure on the form step — its stored total, which for such orders already
+   excludes fees. It must not render blank or Rp 0.
+9. **Zero-price edge (research R28)**: an order whose subtotal is genuinely `"0.00"`
+   renders `Rp 0` on the form step, not the fee-inclusive total. This is what separates
+   nullish coalescing from a falsy check, and a `||` implementation fails here.
+
 ## Automated checks
 
 - Backend: `cd backend && ./scripts/test.sh ./...` plus `go build ./... && go vet ./...`. The notification suite encodes the single-recipient contract directly: its fixture's two holders both have addresses that are NOT the buyer's, so a regression back to fan-out fails immediately rather than passing vacuously.
 - Frontend: `./node_modules/.bin/vitest run` and `./node_modules/.bin/next build` (see project memory `frontend-toolchain-invocation.md`; node is not on PATH and there is no `test` script). `checkout/page.test.tsx` covers the QR screen and the FR-021 forwards; `booking-stage.test.ts` pins one rail stage per address.
 - Track A starting signal: the two existing "Time's Up" tests (`page.test.tsx:157`, `checkout/page.test.tsx:236`) **assert a `repeat order` link that FR-024 deletes**, so they fail the moment the modal lands — that failure is expected, not a regression.
+- **Rev. 4 (Track C) additions**: the panel component test gains one case per phase plus the `null` and `"0.00"` subtotal cases, all on a fixture where `subtotal ≠ total_amount` — the existing fixture at `order-summary-panel.test.tsx:25-27` sets them equal and must not be reused unmodified. `page.test.tsx:541` asserts `/includes all taxes and fees/i` on the form step and **fails the moment Track C lands** — that failure is expected, not a regression. The e2e scenario (Principle VIII) creates a fee via `POST /api/v1/admin/fees` before booking, then asserts the form-step figure, the checkout figure, and the charged amount; on unfixed code it must be seen red first, which on a fee-less database it would not be.
 - **Rev. 3 additions**: the modal's three sealed dismissal routes (Escape / backdrop / scroll) and its single-button content belong in a component test, not only in Scenario G — a manual-only check will not survive a Base UI upgrade that adds a dismissal reason. Assert on the *page behind* too: the forms must still be in the DOM with their typed values, which is what distinguishes FR-022 from the old full-page swap. On the backend, the `packages.is_active` conversion needs a test that an inactive package is absent from the public booking list, since that filter is the only thing standing between a retired bundle and a guest buying it.

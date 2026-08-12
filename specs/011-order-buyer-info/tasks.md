@@ -2,14 +2,15 @@
 
 **Input**: Design documents from `/specs/011-order-buyer-info/`
 
-**Prerequisites**: plan.md (rev. 3), spec.md (Clarifications 2026-08-06 + 2026-08-07), research.md R1–R24, data-model.md (§1–§6 shipped `000012`; §7 target `000013`), contracts/{checkout-and-delivery,schema-revision}.md, quickstart.md
+**Prerequisites**: plan.md (rev. 4), spec.md (Clarifications 2026-08-06 + 2026-08-07 + 2026-08-12), research.md R1–R28, data-model.md (§1–§6 shipped `000012`; §7 shipped `000013`; §8 no schema impact), contracts/{checkout-and-delivery,schema-revision,fee-presentation}.md, quickstart.md
 
 **Tests**: The spec's success criteria and the existing suites demand test updates; test tasks below are updates/rewrites of existing suites (no new TDD scaffolding was requested). Toolchain: node is not on PATH — run `tsc`/vitest per project memory (`frontend-toolchain-invocation.md`); vitest binary is at `frontend/node_modules/.bin/vitest`.
 
 **Organization**:
 
 - **Phases 1–7 (T001–T030) are DELIVERED** — FR-001 – FR-021, through commit `01ce8fe`. Phases 3–6 map to US1 (P1) forms without buyer card, US2 (P2) validation gating, US3 (P2) banner + delivery, US4 (P3) order summary. Left in place as the record; do not re-run.
-- **Phases 8–12 (T031–T051) are rev. 3**, added by the 2026-08-07 clarifications: **Track A** = Phase 8, User Story 6 (P2), the end-of-journey modal; **Track B** = Phases 9–11, the schema revision (FR-025 – FR-029), which maps to **no user story** and therefore carries no story label, per the spec's own scope note below FR-021.
+- **Phases 8–12 (T031–T051) are rev. 3 and are DELIVERED**, added by the 2026-08-07 clarifications: **Track A** = Phase 8, User Story 6 (P2), the end-of-journey modal; **Track B** = Phases 9–11, the schema revision (FR-025 – FR-029), which maps to **no user story** and therefore carries no story label, per the spec's own scope note below FR-021.
+- **Phases 13–14 (T052–T060) are rev. 4** and are **the only outstanding work in this feature**: **Track C**, the form-step fee presentation (FR-016, FR-016a – FR-016c), under constitution **v4.0.0**. It belongs to **User Story 4 (P3)**, whose Phase 6 shipped the summary card this revision corrects.
 
 ## Phase 1: Setup (migration + schema truth)
 
@@ -186,6 +187,66 @@ Two independent tracks from the 2026-08-07 clarifications. **They share no file*
 
 ---
 
+# Rev. 4 (2026-08-12) — added after T001–T051 shipped
+
+One track. **Track C** corrects what the form-filling step's Order Summary shows: the
+fee-inclusive `total_amount` becomes the pre-fee `subtotal`, and the "Includes all taxes
+and fees" note becomes a statement that fees are added at the next step.
+
+**Design sources**: plan.md rev. 4, research R25–R28, data-model.md §8,
+contracts/fee-presentation.md, quickstart Scenario J. Constitution **v4.0.0** — the
+fee-presentation bullet was amended for this track before planning, so Track C implements
+the current rule rather than proposing one.
+
+**Read this before writing a single test.** Nothing in the repository currently
+distinguishes the two figures, so the obvious version of every assertion below passes
+against unfixed code (research R27):
+
+- `frontend/components/order/order-summary-panel.test.tsx:25-27` sets `total_amount` and
+  `subtotal` to the same value with `fees: []`.
+- `e2e/support/db.ts:44-45` **TRUNCATEs the `fees` table** between runs. Migration
+  `000010` seeds `PPN 11%` and `Admin Fee 1200`, but the reset deletes them, so every e2e
+  order books with an empty fee set and `total_amount == subtotal`.
+
+Every task below therefore arranges data where `subtotal ≠ total_amount`, or it asserts
+nothing. This is also why T053 comes before T054.
+
+---
+
+## Phase 13: User Story 4 (cont.) — The Form Step Shows the Raw Subtotal (Priority: P3) — Track C
+
+**Goal**: On the holder-forms step the Order Summary's closing figure is the ticket
+subtotal, its sub-line says fees are added at the next step, and no fee-inclusive number
+appears anywhere on that route. The checkout step is unchanged. Nothing about the amount
+charged moves.
+
+**Independent Test**: Quickstart Scenario J — with a real fee configured, the form step
+shows Rp 500.000 and the checkout step shows Rp 555.000, and the guest is charged
+Rp 555.000.
+
+**Track C is frontend + e2e only. No API, no migration, no backend file.** `subtotal` and
+`fees` have shipped on `GET /ticket/order/:order_id` since `000010` (research R25); any
+backend diff in a Track C commit is out of scope and should be challenged in review.
+
+- [X] T052 [US4] Add a fee-arranging helper to `e2e/support/api.ts` alongside the existing admin helpers: `createFee(token, { name, feeType, value })` posting to `POST /api/v1/admin/fees` (handler at `backend/internal/order/admin_handler.go:34`; response shape at `backend/internal/order/dto.go:424`). It MUST go through the API, never a direct `fees` INSERT — AGENTS.md forbids arranging order/payment state in the database from a test, and the API route is also what keeps cached reads honest. Note in a comment that `e2e/support/db.ts:44-45` truncates `fees`, so this helper must be called per-test rather than relying on the migration seed.
+- [X] T053 [US4] Add the acceptance scenario to `e2e/specs/guest-purchase.spec.ts`, near the existing Order Summary tests (~`:237`, `:337`), using `createFee` from T052 **before** booking. Assert three things, in order: (a) on the holder-forms route the panel's closing figure equals the order's `subtotal` and the fee-inclusive total appears **nowhere** on the page; (b) after Continue to Payment, `/checkout` shows the itemized rows and the fee-inclusive `total_amount`; (c) **the charged amount is the fee-inclusive total** — read it from the payment instruction, not from the screen (SC-005a). **Run this against unfixed code and confirm it fails** (Principle VIII, and constitution Governance: "a regression test never seen red proves nothing"). If it passes before T054, the fixture has no fee and the test is asserting nothing — go back to T052.
+- [X] T054 [US4] `frontend/components/order/order-summary-panel.tsx`: replace the `showFeeBreakdown?: boolean` prop with `phase: "registration" | "payment"`, **no default** (research R26 — the flag now selects the headline figure as well as the rows, so a boolean named for the rows alone misdescribes it, and a default would reintroduce the ambiguity at a new name). Gate the breakdown block (`:135-148`) on `phase === "payment"`. At `:171` render `phase === "registration" ? (order.subtotal ?? order.total_amount) : order.total_amount` — **nullish coalescing, not `||`** (research R28: `"0.00"` is a real subtotal that must render as `Rp 0`, and only a `null` subtotal takes the fallback per FR-016c). At `:167` replace "Includes all taxes and fees" with the next-step wording on the registration phase, keeping the existing note on payment; the `Total payment` heading at `:163-165` stays on **both** phases (FR-016a). Update the component's doc comment, which currently cites constitution v2.1.0 and spec 011 FR-016 as "grand total alone".
+- [X] T055 [US4] Update both call sites in the same change as T054 — the prop rename breaks the build otherwise: `frontend/components/order/visitor-form.tsx:314` `showFeeBreakdown={false}` → `phase="registration"` (and correct the adjacent comment, which cites constitution v2.1.0's superseded rule), and `frontend/app/(public)/events/[slug]/orders/[orderNumber]/checkout/page.tsx:222` gains an explicit `phase="payment"` where it previously relied on the default. Confirm with `grep -rn "showFeeBreakdown" frontend/` that nothing references the old prop, tests included.
+- [X] T056 [P] [US4] `frontend/components/order/order-summary-panel.test.tsx`: the shared `order()` fixture at `:21-47` sets `total_amount` and `subtotal` equal with `fees: []` — give it parameters (or add a second builder) so a case can set `subtotal: "500000.00"`, `total_amount: "555000.00"`, `fees: [{ name: "PPN (11%)", amount: "55000.00" }]`. Add four cases: registration renders the subtotal and not the total; payment renders the total and the itemized rows; `subtotal: null` on registration falls back to the total (FR-016c); `subtotal: "0.00"` on registration renders `Rp 0` and **not** the total — that last one is the case a `||` implementation fails, so it is the reason it exists. Leave the six existing admission-window cases untouched; add `phase` to their renders as required by T054's signature.
+- [X] T057 [P] [US4] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/page.test.tsx`: the assertion at `:541` (`/includes all taxes and fees/i`) asserts the superseded rule and **fails the moment T054 lands** — that failure is expected. Rewrite the surrounding block: `HELD` must carry `subtotal ≠ total_amount` (the comment at `:537` already notes `HELD` has a non-null subtotal and a fee, so verify it and widen the gap if they are equal), then assert the rendered figure is the subtotal, that the fee-inclusive amount is absent from the whole document, that the note states fees are added at the next step, and that `Total payment` is still the heading. Keep the existing "no itemized rows on this step" assertions — they remain correct.
+- [X] T058 [P] [US4] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/checkout/page.test.tsx`: behaviour here is unchanged, so this task is about pinning it. The breakdown assertions at `:130-141` and the pre-fee-order case at `:149-158` must keep passing against the explicit `phase="payment"` from T055. Add one assertion that this screen shows the **fee-inclusive** total while the form step does not, so a future edit cannot quietly make both screens agree again.
+
+**Checkpoint**: T053's e2e scenario, red before T054, now passes; quickstart Scenario J walks end to end; the charged amount is unchanged.
+
+---
+
+## Phase 14: Polish & Verification (rev. 4)
+
+- [X] T059 [P] Sweep for surfaces that still name the superseded rule: `grep -rn "taxes and fees\|showFeeBreakdown\|v2\.1\.0" frontend/ specs/011-order-buyer-info/ --exclude-dir=.next`. Expected survivors are the checkout phase's own note, the historical Clarifications bullet in `spec.md:20`, and the archived 2.1.0 report inside `.specify/memory/constitution.md` — those are records and stay. Anything else is a stale comment. **No governance document needs an edit**: the v4.0.0 amendment already verified `grep -i fee` returns nothing in `PRD.md` or `ARCHITECTURE.md`, and `SCHEMA.md`'s `fees`/`order_fees` tables are untouched by a display rule.
+- [X] T060 Full verification. Frontend: `tsc --noEmit` and `./node_modules/.bin/vitest run` (node is not on PATH and there is no `test` script — project memory `frontend-toolchain-invocation.md`). Backend: `cd backend && go vet ./... && ./scripts/test.sh ./...` — expected to be **entirely untouched**; any backend failure means Track C exceeded its scope. e2e: `cd e2e && npm test`, and again with `E2E_CACHE_ENABLED=false` (Principle VII's kill switch). Then walk quickstart **Scenario J** against a database with a real fee configured, confirming step 6's invariant directly: the QRIS amount and the gateway gross amount are the fee-inclusive total, unchanged by this track.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Rev. 1–2 (delivered)
@@ -211,13 +272,46 @@ Two independent tracks from the 2026-08-07 clarifications. **They share no file*
 - Track B: T042 ‖ the T040→T041 chain; T048 ‖ T049 ‖ the T044→T047 backend chain; T050 ‖ everything after T039.
 - **Across tracks**: all of Track A ‖ all of Track B.
 
+### Rev. 4 — one track, one forced ordering
+
+```text
+T052 (e2e helper)
+  └─→ T053 (e2e scenario, MUST be seen RED here)
+        └─→ T054 (component) ──┬─→ T056 [P] panel tests
+              T055 (call sites)│   T057 [P] forms-page test
+              — same change ───┘   T058 [P] checkout-page test
+                                     └─→ T059 [P] sweep
+                                           └─→ T060 full verification
+```
+
+- **Parallel**: T056 ‖ T057 ‖ T058 (three different test files, no shared fixture). T059 ‖ T060's frontend leg.
+- **Not parallel**: T054 and T055 are one change — the prop rename breaks the build between them, so they land together rather than as two commits.
+
 ### Ordering constraints that are NOT preferences
 
 - T037's eight steps are forced by PostgreSQL, not chosen (no uuid→integer cast; FK must drop before the key changes; backfill before `NOT NULL`) — see data-model §7.2.
 - T038 must fix the seeded ids because a partial index predicate cannot hold a subquery.
 - T034 after T032 **and** T033 — deleting a still-imported component breaks the build.
+- **T053 before T054**, and observed failing. This is the one ordering in rev. 4 that is not a build constraint but a correctness one: on the current fixture data (no fees anywhere) the scenario would pass against unfixed code, so writing it afterwards would produce a test that never could have caught the defect. Constitution Principle VIII and the Governance section both require it to be seen red.
+- **T052 before T053** — the scenario has nothing to assert until a fee exists, because `e2e/support/db.ts:44-45` truncates the table the migration seeds.
 
 ## Implementation Strategy
+
+### Rev. 4 — the whole of the remaining work
+
+Track C is nine tasks and two lines of production code. It is a complete increment on its
+own, depends on nothing outstanding, and can ship the moment T060 is green.
+
+**The order is the strategy.** Write the failing e2e scenario first (T052 → T053) and
+watch it fail. Everything after that is mechanical: two lines in one component, two call
+sites, three test files. If T053 passes before T054, stop — the fixture has no fee and
+nothing is being tested.
+
+**What would make this go wrong**, in the order it is likely: (1) shipping without the
+e2e scenario, leaving a display rule with no coverage on a covered flow; (2) writing the
+tests on the existing equal-value fixtures, producing assertions that pass either way;
+(3) using `||` instead of `??` and breaking free orders; (4) touching the backend, which
+would mean the change stopped being a display rule.
 
 ### Rev. 3 — recommended order
 
