@@ -186,6 +186,24 @@ export async function updateEvent(
   });
 }
 
+/**
+ * Both deletes are guarded server-side and both return their refusal rather
+ * than throwing, because the refusal is the interesting answer: an event whose
+ * ticket types have been bought against is undeletable by design
+ * (CodeEventHasOrders, admin_service.go), so a teardown running against a
+ * deployment has to read the status and fall back to unpublishing.
+ */
+export async function deleteEvent(token: string, eventId: string): Promise<ApiResult<unknown>> {
+  return request(`/admin/events/${eventId}`, { method: "DELETE", token });
+}
+
+export async function deleteTicketType(
+  token: string,
+  ticketTypeId: string,
+): Promise<ApiResult<unknown>> {
+  return request(`/admin/ticket-types/${ticketTypeId}`, { method: "DELETE", token });
+}
+
 export async function putTerms(token: string, eventId: string, content: string): Promise<void> {
   const { status, data } = await request(`/admin/events/${eventId}/terms`, {
     method: "PUT",

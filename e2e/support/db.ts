@@ -20,6 +20,18 @@ const { Pool } = pg;
 let pool: pg.Pool | undefined;
 
 export function db(): pg.Pool {
+  if (config.remote) {
+    // Not a missing feature. The first thing anything here does is TRUNCATE, and
+    // a deployment shares its database with data nobody wants back. The uat
+    // profile therefore has no connection string at all (support/env.ts), and
+    // this refusal makes an accidental import fail loudly at the call rather
+    // than quietly at `new URL(undefined)` three frames down.
+    throw new Error(
+      "support/db.ts is unavailable when E2E_TARGET=uat: the suite has no database access " +
+        "to a deployment. Assert through the API instead — see uat/README or support/uat.ts.",
+    );
+  }
+
   if (!pool) {
     assertDisposableDatabase(config.databaseURL);
     pool = new Pool({ connectionString: config.databaseURL, max: 4 });

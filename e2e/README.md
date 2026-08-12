@@ -54,6 +54,60 @@ npx playwright test --grep "Guest purchase"        # one describe block
 npx playwright test specs/cache-refresh.spec.ts    # one file
 ```
 
+### Configuration
+
+Every knob lives in [`support/env.ts`](support/env.ts) with defaults that match a
+stock local stack, so no configuration is needed to run. An optional `.env`
+(gitignored, see [`.env.example`](.env.example)) overrides them; the shell
+overrides that in turn, so `E2E_SLOW_MO=500 npm test` still wins over the file.
+
+## Running against a deployment (UAT)
+
+A second profile drives an environment the suite does **not** own — no database,
+no server lifecycle, real data alongside whatever this run creates.
+
+```bash
+cp .env.uat.example .env.uat     # fill in URLs, admin, PG_CALLBACK_TOKEN
+npm run test:uat                 # the full journey, settlement included
+npm run test:uat:preflight       # reads only, zero residue — for a fresh deploy
+npm run report:uat
+```
+
+It is a different config ([`playwright.uat.config.ts`](playwright.uat.config.ts)),
+a different spec directory ([`uat/`](uat/)) and a different env file, selected by
+`E2E_TARGET=uat`. Everything else — page objects, API client, notification
+builder — is shared with the local suite, so a scenario here runs the same code
+against a different address rather than a second implementation that could drift.
+
+**What is different, and why:**
+
+- **No database.** [`support/db.ts`](support/db.ts) refuses to open a pool under
+  this profile, and there is no `E2E_DATABASE_URL` to set. Its first act is
+  always `TRUNCATE`, which is correct for a disposable stack and a catastrophe
+  on a shared one. A preflight test asserts that refusal.
+- **Assertions go through the API.** Quota via the public ticket list, status
+  and totals via the guest order read, and the console's own view via
+  `/admin/orders`. Ticket codes are not exposed by any endpoint — they reach the
+  guest by email — so issuance is proven by its consequences (the SSE push that
+  moves the browser to the confirmation screen, and the order reaching `PAID`)
+  rather than by reading `tickets`.
+- **Nothing may assume an empty world.** No list-length assertions, no "the
+  first event". Every read is scoped to the slug this run created.
+- **`PG_CALLBACK_TOKEN` is a real secret there.** It is the whole of the payment
+  callback's authentication, so it is what lets the suite settle an order the
+  way the gateway would. `.env.uat` is gitignored; keep it that way.
+
+**What it leaves behind.** Everything is prefixed `uat-e2e-<runId>` and named
+`[E2E <runId>]`. Teardown deletes what it can, but an event with orders against
+it is undeletable by design (`CodeEventHasOrders`), so those are **unpublished**
+instead — invisible to the public catalogue, still present for referential
+integrity. Each run therefore leaves one draft event, one paid order, and one
+email to a reserved `@example.com` address. Sweep them periodically:
+
+```sql
+SELECT slug, status FROM events WHERE slug LIKE 'uat-e2e-%';
+```
+
 ### Watching the flow
 
 `E2E_SLOW_MO` pauses that many milliseconds before every browser operation, so

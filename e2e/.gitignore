@@ -1,6 +1,10 @@
 node_modules/
+.env
+.env.uat
 test-results/
+test-results-uat/
 playwright-report/
+playwright-report-uat/
 blob-report/
 .playwright/
 *.log

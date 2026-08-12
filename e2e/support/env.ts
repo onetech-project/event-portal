@@ -7,26 +7,96 @@
  * DATABASE_URL has no production-shaped default — see assertDisposableDatabase.
  */
 
+/**
+ * Which stack this run drives.
+ *
+ *   local (default) — the disposable stack this file's defaults describe. The
+ *                     suite owns it: it starts the servers and TRUNCATEs the
+ *                     database between tests.
+ *   uat             — a deployed environment. The suite owns nothing there: no
+ *                     database, no server lifecycle, and data it creates lives
+ *                     alongside real data. See uat/ and support/uat.ts.
+ *
+ * The two profiles read different files precisely so that pointing one at the
+ * other's stack takes a deliberate act rather than an edited line.
+ */
+export type Target = "local" | "uat";
+
+const target = (process.env.E2E_TARGET ?? "local").trim().toLowerCase();
+if (target !== "local" && target !== "uat") {
+  throw new Error(`E2E_TARGET must be "local" or "uat", got "${target}".`);
+}
+const remote = target === "uat";
+
+/**
+ * An optional env file fills in whatever the shell did not set. Node's own
+ * loader leaves existing process.env entries alone, so precedence is
+ * shell > file > the defaults below — `E2E_SLOW_MO=500 playwright test` still
+ * wins over a file that says otherwise.
+ *
+ * Resolved against this file rather than the cwd so it is found no matter where
+ * the runner was invoked from. Absent file is not an error for the local
+ * profile, whose defaults already describe a stock local stack; the uat profile
+ * has no defaults to fall back on and fails on the first missing value instead.
+ */
+try {
+  process.loadEnvFile(new URL(remote ? "../.env.uat" : "../.env", import.meta.url));
+} catch {
+  // No file — the local defaults stand, and `required` speaks for the uat profile.
+}
+
 function env(name: string, fallback: string): string {
   const value = process.env[name];
   return value === undefined || value === "" ? fallback : value;
 }
 
+/**
+ * A value the uat profile cannot invent. There is no sensible default for
+ * "which deployment" or "what is its callback token", and a wrong guess would
+ * point a browser at localhost and report the deployment healthy.
+ */
+function required(name: string): string {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === "") {
+    throw new Error(
+      `${name} must be set for E2E_TARGET=uat. Copy e2e/.env.uat.example to e2e/.env.uat and fill it in.`,
+    );
+  }
+  return value;
+}
+
+/** Required against a deployment, defaulted against the local stack. */
+function targeted(name: string, localFallback: string): string {
+  return remote ? required(name) : env(name, localFallback);
+}
+
 export const config = {
+  /** "local" | "uat" — see Target above. */
+  target: target as Target,
+  /** True when this run drives a deployment it does not own. */
+  remote,
+
   /** Where the browser goes. */
-  frontendURL: env("E2E_FRONTEND_URL", "http://localhost:3100"),
+  frontendURL: targeted("E2E_FRONTEND_URL", "http://localhost:3100"),
   /** Where the API answers, including the /api/v1 prefix. */
-  apiURL: env("E2E_API_URL", "http://localhost:8100/api/v1"),
+  apiURL: targeted("E2E_API_URL", "http://localhost:8100/api/v1"),
   /** Same host without the prefix, for /healthz and /metrics. */
-  apiRootURL: env("E2E_API_ROOT_URL", "http://localhost:8100"),
+  apiRootURL: targeted("E2E_API_ROOT_URL", "http://localhost:8100"),
   /** The Manjo gateway stub this run drives payment through. */
   gatewayStubURL: env("E2E_GATEWAY_URL", "http://localhost:8101"),
 
-  databaseURL: env(
-    "E2E_DATABASE_URL",
-    "postgres://ticketing:ticketing@localhost:5433/ticketing?sslmode=disable",
-  ),
-  redisURL: env("E2E_REDIS_URL", "redis://localhost:6380/0"),
+  /**
+   * Empty on the uat profile, and deliberately not overridable there: the suite
+   * has no database access to a deployment, and support/db.ts refuses to open a
+   * pool at all. Every uat assertion goes through the API.
+   */
+  databaseURL: remote
+    ? ""
+    : env(
+        "E2E_DATABASE_URL",
+        "postgres://ticketing:ticketing@localhost:5433/ticketing?sslmode=disable",
+      ),
+  redisURL: remote ? "" : env("E2E_REDIS_URL", "redis://localhost:6380/0"),
 
   /**
    * The bearer token inbound notifications must present, which must match the
@@ -37,8 +107,13 @@ export const config = {
    * `internal/payment/manjo.go`). So this is the whole of what the suite needs
    * to impersonate the gateway, and presenting the wrong one is how the
    * rejection path gets proven.
+   *
+   * Against a deployment this is a real secret and has no default: it must be
+   * the deployment's own PG_CALLBACK_TOKEN, or settlement cannot be driven at
+   * all. Locally it is a fixture value that playwright.config.ts hands to the
+   * API it starts, so both sides agree by construction.
    */
-  pgCallbackToken: env("E2E_PG_CALLBACK_TOKEN", "uat-e2e-callback-token"),
+  pgCallbackToken: targeted("E2E_PG_CALLBACK_TOKEN", "uat-e2e-callback-token"),
 
   /**
    * The vestigial key pair. The gateway sends these in the session-open body as
@@ -51,17 +126,23 @@ export const config = {
   jwtSecret: env("E2E_JWT_SECRET", "uat-e2e-jwt-secret-long-enough-for-hs256"),
 
   admin: {
-    email: env("E2E_ADMIN_EMAIL", "uat@example.com"),
-    password: env("E2E_ADMIN_PASSWORD", "uat-password-2026"),
+    email: targeted("E2E_ADMIN_EMAIL", "uat@example.com"),
+    password: targeted("E2E_ADMIN_PASSWORD", "uat-password-2026"),
     /**
      * bcrypt of the password above, generated once with golang.org/x/crypto/bcrypt
      * at the default cost. Precomputed so seeding needs no bcrypt dependency and
      * no Go toolchain at test time. Regenerate if the password changes.
+     *
+     * Local only: it exists to seed the admin row. A deployment's admin already
+     * exists and is signed in to, never created, so the uat profile leaves this
+     * empty rather than inviting someone to paste a hash it would never use.
      */
-    passwordHash: env(
-      "E2E_ADMIN_PASSWORD_HASH",
-      "$2a$10$CgCyUAfad.aCAZ4LTyZL1..x1ptoMhQ3GpEMnyy.BKDzV/aFMYVpu",
-    ),
+    passwordHash: remote
+      ? ""
+      : env(
+          "E2E_ADMIN_PASSWORD_HASH",
+          "$2a$10$CgCyUAfad.aCAZ4LTyZL1..x1ptoMhQ3GpEMnyy.BKDzV/aFMYVpu",
+        ),
   },
 
   /** Whether this run expects the Redis cache to be on. */
@@ -74,8 +155,20 @@ export const config = {
    */
   slowMo: Math.max(0, Number(env("E2E_SLOW_MO", "0")) || 0),
 
-  /** Set when the suite starts the servers itself (the default). */
-  manageServers: env("E2E_MANAGE_SERVERS", "true") === "true",
+  /**
+   * Set when the suite starts the servers itself (the default locally).
+   *
+   * Forced off against a deployment: those servers are already running and are
+   * not this runner's to own.
+   */
+  manageServers: !remote && env("E2E_MANAGE_SERVERS", "true") === "true",
+
+  /**
+   * Prefix for every event, ticket type and buyer this run creates on a
+   * deployment, so its residue is identifiable at a glance and greppable later.
+   * Only the uat profile uses it — locally the database is emptied instead.
+   */
+  uatPrefix: env("E2E_UAT_PREFIX", "uat-e2e"),
 } as const;
 
 /**
