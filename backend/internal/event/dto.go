@@ -41,6 +41,12 @@ type TicketTypeSummary struct {
 	QuotaRemaining int32       `json:"quota_remaining"`
 	SalesStart     time.Time   `json:"sales_start"`
 	SalesEnd       time.Time   `json:"sales_end"`
+	// EventStart/EventEnd say when a ticket of this type ADMITS its holder, as
+	// opposed to when it may be bought (spec 015). Distinct per ticket type: a
+	// multi-day event's Day 1 and Day 2 passes carry different windows even
+	// though they share a parent event.
+	EventStart time.Time `json:"event_start"`
+	EventEnd   time.Time `json:"event_end"`
 }
 
 // EventDetail is the guest-facing detail response (GET /api/v1/event/:id).

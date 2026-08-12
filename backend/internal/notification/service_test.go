@@ -93,7 +93,8 @@ func holderTicket(code, name, email string) notification.TicketDetail {
 		TicketTypeName: "Regular",
 		EventName:      "Jazz Night 2026",
 		Venue:          "Balai Sarbini",
-		StartDate:      time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC),
+		EventStart:     time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC),
+		EventEnd:       time.Date(2026, 9, 1, 23, 0, 0, 0, time.UTC),
 	}
 }
 

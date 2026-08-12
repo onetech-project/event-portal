@@ -36,6 +36,13 @@ func validTicketTypeRequest() event.TicketTypeRequest {
 		Quota:      100,
 		SalesStart: time.Now(),
 		SalesEnd:   time.Now().Add(29 * 24 * time.Hour),
+		// The admission window, independent of the sales window above (spec 015).
+		// Deliberately an hour INSIDE the +30d/+31d span that validEventRequest and
+		// testsupport.SeedEvent both use: those compute their bounds from a
+		// different clock reading than this one, so an exactly-equal window would
+		// land microseconds outside the parent and trip containment.
+		EventStart: time.Now().Add(30*24*time.Hour + time.Hour),
+		EventEnd:   time.Now().Add(31*24*time.Hour - time.Hour),
 	}
 }
 
@@ -169,4 +176,49 @@ func TestTicketTypeRequestRejectsAMissingName(t *testing.T) {
 	req.Name = " "
 
 	assert.Equal(t, apperr.CodeValidation, errCodeOf(t, req.Validate(true)))
+}
+
+// --- Ticket type event window (spec 015) ----------------------------------
+
+func TestTicketTypeRequestRequiresAnEventWindow(t *testing.T) {
+	for field, mutate := range map[string]func(*event.TicketTypeRequest){
+		"event_start": func(r *event.TicketTypeRequest) { r.EventStart = time.Time{} },
+		"event_end":   func(r *event.TicketTypeRequest) { r.EventEnd = time.Time{} },
+	} {
+		t.Run(field, func(t *testing.T) {
+			req := validTicketTypeRequest()
+			mutate(&req)
+			assert.Equal(t, apperr.CodeValidation, errCodeOf(t, req.Validate(true)))
+		})
+	}
+}
+
+func TestTicketTypeRequestRejectsAnInvertedEventWindow(t *testing.T) {
+	req := validTicketTypeRequest()
+	req.EventEnd = req.EventStart.Add(-time.Hour)
+
+	assert.Equal(t, apperr.CodeInvalidDateRange, errCodeOf(t, req.Validate(true)))
+}
+
+// Equal endpoints are deliberately legal, matching the rule an event's own dates
+// already follow (TestEventRequestAllowsASingleInstantEvent). Migration 0014
+// backfills every pre-existing ticket type from its parent event, so a stricter
+// rule here would have failed that backfill on any zero-length event.
+func TestTicketTypeRequestAllowsASingleInstantEventWindow(t *testing.T) {
+	req := validTicketTypeRequest()
+	req.EventEnd = req.EventStart
+
+	require.NoError(t, req.Validate(true))
+}
+
+// The two windows are independent in both directions (FR-003): a ticket may stay
+// on sale after the day it admits to, and may go on sale long before it.
+func TestTicketTypeRequestLeavesTheSalesAndEventWindowsUnrelated(t *testing.T) {
+	req := validTicketTypeRequest()
+	req.EventStart = time.Now().Add(24 * time.Hour)
+	req.EventEnd = time.Now().Add(48 * time.Hour)
+	req.SalesStart = time.Now().Add(72 * time.Hour)
+	req.SalesEnd = time.Now().Add(96 * time.Hour)
+
+	require.NoError(t, req.Validate(true), "sales entirely after the event window is not this layer's business")
 }

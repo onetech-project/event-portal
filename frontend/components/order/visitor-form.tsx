@@ -309,9 +309,10 @@ function OrderSummary({
     <aside className="lg:sticky lg:top-6">
       <OrderSummaryPanel
         order={order}
-        // Form step: grand total only, no fee itemization (constitution v2.1.0
-        // fee presentation, spec 011 FR-016).
-        showFeeBreakdown={false}
+        // Form step: the pre-fee subtotal, no fees in any form — neither
+        // itemized rows nor a fee-inclusive figure (constitution v4.0.0 fee
+        // presentation, spec 011 FR-016).
+        phase="registration"
         beforeTotal={
           <div>
             <p className="text-xs font-semibold uppercase text-muted-foreground">

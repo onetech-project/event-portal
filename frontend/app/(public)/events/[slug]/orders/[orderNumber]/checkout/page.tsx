@@ -221,6 +221,10 @@ export function CheckoutView({
         <aside className="lg:sticky lg:top-6">
           <OrderSummaryPanel
             order={data}
+            // The fee-inclusive total and the breakdown that explains it both
+            // belong to this step, and only this step (spec 011 FR-016). Stated
+            // rather than defaulted — see the prop's own note.
+            phase="payment"
             afterTotal={
               <>
                 <QrisInstructions

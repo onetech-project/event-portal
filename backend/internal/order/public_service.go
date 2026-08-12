@@ -299,11 +299,15 @@ func publicItems(items []OrderItemRecord, displays lineDisplays) []PublicOrderIt
 			// A package line is shown whole, under the bundle's own name and its
 			// own price — never decomposed into its constituent ticket types.
 			line.Kind = LineKindPackage
-			name := displays.packages[id.UUID].PackageName
+			display := displays.packages[id.UUID]
+			name := display.PackageName
 			line.PackageName = &name
+			line.AdmissionStarts = display.AdmissionStarts
 		} else if id := item.Ref.TicketTypeID; id.Valid {
-			name := displays.ticketTypes[id.UUID].TicketTypeName
+			display := displays.ticketTypes[id.UUID]
+			name := display.TicketTypeName
 			line.TicketTypeName = &name
+			line.AdmissionStarts = display.AdmissionStarts
 		}
 
 		out = append(out, line)

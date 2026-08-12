@@ -34,10 +34,18 @@ func (a eventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []uuid.U
 
 	displays := make(map[uuid.UUID]order.TicketTypeDisplay, len(records))
 	for id, record := range records {
+		// A faithful copy of every field, matching cmd/api/adapters.go. A double
+		// that silently drops fields agrees with an implementation that never
+		// populated them.
 		displays[id] = order.TicketTypeDisplay{
-			TicketTypeName: record.TicketTypeName,
-			EventName:      record.EventName,
-			EventSlug:      record.EventSlug,
+			TicketTypeName:  record.TicketTypeName,
+			EventName:       record.EventName,
+			EventSlug:       record.EventSlug,
+			EventVenue:      record.EventVenue,
+			EventAddress:    record.EventAddress,
+			EventStartDate:  record.EventStartDate,
+			EventEndDate:    record.EventEndDate,
+			AdmissionStarts: record.AdmissionStarts,
 		}
 	}
 	return displays, nil
@@ -51,9 +59,14 @@ func (a eventLookupAdapter) PackageDisplays(ctx context.Context, ids []uuid.UUID
 	displays := make(map[uuid.UUID]order.PackageDisplay, len(records))
 	for id, record := range records {
 		displays[id] = order.PackageDisplay{
-			PackageName: record.PackageName,
-			EventName:   record.EventName,
-			EventSlug:   record.EventSlug,
+			PackageName:     record.PackageName,
+			EventName:       record.EventName,
+			EventSlug:       record.EventSlug,
+			EventVenue:      record.EventVenue,
+			EventAddress:    record.EventAddress,
+			EventStartDate:  record.EventStartDate,
+			EventEndDate:    record.EventEndDate,
+			AdmissionStarts: record.AdmissionStarts,
 		}
 	}
 	return displays, nil

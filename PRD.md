@@ -29,7 +29,8 @@ The goal of this MVP is validation, not scalability. High availability, microser
 ### 1.4. Functional Requirements
 **Event & Ticket Types:**
 *   Admin can CRUD events (Name, Slug, Description, Venue, Address, Start/End Date, Banner, Status).
-*   Admin can create multiple ticket types per event (Name, Price, Quota, Sales Start/End).
+*   Admin can create multiple ticket types per event (Name, Price, Quota, Sales Start/End, Event Start/End).
+*   A ticket type's **Sales** window says when it can be bought; its **Event** window says when it admits its holder, and the two are independent (spec 015). The Event window must sit inside the parent event's dates, is what every guest-facing surface names for that ticket, and is enforced at the door: a ticket presented outside it is refused as `Not yet valid` or `Expired`, with no grace period either side.
 *   *Deletion Constraint:* Admin is strictly prohibited from deleting an `Event` or `Ticket Type` if there is at least one associated `Order`. API must return `400 Bad Request`.
 
 **Checkout & Order:**
@@ -43,7 +44,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 
 **Admin QR Validation:**
 *   Admin validator accepts manual `Ticket Code` input as primary, or Camera QR scan as secondary.
-*   Status lookup: `Valid`, `Already Used`, `Invalid`.
+*   Status lookup: `Valid`, `Already Used`, `Invalid`, `Not yet valid`, `Expired`. The last two are the admission-window outcomes (spec 015): a ticket admits only between its ticket type's Event Start and Event End, inclusive, with no grace period. `Already Used` takes precedence over the window. An out-of-window ticket names the window it does apply to and cannot be marked Used.
 *   Admin can mark `Valid` tickets as `Used`.
 *   Admin can manually trigger "Resend Ticket Email".
 

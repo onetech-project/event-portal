@@ -46,6 +46,7 @@ const PENDING: TicketOrderDetail = {
       quantity: 2,
       unit_price: "275000.00",
       subtotal: "550000.00",
+      admission_starts: ["2026-09-01T12:00:00Z"],
     },
   ],
   server_time: "2026-08-01T10:03:00Z",
@@ -137,6 +138,13 @@ describe("checkout page — awaiting payment", () => {
     );
     expect(screen.getByText("PPN (10%)").parentElement).toHaveTextContent(/50[.,]000/);
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
+
+    // This step — and only this step — shows the FEE-INCLUSIVE total, with the
+    // note that says so (spec 011 FR-016). The forms step shows the pre-fee
+    // subtotal instead, so if a later edit made the two screens agree again,
+    // one of these two assertions is what fails.
+    expect(screen.getByTestId("order-total-figure")).toHaveTextContent("Rp 550.000");
+    expect(screen.getByText(/includes all taxes and fees/i)).toBeInTheDocument();
 
     // Rendered by our own API from the stored payload — the browser never talks
     // to the payment provider.

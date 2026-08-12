@@ -42,10 +42,25 @@ CREATE TABLE ticket_types (
     description TEXT,
     price NUMERIC(12, 2) NOT NULL,
     quota INT NOT NULL CHECK (quota >= 0), -- Atomic constraint to prevent overselling
+    -- When this type may be BOUGHT. Prints nowhere guest-facing; it only gates
+    -- whether a row on the selection page is choosable.
     sales_start TIMESTAMP WITH TIME ZONE NOT NULL,
     sales_end TIMESTAMP WITH TIME ZONE NOT NULL,
+    -- When a ticket of this type ADMITS its holder (migration 0014, spec 015).
+    -- event_start is the instant admission opens, NOT showtime: validation admits
+    -- no tolerance (FR-014), so a holder arriving one moment earlier is refused.
+    -- Both endpoints inclusive. Backfilled from the parent event, so every
+    -- pre-existing ticket type kept displaying exactly what it displayed before.
+    -- Deliberately unconstrained against the sales window in either direction
+    -- (FR-003) — a ticket may stay on sale after the day it admits to.
+    event_start TIMESTAMP WITH TIME ZONE NOT NULL,
+    event_end TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- `>=`, unlike packages_sales_window_chk's strict `>`: an event whose
+    -- start_date equals its end_date is legal, and the 0014 backfill copies
+    -- those dates verbatim, so a strict check would have failed on real rows.
+    CONSTRAINT ticket_types_event_window_chk CHECK (event_end >= event_start)
 );
 
 -- 4a. ORDER STATUSES (master data, migration 0009; re-keyed by 0013)

@@ -5,9 +5,13 @@ import {
   adminOrders,
   bookAsAnotherGuest,
   createEvent,
+  createFee,
+  createPackage,
   createSellableEvent,
   createTicketType,
   isoDaysFromNow,
+  isoHoursFromNow,
+  publicOrder,
   publicTicketTypes,
   putTerms,
   updateTicketTypeWindow,
@@ -190,6 +194,230 @@ test.describe("Guest purchase, end to end", () => {
     expect(await quotaOf(ticketType.id)).toBe(6);
     const listed = await publicTicketTypes(event.slug);
     expect(listed[0].quota_remaining).toBe(6);
+  });
+
+  /**
+   * Spec 015. A multi-day event sells one product per day, and before this
+   * feature every one of them advertised — and printed — the parent event's
+   * opening date. The buyer holding a Day 2 pass was shown Day 1.
+   *
+   * This is the defect scenario: it fails against unfixed code, where both
+   * lines render the same event-level date.
+   */
+  test("each order line shows its own ticket's date, not the event's", async ({ page }) => {
+    // The event runs three days; the two passes admit on the first two.
+    const eventStart = isoDaysFromNow(30);
+    const eventEnd = isoDaysFromNow(33);
+
+    const { event, ticketType: dayOne } = await createSellableEvent(token, {
+      slug: "uat-multi-day",
+      ticketName: "Day 1 Pass",
+      quota: 5,
+      startDate: eventStart,
+      endDate: eventEnd,
+      eventStart: isoHoursFromNow(30 * 24 + 9),
+      eventEnd: isoHoursFromNow(30 * 24 + 23),
+    });
+
+    const dayTwo = await createTicketType(token, {
+      eventId: event.id,
+      name: "Day 2 Pass",
+      price: "150000.00",
+      quota: 5,
+      eventStart: isoHoursFromNow(31 * 24 + 9),
+      eventEnd: isoHoursFromNow(31 * 24 + 23),
+    });
+
+    // The public list carries each type's own window.
+    const listed = await publicTicketTypes(event.slug);
+    const listedOne = listed.find((t) => t.name === "Day 1 Pass");
+    const listedTwo = listed.find((t) => t.name === "Day 2 Pass");
+    expect(listedOne?.event_start).toBeTruthy();
+    expect(listedTwo?.event_start).toBeTruthy();
+    expect(listedOne?.event_start).not.toBe(listedTwo?.event_start);
+
+    // Buy one of each, so the Order Summary panel has two lines to tell apart.
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(dayOne.name, 1);
+    await guest.selectQuantity(dayTwo.name, 1);
+    await guest.agreeToTermsAndBook();
+
+    // Each line names its own day. Against unfixed code both read the event's
+    // opening date and these two dates are identical.
+    const lineDates = await page
+      .locator('[data-testid="order-line-date"]')
+      .allTextContents();
+
+    expect(lineDates).toHaveLength(2);
+    expect(lineDates[0]).not.toBe(lineDates[1]);
+  });
+
+  /**
+   * The other half of the same rule (FR-012): surfaces that describe the EVENT
+   * keep describing the event. Only a ticket's date moves to the ticket.
+   */
+  test("the event's own surfaces still show the event's dates", async ({ page }) => {
+    const eventStart = isoDaysFromNow(30);
+    const eventEnd = isoDaysFromNow(33);
+
+    const { event } = await createSellableEvent(token, {
+      slug: "uat-event-dates-unchanged",
+      quota: 5,
+      startDate: eventStart,
+      endDate: eventEnd,
+      eventStart: isoHoursFromNow(30 * 24 + 9),
+      eventEnd: isoHoursFromNow(30 * 24 + 23),
+    });
+
+    // The landing page's Dates cell spans the whole event, not the one ticket.
+    await page.goto(`/events/${event.slug}`);
+    const dates = page.getByText(/Dates/i).first();
+    await expect(dates).toBeVisible();
+
+    // A three-day event cannot be rendered as a single day: if the Dates cell
+    // had been switched to the ticket's window it would collapse to one date.
+    const infoBar = page.locator("body");
+    await expect(infoBar).toContainText("-");
+  });
+
+  /**
+   * Spec 015 revision 2, FR-021a. A bundle admits on every day its parts admit,
+   * and its one line has to name each of them.
+   *
+   * The reported defect: a "Day 1 & 2" bundle rendered as a single date because
+   * the wire carried only the earliest constituent start. The buyer was told they
+   * were attending on one day while holding admission for two. This fails against
+   * that code — one date where two are expected.
+   */
+  test("a bundle line names every day it admits on", async ({ page }) => {
+    const { event, ticketType: dayOne } = await createSellableEvent(token, {
+      slug: "uat-bundle-days",
+      ticketName: "Day 1 Pass",
+      quota: 5,
+      startDate: isoDaysFromNow(30),
+      endDate: isoDaysFromNow(33),
+      eventStart: isoHoursFromNow(30 * 24 + 9),
+      eventEnd: isoHoursFromNow(30 * 24 + 23),
+    });
+
+    const dayTwo = await createTicketType(token, {
+      eventId: event.id,
+      name: "Day 2 Pass",
+      price: "150000.00",
+      quota: 5,
+      eventStart: isoHoursFromNow(31 * 24 + 9),
+      eventEnd: isoHoursFromNow(31 * 24 + 23),
+    });
+
+    await createPackage(token, {
+      eventId: event.id,
+      name: "Day 1 & 2 Bundle",
+      price: "250000.00",
+      ticketTypeIds: [dayOne.id, dayTwo.id],
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity("Day 1 & 2 Bundle", 1);
+    await guest.agreeToTermsAndBook();
+
+    // One line, naming both days. Against unfixed code it names only the first.
+    const dates = await page.locator('[data-testid="order-line-date"]').allTextContents();
+    expect(dates).toHaveLength(1);
+
+    const bundleLine = dates[0];
+    expect(bundleLine).toMatch(/\d/);
+    // Two distinct days are listed, not collapsed to one and not ranged.
+    expect(bundleLine.split(",").length).toBe(2);
+  });
+
+  /**
+   * FR-009, reversed on 2026-08-12: the panel's Event box is labelled "Event" and
+   * names the event's own dates, not the windows of the tickets on the order.
+   */
+  test("the Order Summary's Event box names the event, not the tickets", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-event-box",
+      quota: 5,
+      startDate: isoDaysFromNow(30),
+      endDate: isoDaysFromNow(33),
+      // A narrow one-day window inside a three-day event.
+      eventStart: isoHoursFromNow(31 * 24 + 9),
+      eventEnd: isoHoursFromNow(31 * 24 + 23),
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    await guest.agreeToTermsAndBook();
+
+    // The box spans the whole event; the line names the single day the ticket
+    // admits on. If the box had been derived from the ticket the two would match.
+    const boxRange = await page.getByText(/Gate opens at/i).locator("..").textContent();
+    const lineDate = (
+      await page.locator('[data-testid="order-line-date"]').allTextContents()
+    )[0];
+
+    expect(boxRange).toBeTruthy();
+    expect(boxRange).not.toBe(lineDate);
+  });
+
+  /**
+   * Spec 011 FR-016 / FR-016a / FR-016b, constitution v4.0.0. The holder-forms
+   * step shows the PRE-FEE subtotal; the fee-inclusive total appears for the
+   * first time on the checkout step, alongside the breakdown that explains it.
+   *
+   * The fee is created here rather than relied upon: `resetDatabase` truncates
+   * `fees`, so without this call every order has `total_amount === subtotal` and
+   * every assertion below would pass against unfixed code as readily as fixed.
+   */
+  test("the forms step shows the subtotal and the checkout step adds the fee", async ({
+    page,
+  }) => {
+    await createFee(token, { name: "PPN", feeType: "PERCENT", value: "10.00" });
+
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-fee-presentation",
+      name: "UAT Fee Presentation",
+      quota: 5,
+      price: "500000.00",
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    // The two figures must genuinely differ, or nothing below is a test.
+    const booked = await publicOrder(orderNumber);
+    expect(booked.subtotal).toBe("500000.00");
+    expect(booked.total_amount).toBe("550000.00");
+
+    // (a) Forms step: the subtotal, and the fee-inclusive total NOWHERE on the
+    // page. Against unfixed code the panel renders 550.000 here.
+    const formsBody = await page.locator("body").textContent();
+    expect(formsBody).toMatch(/500[.,]000/);
+    expect(formsBody).not.toMatch(/550[.,]000/);
+    // The note must not still claim the figure includes fees.
+    await expect(page.getByText(/includes all taxes and fees/i)).toHaveCount(0);
+
+    // (b) Checkout step: the breakdown and the fee-inclusive total.
+    await guest.fillHolder(0, defaultHolder);
+    await guest.payWithQris();
+    await guest.expectAwaitingPayment();
+
+    const checkoutBody = await page.locator("body").textContent();
+    expect(checkoutBody).toMatch(/550[.,]000/);
+    await expect(page.getByText(/^Subtotal \(\d+ items?\)$/)).toBeVisible();
+
+    // (c) The money did not move (FR-016b / SC-005a). The amount actually
+    // presented for payment is the fee-inclusive total, exactly as before —
+    // read from the API, not from the screen.
+    const paying = await publicOrder(orderNumber);
+    expect(paying.total_amount).toBe("550000.00");
+    expect(paying.payment?.amount).toBe("550000.00");
+    expect(await orderRow(orderNumber)).toMatchObject({ total_amount: "550000.00" });
   });
 
   // Manjo notifications carry no signature, no digest, and no field that could

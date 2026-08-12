@@ -410,3 +410,124 @@ func TestAdminQuotaEditIsVisibleToTheGuestCatalog(t *testing.T) {
 	assert.Equal(t, int32(3), types[0].QuotaRemaining)
 	assert.Equal(t, "175000.00", types[0].Price.String())
 }
+
+// --- Ticket type event window containment (spec 015) ----------------------
+
+func TestCreateTicketTypeRejectsAWindowOutsideItsEvent(t *testing.T) {
+	svc, pool := newAdminService(t)
+	ev := testsupport.SeedEvent(t, pool, "containment-create", "PUBLISHED")
+
+	for name, mutate := range map[string]func(*event.TicketTypeRequest){
+		"starts before the event opens": func(r *event.TicketTypeRequest) {
+			r.EventStart = time.Now().Add(29 * 24 * time.Hour)
+		},
+		"ends after the event closes": func(r *event.TicketTypeRequest) {
+			r.EventEnd = time.Now().Add(32 * 24 * time.Hour)
+		},
+		"entirely elsewhere": func(r *event.TicketTypeRequest) {
+			r.EventStart = time.Now().Add(60 * 24 * time.Hour)
+			r.EventEnd = time.Now().Add(61 * 24 * time.Hour)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := validTicketTypeRequest()
+			req.EventID = ev.ID
+			mutate(&req)
+
+			_, err := svc.CreateTicketType(context.Background(), req)
+
+			appErr := appErrOf(t, err)
+			assert.Equal(t, apperr.CodeInvalidDateRange, appErr.Code)
+			assert.Equal(t, http.StatusBadRequest, appErr.HTTPStatus)
+			assert.NotNil(t, appErr.Data, "the refusal names the event's own bounds so the form can point at them")
+		})
+	}
+}
+
+func TestUpdateTicketTypeRejectsAWindowOutsideItsEvent(t *testing.T) {
+	svc, pool := newAdminService(t)
+	ev := testsupport.SeedEvent(t, pool, "containment-update", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	req := validTicketTypeRequest()
+	req.EventStart = time.Now().Add(60 * 24 * time.Hour)
+	req.EventEnd = time.Now().Add(61 * 24 * time.Hour)
+
+	_, err := svc.UpdateTicketType(context.Background(), tt.ID, req)
+
+	assert.Equal(t, apperr.CodeInvalidDateRange, appErrOf(t, err).Code,
+		"update resolves the owning event from the stored row, since event_id is ignored on update")
+}
+
+func TestCreateTicketTypeAcceptsAWindowEqualToItsEvent(t *testing.T) {
+	svc, pool := newAdminService(t)
+	ev := testsupport.SeedEvent(t, pool, "containment-exact", "PUBLISHED")
+
+	stored, err := svc.GetEventDetail(context.Background(), ev.ID)
+	require.NoError(t, err)
+
+	req := validTicketTypeRequest()
+	req.EventID = ev.ID
+	req.EventStart = stored.StartDate
+	req.EventEnd = stored.EndDate
+
+	created, err := svc.CreateTicketType(context.Background(), req)
+
+	require.NoError(t, err, "the boundaries are inclusive — this is exactly what migration 0014 backfilled")
+	assert.WithinDuration(t, stored.StartDate, created.EventStart, time.Millisecond)
+	assert.WithinDuration(t, stored.EndDate, created.EventEnd, time.Millisecond)
+}
+
+func TestCreateTicketTypePersistsItsEventWindow(t *testing.T) {
+	svc, pool := newAdminService(t)
+	ev := testsupport.SeedEvent(t, pool, "window-persists", "PUBLISHED")
+
+	req := validTicketTypeRequest()
+	req.EventID = ev.ID
+
+	created, err := svc.CreateTicketType(context.Background(), req)
+
+	require.NoError(t, err)
+	// Postgres stores timestamptz to microsecond precision, so a round-tripped
+	// time.Time is never bit-identical to the one sent.
+	assert.WithinDuration(t, req.EventStart, created.EventStart, time.Millisecond)
+	assert.WithinDuration(t, req.EventEnd, created.EventEnd, time.Millisecond)
+	assert.False(t, created.EventStart.Equal(created.SalesStart), "the two windows are stored separately")
+}
+
+// FR-005a: the mirror-image guard is deliberately absent. Enforcing containment
+// on the event edit too would deadlock a reschedule — neither the event nor its
+// tickets could move first.
+func TestUpdateEventSucceedsEvenWhenItStrandsATicketWindow(t *testing.T) {
+	svc, pool := newAdminService(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "reschedule-me", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	before, err := svc.GetTicketType(ctx, tt.ID)
+	require.NoError(t, err)
+
+	req := validEventRequest()
+	req.Slug = "reschedule-me"
+	req.Status = event.StatusPublished
+	req.StartDate = time.Now().Add(60 * 24 * time.Hour)
+	req.EndDate = time.Now().Add(61 * 24 * time.Hour)
+
+	_, err = svc.UpdateEvent(ctx, ev.ID, req)
+	require.NoError(t, err, "the event must be movable first; its ticket types follow")
+
+	after, err := svc.GetTicketType(ctx, tt.ID)
+	require.NoError(t, err)
+	assert.True(t, after.EventStart.Equal(before.EventStart), "an event edit never cascades onto a ticket window (FR-005c)")
+	assert.True(t, after.EventEnd.Equal(before.EventEnd))
+
+	// And the recovery direction now works: the ticket can move into the new range.
+	ttReq := validTicketTypeRequest()
+	ttReq.EventStart = req.StartDate.Add(time.Hour)
+	ttReq.EventEnd = req.EndDate.Add(-time.Hour)
+
+	moved, err := svc.UpdateTicketType(ctx, tt.ID, ttReq)
+	require.NoError(t, err, "move the event, then its ticket types — the one order that works")
+	assert.WithinDuration(t, ttReq.EventStart, moved.EventStart, time.Millisecond)
+}

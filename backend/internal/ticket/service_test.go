@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -316,4 +317,171 @@ func TestLookupPublicDoesNotDistinguishMalformedFromUnknown(t *testing.T) {
 	assert.Equal(t, a.Code, b.Code)
 	assert.Equal(t, a.Message, b.Message)
 	assert.Equal(t, a.Message, c.Message)
+}
+
+// --- Admission window at the gate (spec 015 US3) --------------------------
+
+// ticketWindow moves the fixture ticket type's admission window and returns its
+// bounds. Ticket-type configuration is not order, ticket or payment state.
+func ticketWindow(t *testing.T, f ticketFixture, start, end time.Time) (time.Time, time.Time) {
+	t.Helper()
+	// Truncated to what Postgres actually stores. Without this the returned
+	// bounds carry nanoseconds the column drops, and "validate at exactly the
+	// end" would land a few hundred nanoseconds past the stored value.
+	start = start.Truncate(time.Microsecond)
+	end = end.Truncate(time.Microsecond)
+	_, err := f.pool.Exec(context.Background(),
+		`UPDATE ticket_types SET event_start = $2, event_end = $3 WHERE id = $1`,
+		f.ttype.ID, start, end)
+	require.NoError(t, err)
+	return start, end
+}
+
+// serviceAt builds a service whose clock reads a fixed instant, so the boundary
+// cases are exact rather than approximately-now.
+func serviceAt(t *testing.T, f ticketFixture, at time.Time) *ticket.Service {
+	t.Helper()
+	return ticket.NewService(f.pool, f.repo, nil, testsupport.DiscardLogger()).
+		WithClock(func() time.Time { return at })
+}
+
+func TestValidateAdmitsATicketInsideItsWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	start, end := ticketWindow(t, f, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	testsupport.SeedTicket(t, f.pool, "INWINDOW01", f.orderID, f.attendee, "ACTIVE")
+
+	got, err := serviceAt(t, f, start.Add(30*time.Minute)).
+		Validate(context.Background(), "INWINDOW01")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultValid, got.Result)
+	require.NotNil(t, got.EventStart)
+	assert.WithinDuration(t, start, *got.EventStart, time.Second)
+	assert.WithinDuration(t, end, *got.EventEnd, time.Second)
+}
+
+func TestValidateRefusesATicketBeforeItsWindowOpens(t *testing.T) {
+	f := newTicketFixture(t)
+	start, _ := ticketWindow(t, f, time.Now().Add(24*time.Hour), time.Now().Add(30*time.Hour))
+	testsupport.SeedTicket(t, f.pool, "TOOEARLY01", f.orderID, f.attendee, "ACTIVE")
+
+	got, err := serviceAt(t, f, start.Add(-time.Hour)).
+		Validate(context.Background(), "TOOEARLY01")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultNotYetValid, got.Result)
+	require.NotNil(t, got.EventStart, "the refusal names the day the ticket does apply to")
+}
+
+func TestValidateRefusesATicketAfterItsWindowCloses(t *testing.T) {
+	f := newTicketFixture(t)
+	_, end := ticketWindow(t, f, time.Now().Add(-30*time.Hour), time.Now().Add(-24*time.Hour))
+	testsupport.SeedTicket(t, f.pool, "TOOLATE001", f.orderID, f.attendee, "ACTIVE")
+
+	got, err := serviceAt(t, f, end.Add(time.Hour)).
+		Validate(context.Background(), "TOOLATE001")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultExpired, got.Result)
+	require.NotNil(t, got.EventEnd)
+}
+
+// FR-014: both endpoints are inclusive, and there is no grace period. These two
+// are the whole difference between a workable gate and one that turns away
+// everyone who arrives on the hour.
+func TestValidateTreatsBothWindowEndpointsAsInclusive(t *testing.T) {
+	f := newTicketFixture(t)
+	start, end := ticketWindow(t, f, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	testsupport.SeedTicket(t, f.pool, "BOUNDARY01", f.orderID, f.attendee, "ACTIVE")
+	ctx := context.Background()
+
+	atStart, err := serviceAt(t, f, start).Validate(ctx, "BOUNDARY01")
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultValid, atStart.Result, "exactly at the start is admitted")
+
+	atEnd, err := serviceAt(t, f, end).Validate(ctx, "BOUNDARY01")
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultValid, atEnd.Result, "exactly at the end is admitted")
+}
+
+func TestValidateAllowsNoGracePeriodBeforeTheWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	start, _ := ticketWindow(t, f, time.Now().Add(time.Hour), time.Now().Add(2*time.Hour))
+	testsupport.SeedTicket(t, f.pool, "NOGRACE001", f.orderID, f.attendee, "ACTIVE")
+
+	got, err := serviceAt(t, f, start.Add(-time.Millisecond)).
+		Validate(context.Background(), "NOGRACE001")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultNotYetValid, got.Result,
+		"one moment early is refused — the event start is when admission opens, not showtime")
+}
+
+// FR-018: already-used beats out-of-window. Telling an admin the ticket was
+// already admitted is more useful than telling them it is the wrong day.
+func TestValidateReportsAlreadyUsedAheadOfTheWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	start, _ := ticketWindow(t, f, time.Now().Add(24*time.Hour), time.Now().Add(30*time.Hour))
+	testsupport.SeedTicket(t, f.pool, "USEDEARLY1", f.orderID, f.attendee, "USED")
+
+	got, err := serviceAt(t, f, start.Add(-time.Hour)).
+		Validate(context.Background(), "USEDEARLY1")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultAlreadyUsed, got.Result)
+}
+
+// FR-019: an unknown code still discloses nothing, the window included.
+func TestValidateDisclosesNoWindowForAnUnknownCode(t *testing.T) {
+	f := newTicketFixture(t)
+
+	got, err := serviceAt(t, f, time.Now()).Validate(context.Background(), "NOSUCHCODE")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultInvalid, got.Result)
+	assert.Nil(t, got.EventStart)
+	assert.Nil(t, got.EventEnd)
+}
+
+func TestValidateReportsARevokedTicketAsInvalidRegardlessOfTheWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	ticketWindow(t, f, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	testsupport.SeedTicket(t, f.pool, "REVOKED001", f.orderID, f.attendee, "REVOKED")
+
+	got, err := serviceAt(t, f, time.Now()).Validate(context.Background(), "REVOKED001")
+
+	require.NoError(t, err)
+	assert.Equal(t, ticket.ResultInvalid, got.Result)
+	assert.Nil(t, got.EventStart)
+}
+
+// FR-017: the UI hiding the button is not the enforcement.
+func TestMarkUsedRefusesATicketOutsideItsWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	start, _ := ticketWindow(t, f, time.Now().Add(24*time.Hour), time.Now().Add(30*time.Hour))
+	testsupport.SeedTicket(t, f.pool, "NOADMIT001", f.orderID, f.attendee, "ACTIVE")
+	ctx := context.Background()
+
+	_, err := serviceAt(t, f, start.Add(-time.Hour)).MarkUsed(ctx, "NOADMIT001")
+
+	var appErr *apperr.Error
+	require.True(t, errors.As(err, &appErr))
+	assert.Equal(t, http.StatusConflict, appErr.HTTPStatus)
+	assert.Equal(t, apperr.CodeInvalidDateRange, appErr.Code)
+
+	status, err := f.repo.GetStatusByCode(ctx, "NOADMIT001")
+	require.NoError(t, err)
+	assert.Equal(t, "ACTIVE", status, "a refused admit leaves the ticket admissible on the right day")
+}
+
+func TestMarkUsedStillAdmitsATicketInsideItsWindow(t *testing.T) {
+	f := newTicketFixture(t)
+	start, _ := ticketWindow(t, f, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	testsupport.SeedTicket(t, f.pool, "ADMITOK001", f.orderID, f.attendee, "ACTIVE")
+	ctx := context.Background()
+
+	got, err := serviceAt(t, f, start.Add(time.Minute)).MarkUsed(ctx, "ADMITOK001")
+
+	require.NoError(t, err)
+	assert.Equal(t, "USED", got.Status)
 }

@@ -154,6 +154,19 @@ type PublicOrderItem struct {
 	Quantity       int32       `json:"quantity"`
 	UnitPrice      money.Money `json:"unit_price"`
 	Subtotal       money.Money `json:"subtotal"`
+	// AdmissionStarts are the days THIS line admits on, ascending: one for a
+	// ticket line, one per distinct constituent for a bundle (spec 015 FR-021a).
+	//
+	// A list rather than a start/end pair, because a single value cannot express
+	// a Day 1 + Day 2 bundle — collapsing one to its earliest date is the defect
+	// this field exists to fix. There is no matching end: the display names days,
+	// and a range across three or more closes on a START date (FR-021c), so an
+	// end would only invite a consumer to read the wrong thing.
+	//
+	// They live on the line rather than on the order's event block because two
+	// lines of one order can admit on different days — that is the whole point of
+	// the feature — whereas Event below names the EVENT's own dates (FR-009).
+	AdmissionStarts []time.Time `json:"admission_starts"`
 }
 
 // PaymentInstruction is everything the guest needs in order to pay, and nothing

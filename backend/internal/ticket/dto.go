@@ -7,10 +7,18 @@ import (
 )
 
 // Validation results returned by the admin door flow.
+//
+// NotYetValid and Expired (spec 015) are separate values rather than one
+// OUT_OF_WINDOW because the not-yet/passed decision is the SERVER's to make: a
+// gate device's clock is the least trustworthy in the system, and letting the
+// result card derive the wording by comparing the window to its own clock would
+// hand that decision to it.
 const (
 	ResultValid       = "VALID"
 	ResultAlreadyUsed = "ALREADY_USED"
 	ResultInvalid     = "INVALID"
+	ResultNotYetValid = "NOT_YET_VALID"
+	ResultExpired     = "EXPIRED"
 )
 
 // Ticket statuses, matching the CHECK constraint on tickets.status.
@@ -28,6 +36,10 @@ type Detail struct {
 	AttendeeName   string
 	TicketTypeName string
 	EventName      string
+	// The admission window of the ticket type this ticket was issued from
+	// (spec 015). Both endpoints inclusive; no grace period either side.
+	EventStart time.Time
+	EventEnd   time.Time
 }
 
 // FullDetail extends Detail with the event context printed on a ticket PDF.
@@ -42,7 +54,11 @@ type FullDetail struct {
 	TicketTypeName string
 	EventName      string
 	Venue          string
-	StartDate      time.Time
+	// The admission window of the ticket TYPE this ticket was issued from, not
+	// the parent event's dates (spec 015 FR-011). The venue above is still the
+	// event's — only the date moved.
+	EventStart time.Time
+	EventEnd   time.Time
 }
 
 // Record is the internal view of a tickets row.
@@ -80,6 +96,11 @@ type ValidationResult struct {
 	AttendeeName   *string `json:"attendee_name"`
 	TicketTypeName *string `json:"ticket_type_name"`
 	EventName      *string `json:"event_name"`
+	// The window this ticket does apply to, so an out-of-window refusal can name
+	// the right day rather than merely turning the holder away (spec 015 FR-016).
+	// Nil on INVALID, which discloses nothing about an unknown code (FR-019).
+	EventStart *time.Time `json:"event_start"`
+	EventEnd   *time.Time `json:"event_end"`
 }
 
 // MarkUsedResponse is the body of POST /api/v1/admin/tickets/:code/use.

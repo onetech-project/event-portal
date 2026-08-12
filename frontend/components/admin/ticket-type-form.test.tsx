@@ -22,6 +22,8 @@ const existing: TicketTypeAdminView = {
   sold: 3,
   sales_start: "2026-07-01T00:00:00Z",
   sales_end: "2026-08-31T00:00:00Z",
+  event_start: "2026-09-02T02:00:00Z",
+  event_end: "2026-09-02T16:00:00Z",
 };
 
 describe("TicketTypeForm", () => {
@@ -84,6 +86,53 @@ describe("TicketTypeForm", () => {
     const alerts = await screen.findAllByRole("alert");
     expect(alerts.map((a) => a.textContent).join(" ")).toMatch(
       /Remaining quota must not be negative/i,
+    );
+  });
+
+  // Spec 015: the two windows must be tellable apart at a glance. An admin who
+  // reads "Event start" as "Sales start" sets a ticket that admits nobody.
+  it("offers an event window labelled distinctly from the sales window", () => {
+    renderWithQuery(<TicketTypeForm eventId="ev-1" onDone={vi.fn()} />);
+
+    expect(screen.getByLabelText(/event start/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/event end/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/sales start/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/sales end/i)).toBeInTheDocument();
+  });
+
+  // Validation admits no tolerance, so an admin who reads "Event start" as
+  // showtime rather than gate-open turns away every early arrival.
+  it("says the event start is when admission opens, not showtime", () => {
+    renderWithQuery(<TicketTypeForm eventId="ev-1" onDone={vi.fn()} />);
+
+    expect(screen.getByText(/not showtime/i)).toBeInTheDocument();
+  });
+
+  it("prefills the existing event window when editing", () => {
+    renderWithQuery(
+      <TicketTypeForm eventId="ev-1" ticketType={existing} onDone={vi.fn()} />,
+    );
+
+    expect(screen.getByLabelText(/event start/i)).toHaveValue("2026-09-02T09:00");
+    expect(screen.getByLabelText(/event end/i)).toHaveValue("2026-09-02T23:00");
+  });
+
+  it("rejects an event window that ends before it starts", async () => {
+    const user = userEvent.setup();
+    renderWithQuery(<TicketTypeForm eventId="ev-1" onDone={vi.fn()} />);
+
+    await user.type(screen.getByLabelText(/name/i), "Day 2 Pass");
+    await user.type(screen.getByLabelText(/price/i), "100000");
+    await user.type(screen.getByLabelText(/sales start/i), "2026-07-01T00:00");
+    await user.type(screen.getByLabelText(/sales end/i), "2026-08-31T00:00");
+    await user.type(screen.getByLabelText(/event start/i), "2026-09-02T09:00");
+    await user.type(screen.getByLabelText(/event end/i), "2026-09-01T09:00");
+
+    fireEvent.submit(screen.getByRole("form", { name: /ticket type/i }));
+
+    const alerts = await screen.findAllByRole("alert");
+    expect(alerts.map((a) => a.textContent).join(" ")).toMatch(
+      /must not end before it starts/i,
     );
   });
 });

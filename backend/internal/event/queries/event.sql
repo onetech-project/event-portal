@@ -12,13 +12,13 @@ FROM events
 WHERE slug = $1 AND status = 'PUBLISHED';
 
 -- name: ListTicketTypesByEventID :many
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY price ASC, name ASC;
 
 -- name: GetTicketTypeByID :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
 FROM ticket_types
 WHERE id = $1;
 
@@ -50,9 +50,14 @@ SELECT id, name, quota FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 -- Both tables belong to this domain, so the JOIN stays inside the boundary the
 -- order domain is not allowed to cross itself.
 -- name: ListTicketTypeDisplaysByIDs :many
+-- event_start_date/event_end_date are the EVENT's dates; ticket_event_start/
+-- ticket_event_end are this ticket type's own admission window (spec 015). Both
+-- pairs travel together because the order page names the event AND each line's
+-- own day, and they are not interchangeable.
 SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
-       e.start_date AS event_start_date, e.end_date AS event_end_date
+       e.start_date AS event_start_date, e.end_date AS event_end_date,
+       tt.event_start AS ticket_event_start, tt.event_end AS ticket_event_end
 FROM ticket_types tt
 JOIN events e ON e.id = tt.event_id
 WHERE tt.id = ANY(sqlc.arg(ids)::uuid[]);
@@ -108,28 +113,29 @@ DELETE FROM events WHERE id = $1;
 -- Admin ticket-type CRUD ---------------------------------------------------
 
 -- name: ListTicketTypesAdmin :many
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY created_at ASC;
 
 -- name: GetTicketTypeAdmin :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
 FROM ticket_types
 WHERE id = $1;
 
 -- name: CreateTicketType :one
-INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at;
+INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at;
 
 -- name: UpdateTicketType :one
 -- `quota` is set ABSOLUTELY to the submitted remaining quota; past sales are never
 -- re-subtracted here (contracts/api.md, Admin Management).
 UPDATE ticket_types
-SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7, updated_at = now()
+SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7,
+    event_start = $8, event_end = $9, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, created_at, updated_at;
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at;
 
 -- name: DeleteTicketType :execrows
 DELETE FROM ticket_types WHERE id = $1;
@@ -291,12 +297,29 @@ WHERE id = $1;
 -- name: ListPackageDisplaysByIDs :many
 -- Both tables belong to this domain, so the JOIN stays inside the boundary the
 -- order domain is not allowed to cross itself.
+--
+-- Carries no admission window: a bundle admits on every day its parts admit, and
+-- a single collapsed span cannot say that (spec 015 FR-021a). The days come from
+-- ListPackageAdmissionStartsByIDs below.
 SELECT p.id, p.name, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
        e.start_date AS event_start_date, e.end_date AS event_end_date
 FROM packages p
 JOIN events e ON e.id = p.event_id
 WHERE p.id = ANY(sqlc.arg(ids)::uuid[]);
+
+-- name: ListPackageAdmissionStartsByIDs :many
+-- Every distinct day each bundle admits on, one row per (package, start).
+--
+-- A separate query rather than an array_agg on the display row: aggregates lose
+-- their type in this sqlc configuration (MIN() generated interface{} until it was
+-- cast), and two plain queries keep every generated field a bare time.Time. Both
+-- tables are event-domain, so the join stays inside the boundary.
+SELECT DISTINCT pt.package_id, tt.event_start
+FROM package_tickets pt
+JOIN ticket_types tt ON tt.id = pt.ticket_type_id
+WHERE pt.package_id = ANY(sqlc.arg(ids)::uuid[])
+ORDER BY pt.package_id, tt.event_start;
 
 -- Spec 008: Terms & Conditions ----------------------------------------------
 

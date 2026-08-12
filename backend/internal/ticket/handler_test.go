@@ -64,7 +64,8 @@ func TestValidateEndpointReturnsTheContractShapeForAValidTicket(t *testing.T) {
 	body := objectOf(t, rec)
 
 	assert.ElementsMatch(t,
-		[]string{"result", "ticket_code", "attendee_name", "ticket_type_name", "event_name"},
+		[]string{"result", "ticket_code", "attendee_name", "ticket_type_name", "event_name",
+			"event_start", "event_end"},
 		keysOfObject(body))
 	assert.Equal(t, "VALID", body["result"])
 	assert.Equal(t, "DOOR234ABC", body["ticket_code"])

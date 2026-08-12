@@ -10,6 +10,8 @@ const valid: ValidationResult = {
   attendee_name: "Budi Santoso",
   ticket_type_name: "Regular",
   event_name: "Jazz Night 2026",
+  event_start: "2026-09-01T02:00:00Z",
+  event_end: "2026-09-01T16:00:00Z",
 };
 
 const alreadyUsed: ValidationResult = { ...valid, result: "ALREADY_USED" };
@@ -20,6 +22,8 @@ const invalid: ValidationResult = {
   attendee_name: null,
   ticket_type_name: null,
   event_name: null,
+  event_start: null,
+  event_end: null,
 };
 
 describe("ValidationResultCard", () => {
@@ -85,5 +89,43 @@ describe("ValidationResultCard", () => {
     expect(screen.getByText(/invalid/i)).toBeInTheDocument();
     expect(screen.queryByText(/attendee/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/event/i)).not.toBeInTheDocument();
+  });
+
+  // Spec 015 US3: an out-of-window ticket is genuine but on the wrong day. It
+  // reads distinctly from both "Invalid" and "Already used", and never offers
+  // the irreversible admit.
+  it("reports a ticket whose day has not arrived, and does not offer Mark used", () => {
+    const notYet: ValidationResult = { ...valid, result: "NOT_YET_VALID" };
+
+    render(<ValidationResultCard result={notYet} onMarkUsed={vi.fn()} isMarking={false} />);
+
+    expect(screen.getByText("Not yet valid", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /mark used/i })).not.toBeInTheDocument();
+  });
+
+  it("reports a ticket whose day has passed, and does not offer Mark used", () => {
+    const expired: ValidationResult = { ...valid, result: "EXPIRED" };
+
+    render(<ValidationResultCard result={expired} onMarkUsed={vi.fn()} isMarking={false} />);
+
+    expect(screen.getByText("Expired", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /mark used/i })).not.toBeInTheDocument();
+  });
+
+  // FR-016: naming the right day is what lets an admin redirect the holder
+  // rather than only refuse them.
+  it("names the window the ticket does apply to", () => {
+    const notYet: ValidationResult = { ...valid, result: "NOT_YET_VALID" };
+
+    render(<ValidationResultCard result={notYet} onMarkUsed={vi.fn()} isMarking={false} />);
+
+    expect(screen.getByText("Admits")).toBeInTheDocument();
+  });
+
+  // FR-019: an unknown code discloses nothing, the window included.
+  it("discloses no window for an invalid code", () => {
+    render(<ValidationResultCard result={invalid} onMarkUsed={vi.fn()} isMarking={false} />);
+
+    expect(screen.queryByText("Admits")).not.toBeInTheDocument();
   });
 });

@@ -38,8 +38,15 @@ const PENDING: TicketOrderDetail = {
       ticket_type_name: "Regular",
       package_name: null,
       quantity: 2,
-      unit_price: "275000.00",
-      subtotal: "550000.00",
+      // Coherent with the order's money above: 2 x 250.000 = the 500.000
+      // subtotal, + the 50.000 fee = the 550.000 total that is charged. It
+      // previously read 2 x 275.000 = 550.000, which made the lines sum to the
+      // grand total and left the order's own subtotal unaccounted for — and
+      // put a stray "Rp 550.000" on the forms step that had nothing to do with
+      // the fee-inclusive figure.
+      unit_price: "250000.00",
+      subtotal: "500000.00",
+      admission_starts: ["2026-09-01T12:00:00Z"],
     },
   ],
   server_time: "2026-08-01T10:03:00Z",
@@ -362,6 +369,7 @@ const BUNDLE_HELD: TicketOrderDetail = {
       quantity: 1,
       unit_price: "550000.00",
       subtotal: "550000.00",
+      admission_starts: ["2026-09-01T12:00:00Z"],
     },
   ],
   slots: [
@@ -528,15 +536,28 @@ describe("order page — registration phase (payment not started)", () => {
     // The order-hold countdown box is gone from this step.
     expect(screen.queryByText(/complete purchase/i)).not.toBeInTheDocument();
 
-    // Fees are NOT itemized while the forms are being filled (spec 011 FR-016,
-    // constitution v2.1.0): the grand total alone, with its taxes-and-fees
-    // note. HELD carries a non-null subtotal and a fee, so their absence is
-    // the flag doing the work, not missing data.
+    // No fee reaches this step in ANY form (spec 011 FR-016, constitution
+    // v4.0.0): not as itemized rows, and not folded into the closing figure.
+    // HELD's subtotal (500.000) and total (550.000) differ and it carries a
+    // real fee, so each assertion below is the rule doing the work rather than
+    // missing data — on equal figures they would all pass regardless.
     expect(HELD.subtotal).not.toBeNull();
+    expect(HELD.subtotal).not.toBe(HELD.total_amount);
+
     expect(screen.queryByText("Ticket Total")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Subtotal \(/)).not.toBeInTheDocument();
     expect(screen.queryByText("PPN (10%)")).not.toBeInTheDocument();
+
+    // The pre-fee subtotal, under a heading that still reads Total payment
+    // (FR-016a) and a note that no longer claims the fees are already in it.
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
-    expect(screen.getByText(/includes all taxes and fees/i)).toBeInTheDocument();
+    expect(screen.getByTestId("order-total-figure")).toHaveTextContent("Rp 500.000");
+    expect(screen.getByText(/taxes and fees added at the next step/i)).toBeInTheDocument();
+    expect(screen.queryByText(/includes all taxes and fees/i)).not.toBeInTheDocument();
+
+    // The fee-inclusive figure appears nowhere on this step — the assertion
+    // that would have caught the reported defect.
+    expect(screen.queryByText("Rp 550.000")).not.toBeInTheDocument();
   });
 
   it("enables Continue only once every field of every card is valid", async () => {

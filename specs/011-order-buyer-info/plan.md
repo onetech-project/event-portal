@@ -1,6 +1,6 @@
 # Implementation Plan: Order Page Buyer Information — Per-Ticket Holder Forms
 
-**Branch**: `feat/buyer` (spec directory `011-order-buyer-info`) | **Date**: 2026-08-07 (rev. 3 — end-of-journey modal + schema revision) | **Spec**: [spec.md](spec.md)
+**Branch**: `feat/buyer` (spec directory `011-order-buyer-info`) | **Date**: 2026-08-12 (rev. 4 — form-step fee presentation) | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `/specs/011-order-buyer-info/spec.md`
 
@@ -8,13 +8,15 @@
 
 FR-001 – FR-021 are **delivered** (tasks T001–T030, commits `e189e19`…`01ce8fe`): the buyer card is gone, holder forms are the only identity forms, the topmost holder is the primary contact, phone is a digits-only free-text field validated on length alone, the summary and rail behave, the QR screen has its own address, and delivery settled at exactly one email to the buyer (constitution v3.0.0). Migration `000012` shipped with it.
 
-Two requirement groups remain, added by the 2026-08-07 clarifications and independent of each other:
+Rev. 3's two tracks are **also delivered** (tasks T031–T051), and are retained below as the design record:
 
 **Track A — End-of-journey modal (FR-022 – FR-024).** Frontend only, no API change. Today an EXPIRED or CANCELLED order replaces the entire screen with a full-page "Time's Up" card, destroying the context the guest most needs at that moment. Both order screens instead keep their own layout rendered and raise one unclosable Base UI dialog over it — no X, no Escape, no backdrop dismissal, page behind inert — rebuilt to Figma `293-3` with a single "Return to Home Page" action. On the QR screen it opens the instant the client countdown reaches zero, replacing the inline expired notice.
 
 **Track B — Schema revision (FR-025 – FR-029).** Backend + admin, invisible to guests. One new migration `000013`: both master lists move from uuid keys to integer identity with widened names and `created_by`/`updated_by` audit columns; `orders.status` becomes `status_id` with the name mapped back inside SQL so not one Go comparison changes; `attendees.gender_id` converts uuid → smallint through its old key; `packages.status` becomes an `is_active` boolean that surfaces on the admin wire as a toggle. `tickets.status` is explicitly untouched.
 
-The two tracks share no file. Track A is small, guest-visible, and ready; Track B is a storage change across five tables, though narrower in code than it first appears — only two domains own SQL against them. The spec's own scope note permits Track B to be split into its own spec — see [Complexity Tracking](#complexity-tracking).
+**Track C — Form-step fee presentation (FR-016, FR-016a – FR-016c), added 2026-08-12.** Frontend only, no API change, no backend change of any kind. The form-filling step's Order Summary shows the fee-inclusive `total_amount`; it must show the pre-fee `subtotal`, and its "Includes all taxes and fees" note must become a statement that fees are added at the next step. Both values already arrive on the same payload, so this is a render change at two lines of one component. Constitution **v4.0.0** was amended for it — the only track of the three that needed an amendment, and the amendment is already landed.
+
+**Track C is the only outstanding work in this feature.** It shares no file with the delivered tracks. It is the smallest of the three in code and the largest in test churn, because its only real risk is that nothing currently proves the two figures differ (research R27).
 
 ## Technical Context
 
@@ -22,9 +24,9 @@ The two tracks share no file. Track A is small, guest-visible, and ready; Track 
 
 **Primary Dependencies**: Backend — Echo v4, pgx, sqlc-managed SQL in `internal/*/queries/*.sql`. Frontend — React Hook Form + zodResolver, Zod, TanStack Query, TailwindCSS, and **Base UI** `@base-ui/react` (the `dialog.tsx` wrapper in `components/ui/` is over Base UI, not Radix — verified against the installed package; Track A depends on its `modal` / `disablePointerDismissal` semantics).
 
-**Storage**: PostgreSQL. Track A: none. Track B: **one migration** — `000013_master_list_identity_and_flags.{up,down}.sql`. `000012` is left exactly as committed (research R18) because it is already applied in environments built from this branch; editing an applied migration makes `schema_migrations` lie.
+**Storage**: PostgreSQL. Track A: none. Track C: none — `subtotal` and `fees` have been on `GET /ticket/order/:order_id` since migration `000010`, so Track C reads a field the wire already carries (research R25). Track B: **one migration** — `000013_master_list_identity_and_flags.{up,down}.sql`. `000012` is left exactly as committed (research R18) because it is already applied in environments built from this branch; editing an applied migration makes `schema_migrations` lie.
 
-**Testing**: Go table tests per domain (`cd backend && ./scripts/test.sh ./...`). Frontend vitest 4.1.10 — **no `test` script in `package.json`**; invoke `./node_modules/.bin/vitest run` directly, node is not on PATH (project memory `frontend-toolchain-invocation.md`). Track A rewrites the two "Time's Up" tests at `page.test.tsx:157` and `checkout/page.test.tsx:236` — both currently assert a `repeat order` link that FR-024 deletes, so they fail until updated. Track B's regression surface is the existing suites: nothing should change behaviour, which is the point.
+**Testing**: Go table tests per domain (`cd backend && ./scripts/test.sh ./...`). Frontend vitest 4.1.10 — **no `test` script in `package.json`**; invoke `./node_modules/.bin/vitest run` directly, node is not on PATH (project memory `frontend-toolchain-invocation.md`). Track A rewrites the two "Time's Up" tests at `page.test.tsx:157` and `checkout/page.test.tsx:236` — both currently assert a `repeat order` link that FR-024 deletes, so they fail until updated. Track B's regression surface is the existing suites: nothing should change behaviour, which is the point. Track C breaks exactly one assertion (`page.test.tsx:541`, `/includes all taxes and fees/i`) and — more importantly — is **not currently provable by any test**, because every fixture that reaches the panel sets `subtotal === total_amount` and the e2e database has no fees at all (research R27). Every Track C test is therefore written against a fixture where the two figures genuinely differ, or it asserts nothing.
 
 **Target Platform**: Linux server (Docker Compose) + modern browsers (guest flow is mobile-first responsive)
 
@@ -32,26 +34,28 @@ The two tracks share no file. Track A is small, guest-visible, and ready; Track 
 
 **Performance Goals**: Unchanged. Track B keeps the expiry sweeper's partial index hot by rebuilding `idx_orders_payment_expiry` on the literal seeded id (research R20).
 
-**Constraints**: Constitution v3.0.0 — **no amendment needed by either track**. DTO isolation (Track B's whole design is "storage moves, wire does not"); domain isolation (no domain imports another's repository; the name↔id mapping lives in SQL, not in a shared Go map that would cross domains); SCHEMA.md must be updated in the same change as any schema change (Technology Stack Requirements).
+**Constraints**: Constitution **v4.0.0**. Tracks A and B need no amendment; Track C required one and **already has it** — the fee-presentation bullet was redefined on 2026-08-12 (3.4.0 → 4.0.0, MAJOR, because a reversal is a backward-incompatible redefinition). DTO isolation (Track B's whole design is "storage moves, wire does not"); domain isolation (no domain imports another's repository; the name↔id mapping lives in SQL, not in a shared Go map that would cross domains); SCHEMA.md must be updated in the same change as any schema change (Technology Stack Requirements) — Track C triggers none of that, having no schema change.
 
-**Scale/Scope**: Track A — 3 frontend files + 2 test files. Track B — 1 migration, **2** domains' `queries/*.sql` under `sqlc generate` (`order` and `event` — verified as the only two whose SQL touches the affected tables), ~4 event Go files, 3 frontend admin files, plus SCHEMA.md.
+**Scale/Scope**: Track A — 3 frontend files + 2 test files. Track B — 1 migration, **2** domains' `queries/*.sql` under `sqlc generate` (`order` and `event` — verified as the only two whose SQL touches the affected tables), ~4 event Go files, 3 frontend admin files, plus SCHEMA.md. Track C — **1 component + 2 call sites**, 3 test files, 1 e2e spec, 1 e2e helper. Zero backend files, zero migrations, zero SQL.
 
 ## Constitution Check
 
-*GATE: evaluated against constitution v3.0.0 (current; neither track requires an amendment — a first for this feature).*
+*GATE: evaluated against constitution **v4.0.0** (current). Tracks A and B require no amendment. Track C required one and it is already landed — the fee-presentation bullet was redefined on 2026-08-12, so Track C is written against the amended rule rather than proposing one.*
 
 | Principle | Verdict | Evidence |
 |---|---|---|
 | I — Modular Monolith | PASS | Track A is frontend-only. Track B stays inside `internal/order`, `internal/event`, and the `queries/` + `migrations/` sources sqlc generates from. No new packages, no new domains. |
 | II — Domain Isolation | PASS — and the blast radius is smaller than it looks | A survey of `internal/*/queries/*.sql` found **only `order`'s SQL touches the `orders` table at all**; `payment/queries/payment.sql` names `orders.status` in a comment only, and `ticket/queries/ticket.sql` never references `orders`. `payment`, `ticket`, and `notification` receive order state through order-domain adapters (`OrderRef`, `OrderDelivery`, wired in `cmd/api/adapters.go`), so R19's SQL-side mapping means they keep receiving the status **name** with no change of any kind. No domain imports `order`'s repository, and no shared Go enum map is introduced that would couple them. `order_statuses`/`genders` are joined only within the order domain's own statements — the same intra-database referential integrity `000012` established. |
 | III — DTO Isolation | PASS | Track B's governing constraint. FR-026 keeps `PENDING`/`PAID`/`CANCELLED`/`EXPIRED` on the wire while storage moves to `status_id`; the `TicketOrderDetail`, admin order, and SSE shapes are byte-identical. The one deliberate wire change — `packages.status` → `is_active` (FR-029) — is a DTO edit in `internal/event/admin_dto.go`, not a leaked sqlc struct. |
-| IV — Transactional Integrity & Idempotency | PASS | Neither track touches booking TX-B, checkout TX-D, the gateway-call-after-commit rule, the webhook idempotency short-circuit, or `email_sent`. Track A's countdown-zero rule is explicitly client-side: the server's expiry sweep is unchanged and its later status arrival is a no-op on screen (contract §6). |
-| V — Payment Gateway Abstraction | PASS | `Gateway` interface untouched; no payment code changes in either track. |
-| VI — Guest-First MVP Scope | PASS | Track A simplifies a guest dead end. Track B is corrective normalization, adding no capability — and master-list CRUD is **deliberately not built** (research R22), which is where the scope pressure would otherwise be. |
-| Critical Data Flow Rules | PASS | The one-email-to-the-buyer rule, quota semantics, ticket generation, and the form-step fee rule are all untouched. Track A removes a duplicate expiry message; it does not change when an order expires. |
-| Governance sync | **PASS with a required follow-up** | Track B changes the schema, so the Technology Stack clause ("Any schema change MUST update `SCHEMA.md` in the same change") binds: SCHEMA.md must carry migration `000013`, the two master-list tables' new shape, `orders.status_id`, `attendees.gender_id`'s new type, and `packages.is_active` **in the same commit**. ARCHITECTURE.md and PRD.md need no edit — no flow or product-scope change. |
+| IV — Transactional Integrity & Idempotency | PASS | No track touches booking TX-B, checkout TX-D, the gateway-call-after-commit rule, the webhook idempotency short-circuit, or `email_sent`. Track A's countdown-zero rule is explicitly client-side: the server's expiry sweep is unchanged and its later status arrival is a no-op on screen (contract §6). Track C touches no transaction at all — the totals it chooses between are both frozen at booking, before it ever runs. |
+| V — Payment Gateway Abstraction | PASS | `Gateway` interface untouched; no payment code changes in any of the three tracks. Track C explicitly leaves the gateway's gross amount reading `total_amount` — asserted, not assumed, in [contracts/fee-presentation.md](contracts/fee-presentation.md) §3. |
+| VI — Guest-First MVP Scope | PASS | Track A simplifies a guest dead end. Track B is corrective normalization, adding no capability — and master-list CRUD is **deliberately not built** (research R22), which is where the scope pressure would otherwise be. Track C removes a claim the screen could not support rather than adding a surface. |
+| VIII — e2e Acceptance Gate | **PASS only if Track C ships its scenario** | The form-filling step is a covered flow, so the gate binds: a change to it arrives with `e2e/specs/` updated in the same change. There is a trap here, which R27 records — the suite TRUNCATEs `fees` (`e2e/support/db.ts:44-45`), so every e2e order has `total_amount == subtotal` and a naive assertion would pass identically against fixed and unfixed code. The scenario MUST arrange a fee through the real admin API first (`POST /api/v1/admin/fees`), never by writing the table, per AGENTS.md. It MUST be seen failing against unfixed code. |
+| Critical Data Flow Rules | PASS | The one-email-to-the-buyer rule, quota semantics, and ticket generation are untouched by all three tracks. Track A removes a duplicate expiry message; it does not change when an order expires. **Track C is the fee-presentation bullet**, and it implements the v4.0.0 text exactly: pre-fee subtotal on the form step, no fee-inclusive figure before the awaiting-payment step, the replaced note, the shared "Total Payment" heading, and the null-subtotal fallback. The bullet's display-only clause is the constraint Track C is most at risk of breaking, so it is asserted directly — SC-005a and quickstart Scenario J check the charged amount is unchanged, not merely that the screen looks right. |
+| Critical Data Flow Rules — cache coherence | PASS | Track C writes nothing and invalidates nothing. It changes which field an already-cached read is rendered from; the order read itself is unchanged, so no cache key, scope, or invalidation path is touched. |
+| Governance sync | **PASS with a required follow-up (Track B only)** | Track B changes the schema, so the Technology Stack clause ("Any schema change MUST update `SCHEMA.md` in the same change") binds: SCHEMA.md must carry migration `000013`, the two master-list tables' new shape, `orders.status_id`, `attendees.gender_id`'s new type, and `packages.is_active` **in the same commit**. ARCHITECTURE.md and PRD.md need no edit — no flow or product-scope change. Track C's own governance sync is already discharged: the v4.0.0 report verified `grep -i fee` returns nothing in ARCHITECTURE.md or PRD.md and that SCHEMA.md's `fees`/`order_fees` tables are untouched by a display rule. |
 
-**Post-Phase-1 re-check**: PASS — [research.md](research.md) R17–R24, [data-model.md](data-model.md) §7, and [contracts/schema-revision.md](contracts/schema-revision.md) introduce no new violation. No new endpoint, no cross-domain repository access, no constitution amendment; the single governance obligation (SCHEMA.md) is named and owned.
+**Post-Phase-1 re-check**: PASS — [research.md](research.md) R17–R24 (rev. 3) and R25–R28 (rev. 4), [data-model.md](data-model.md) §7 and §8, and [contracts/schema-revision.md](contracts/schema-revision.md) + [contracts/fee-presentation.md](contracts/fee-presentation.md) introduce no new violation. No new endpoint, no cross-domain repository access, no outstanding constitution amendment; Track B's single governance obligation (SCHEMA.md) is named and owned, and Track C's is discharged. The one conditional verdict is Principle VIII on Track C, which is a task obligation rather than a design defect — it is carried into [Complexity Tracking](#complexity-tracking) so it cannot be quietly dropped.
 
 ## Project Structure
 
@@ -65,9 +69,41 @@ specs/011-order-buyer-info/
 ├── quickstart.md        # Phase 1 — scenarios A–F (delivered) + G–I (rev. 3)
 ├── contracts/
 │   ├── checkout-and-delivery.md   # delivered — API deltas vs specs 008/010
-│   └── schema-revision.md         # rev. 3 — package wire break; everything else asserted unchanged
-└── tasks.md             # Phase 2 (/speckit-tasks) — still lists T001–T030 only; rev. 3 tasks not yet generated
+│   ├── schema-revision.md         # rev. 3 — package wire break; everything else asserted unchanged
+│   └── fee-presentation.md        # rev. 4 — UI contract per phase; API asserted byte-identical
+└── tasks.md             # Phase 2 (/speckit-tasks) — T001–T051 all delivered (rev. 1–3);
+                         #   rev. 4 adds T052–T060 for Track C
 ```
+
+### Source Code — Track C (form-step fee presentation)
+
+```text
+frontend/
+├── components/order/
+│   ├── order-summary-panel.tsx        # :171 total_amount → the phase's figure;
+│   │                                  # :167 "Includes all taxes and fees" → the
+│   │                                  # next-step wording. The existing
+│   │                                  # `showFeeBreakdown` boolean is renamed to
+│   │                                  # `phase: "registration" | "payment"` (R26):
+│   │                                  # it now governs the headline figure as well
+│   │                                  # as the rows, and a boolean named for the
+│   │                                  # rows alone would misdescribe it.
+│   └── order-summary-panel.test.tsx   # new cases — both phases, on a fixture where
+│                                      # subtotal ≠ total_amount (R27), plus the
+│                                      # null-subtotal fallback (FR-016c)
+├── components/order/visitor-form.tsx  # :314 showFeeBreakdown={false} → phase="registration"
+├── app/(public)/events/[slug]/orders/[orderNumber]/
+│   ├── checkout/page.tsx              # :222 add phase="payment" (was the default)
+│   ├── page.test.tsx                  # :541 asserts the old note — rewrite
+│   └── checkout/page.test.tsx         # unchanged behaviour; assertion re-pinned to the phase prop
+
+e2e/
+├── support/api.ts                     # new helper: create a fee via POST /api/v1/admin/fees
+└── specs/guest-purchase.spec.ts       # new scenario — form step shows subtotal, checkout shows
+                                       # subtotal + fees, charged amount unchanged (Principle VIII)
+```
+
+**Backend**: no file. `subtotal` and `fees` already ship on `GET /ticket/order/:order_id` ([dto.go:334-336](../../backend/internal/order/dto.go)), so Track C adds no endpoint, field, query, or migration.
 
 ### Source Code — Track A (end-of-journey modal)
 
@@ -119,17 +155,18 @@ frontend/
 └── components/admin/package-form.tsx(+.test.tsx)   # <select> → toggle, default true
 ```
 
-**Structure Decision**: Existing two-app layout. Track A adds no file and deletes one screen-level branch per page. Track B adds one migration and no module, route, or table — every Go-side change is a consequence of the SQL, which is why research R19's "map inside SQL" choice is load-bearing: it is what keeps a storage change to five tables from becoming a 29-file Go edit. A file-by-file survey narrowed Track B further than first assumed: only `order` and `event` own SQL against the affected tables, so the sqlc regeneration is two query files, not four.
+**Structure Decision**: Existing two-app layout. Track C adds no file to either app — it changes which of two already-delivered fields one component renders, which is why its plan is dominated by tests rather than by code. Track A adds no file and deletes one screen-level branch per page. Track B adds one migration and no module, route, or table — every Go-side change is a consequence of the SQL, which is why research R19's "map inside SQL" choice is load-bearing: it is what keeps a storage change to five tables from becoming a 29-file Go edit. A file-by-file survey narrowed Track B further than first assumed: only `order` and `event` own SQL against the affected tables, so the sqlc regeneration is two query files, not four.
 
 ## Complexity Tracking
 
-No constitution violations to justify — the first revision of this feature that needs no amendment.
+No outstanding constitution violations to justify. Track C needed an amendment and got one before planning began (v4.0.0), rather than shipping against a rule it contradicted.
 
-Two items are carried openly rather than resolved silently:
+Three items are carried openly rather than resolved silently:
 
 | Item | Status |
 |---|---|
 | **Track B is separable** | The spec's own scope note (below FR-021) says the order-status and package requirements "can be split into their own spec without altering any decision recorded above". They are here because they were decided here. Track A ships on its own with zero dependency on Track B; if the modal is wanted before a five-table storage change, split B out — the design artifacts (research R18–R23, data-model §7, contracts/schema-revision.md) move with it intact, and Track A's (R17, R24) stay put. **Recommended** if the modal is time-sensitive. |
+| **Track C's e2e scenario is the whole gate** | Track C's code change is two lines, and its risk is entirely that nobody proves it. The unit fixtures all set `subtotal === total_amount`, and the e2e suite truncates `fees`, so the naive versions of every test pass against unfixed code (R27). The scenario must arrange a real fee through `POST /api/v1/admin/fees` and must be seen red before the fix. **If that scenario is dropped, Track C ships unverified and Principle VIII is breached** — this is the one item in this plan that cannot be traded away for scope. |
 | **FR-013 / FR-014 vs. the shipped summary** | Flagged in [checklists/requirements.md](checklists/requirements.md) and still open: the summary panel was hand-edited to drop the Booking ID (FR-013) and the per-unit price on each ticket line (FR-014) to match Figma `206-3145`, and the two assertions covering them are suspended with in-place comments in `page.test.tsx` and `checkout/page.test.tsx`. This is a spec-vs-design disagreement needing a decision, not a planning gap: either restore the UI or amend FR-013/FR-014. Neither track touches it, and it is **not** silently absorbed into this plan. |
 
 One accepted trade-off is recorded in full at research R17: FR-023 forbids the close control that Base UI's docs recommend keeping inside a modal popup for touch screen-reader users. The single "Return to Home Page" button is that escape — focusable, inside the trap, and a genuine exit — so the guidance's intent is met even though its literal shape is not.

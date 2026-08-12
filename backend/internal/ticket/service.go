@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,10 @@ type Service struct {
 	repo      *Repository
 	attendees AttendeeProvider
 	log       *logger.Logger
+	// clock reads the instant the admission-window check compares against
+	// (spec 015). Injectable so the boundary cases — exactly at the start,
+	// exactly at the end, one moment before — are testable without sleeping.
+	clock func() time.Time
 }
 
 // NewService builds the ticket service.
@@ -42,7 +47,23 @@ type Service struct {
 // attendees may be nil for callers that only use the read-side flows (validate,
 // mark used, public lookup); IssueTicketsForOrder requires it.
 func NewService(pool db.Beginner, repo *Repository, attendees AttendeeProvider, log *logger.Logger) *Service {
-	return &Service{pool: pool, repo: repo, attendees: attendees, log: log}
+	return &Service{pool: pool, repo: repo, attendees: attendees, log: log, clock: time.Now}
+}
+
+// WithClock replaces the service's clock, following the same option shape the
+// other domains use for their injected collaborators.
+func (s *Service) WithClock(now func() time.Time) *Service {
+	s.clock = now
+	return s
+}
+
+// now reads the current instant, defaulting to the wall clock if no service
+// option set one.
+func (s *Service) now() time.Time {
+	if s.clock == nil {
+		return time.Now()
+	}
+	return s.clock()
 }
 
 // IssueTicketsForOrder generates the tickets for a freshly paid order: exactly one
@@ -129,11 +150,16 @@ func (s *Service) createOneTicket(ctx context.Context, tx pgx.Tx, orderID, atten
 	return errors.New("ticket: could not allocate a unique code")
 }
 
-// Validate resolves a code to VALID / ALREADY_USED / INVALID.
+// Validate resolves a code to VALID / ALREADY_USED / INVALID / NOT_YET_VALID /
+// EXPIRED.
 //
 // It is strictly read-only. At a door the same code is routinely scanned more than
 // once before an admin decides to admit anyone, and marking a ticket used is
 // irreversible — so consuming a ticket needs its own explicit call.
+//
+// Precedence is INVALID, then ALREADY_USED, then the window, then VALID
+// (spec 015 FR-018): a ticket that was already admitted reports that, even if it
+// is also out of window, because that is the more useful thing to tell the admin.
 func (s *Service) Validate(ctx context.Context, rawCode string) (ValidationResult, error) {
 	code := NormalizeCode(rawCode)
 
@@ -149,7 +175,10 @@ func (s *Service) Validate(ctx context.Context, rawCode string) (ValidationResul
 	result := ResultInvalid
 	switch detail.Status {
 	case StatusActive:
-		result = ResultValid
+		// Only an otherwise-admissible ticket is worth checking a date against.
+		// Putting the window check on this branch alone is what gives FR-018's
+		// precedence for free.
+		result = windowResult(detail, s.now())
 	case StatusUsed:
 		result = ResultAlreadyUsed
 	case StatusRevoked:
@@ -168,7 +197,26 @@ func (s *Service) Validate(ctx context.Context, rawCode string) (ValidationResul
 		AttendeeName:   &detail.AttendeeName,
 		TicketTypeName: &detail.TicketTypeName,
 		EventName:      &detail.EventName,
+		EventStart:     &detail.EventStart,
+		EventEnd:       &detail.EventEnd,
 	}, nil
+}
+
+// windowResult places an instant against a ticket type's admission window.
+//
+// Both endpoints are inclusive and there is no tolerance either side (spec 015
+// FR-014): a holder presented one moment before the start is refused. That makes
+// the event start the moment admission OPENS rather than showtime, which is what
+// the admin form's labelling has to say.
+func windowResult(detail Detail, at time.Time) string {
+	switch {
+	case at.Before(detail.EventStart):
+		return ResultNotYetValid
+	case at.After(detail.EventEnd):
+		return ResultExpired
+	default:
+		return ResultValid
+	}
 }
 
 // MarkUsed performs the irreversible ACTIVE -> USED transition.
@@ -178,6 +226,25 @@ func (s *Service) Validate(ctx context.Context, rawCode string) (ValidationResul
 // a conflict rather than as missing.
 func (s *Service) MarkUsed(ctx context.Context, rawCode string) (MarkUsedResponse, error) {
 	code := NormalizeCode(rawCode)
+
+	// Checked BEFORE the guarded UPDATE, not folded into it: that single
+	// statement's row-count-based concurrency guarantee is load-bearing (two
+	// simultaneous admits cannot both succeed) and must not grow a date
+	// predicate. Hiding the button is not enforcement — this is (FR-017).
+	detail, err := s.repo.GetDetailByCode(ctx, code)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return MarkUsedResponse{}, apperr.NotFound(apperr.CodeTicketNotFound, notFoundMessage)
+	case err != nil:
+		return MarkUsedResponse{}, err
+	}
+	if detail.Status == StatusActive {
+		if outcome := windowResult(detail, s.now()); outcome != ResultValid {
+			return MarkUsedResponse{}, apperr.Conflict(apperr.CodeInvalidDateRange,
+				fmt.Sprintf("This ticket admits between %s and %s; it cannot be admitted now.",
+					detail.EventStart.Format(time.RFC3339), detail.EventEnd.Format(time.RFC3339)))
+		}
+	}
 
 	applied, err := s.repo.MarkUsed(ctx, code)
 	if err != nil {

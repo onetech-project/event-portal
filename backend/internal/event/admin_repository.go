@@ -43,6 +43,8 @@ type AdminTicketTypeParams struct {
 	Quota       int32
 	SalesStart  timeValue
 	SalesEnd    timeValue
+	EventStart  timeValue
+	EventEnd    timeValue
 }
 
 // --- Admin event reads ----------------------------------------------------
@@ -213,6 +215,15 @@ type TicketTypeDisplayRecord struct {
 	EventAddress   string
 	EventStartDate time.Time
 	EventEndDate   time.Time
+	// AdmissionStarts are the days this line admits on — for a ticket type,
+	// exactly one: its own event_start (spec 015). Kept separate from
+	// EventStartDate/EventEndDate above, which stay the parent event's dates;
+	// the two are not interchangeable, and merging them would silently make a
+	// field named for the event carry something else.
+	//
+	// A slice rather than a scalar so a ticket type and a package present the
+	// same shape to the order domain, which renders both through one rule.
+	AdmissionStarts []time.Time
 }
 
 // TicketTypeDisplaysByIDs resolves ticket type ids to their display labels and
@@ -230,13 +241,14 @@ func (r *Repository) TicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UUI
 	}
 	for _, row := range rows {
 		displays[row.ID] = TicketTypeDisplayRecord{
-			TicketTypeName: row.Name,
-			EventName:      row.EventName,
-			EventSlug:      row.EventSlug,
-			EventVenue:     row.EventVenue,
-			EventAddress:   row.EventAddress,
-			EventStartDate: row.EventStartDate,
-			EventEndDate:   row.EventEndDate,
+			TicketTypeName:  row.Name,
+			EventName:       row.EventName,
+			EventSlug:       row.EventSlug,
+			EventVenue:      row.EventVenue,
+			EventAddress:    row.EventAddress,
+			EventStartDate:  row.EventStartDate,
+			EventEndDate:    row.EventEndDate,
+			AdmissionStarts: []time.Time{row.TicketEventStart},
 		}
 	}
 	return displays, nil
@@ -276,6 +288,7 @@ func (r *Repository) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID
 		out = append(out, TicketTypeRow{
 			ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 			Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
+			EventStart: row.EventStart, EventEnd: row.EventEnd,
 		})
 	}
 	return out, nil
@@ -293,6 +306,7 @@ func (r *Repository) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (Tick
 	return TicketTypeRow{
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
+		EventStart: row.EventStart, EventEnd: row.EventEnd,
 	}, nil
 }
 
@@ -306,6 +320,8 @@ func (r *Repository) CreateTicketType(ctx context.Context, p AdminTicketTypePara
 		Quota:       p.Quota,
 		SalesStart:  p.SalesStart,
 		SalesEnd:    p.SalesEnd,
+		EventStart:  p.EventStart,
+		EventEnd:    p.EventEnd,
 	})
 	if err != nil {
 		return TicketTypeRow{}, fmt.Errorf("create ticket type: %w", err)
@@ -313,6 +329,7 @@ func (r *Repository) CreateTicketType(ctx context.Context, p AdminTicketTypePara
 	return TicketTypeRow{
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
+		EventStart: row.EventStart, EventEnd: row.EventEnd,
 	}, nil
 }
 
@@ -331,6 +348,8 @@ func (r *Repository) UpdateTicketType(ctx context.Context, id uuid.UUID, p Admin
 		Quota:       p.Quota,
 		SalesStart:  p.SalesStart,
 		SalesEnd:    p.SalesEnd,
+		EventStart:  p.EventStart,
+		EventEnd:    p.EventEnd,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TicketTypeRow{}, ErrNotFound
@@ -341,6 +360,7 @@ func (r *Repository) UpdateTicketType(ctx context.Context, id uuid.UUID, p Admin
 	return TicketTypeRow{
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
+		EventStart: row.EventStart, EventEnd: row.EventEnd,
 	}, nil
 }
 

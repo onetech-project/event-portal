@@ -66,8 +66,20 @@ func ticketTypeBody(eventID uuid.UUID, quota int) string {
 	end := time.Now().Add(29 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	return fmt.Sprintf(`{
 		"event_id":"%s","name":"Regular","price":"150000.00","quota":%d,
-		"sales_start":"%s","sales_end":"%s"
-	}`, eventID, quota, start, end)
+		"sales_start":"%s","sales_end":"%s",
+		"event_start":"%s","event_end":"%s"
+	}`, eventID, quota, start, end, eventWindowStart(), eventWindowEnd())
+}
+
+// eventWindowStart/End sit an hour inside the +30d/+31d span that SeedEvent uses,
+// so the containment check (spec 015 FR-005) has room for the clock difference
+// between the seeded row and this body.
+func eventWindowStart() string {
+	return time.Now().Add(30*24*time.Hour + time.Hour).UTC().Format(time.RFC3339)
+}
+
+func eventWindowEnd() string {
+	return time.Now().Add(31*24*time.Hour - time.Hour).UTC().Format(time.RFC3339)
 }
 
 // ticketTypeBodyWithDescription is the same body carrying the admin-authored
@@ -77,8 +89,9 @@ func ticketTypeBodyWithDescription(eventID uuid.UUID, quota int, description str
 	end := time.Now().Add(29 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	return fmt.Sprintf(`{
 		"event_id":"%s","name":"Regular","description":%q,"price":"150000.00","quota":%d,
-		"sales_start":"%s","sales_end":"%s"
-	}`, eventID, description, quota, start, end)
+		"sales_start":"%s","sales_end":"%s",
+		"event_start":"%s","event_end":"%s"
+	}`, eventID, description, quota, start, end, eventWindowStart(), eventWindowEnd())
 }
 
 func TestAdminTicketTypeRoundTripsItsDescription(t *testing.T) {
@@ -164,7 +177,7 @@ func TestAdminGetEventIncludesItsTicketTypes(t *testing.T) {
 	first := types[0].(map[string]any)
 	assert.ElementsMatch(t,
 		[]string{"id", "event_id", "name", "description", "price", "quota", "sold",
-			"sales_start", "sales_end"},
+			"sales_start", "sales_end", "event_start", "event_end"},
 		keysOf(first))
 	assert.InDelta(t, 42.0, first["quota"], 0.001)
 	assert.InDelta(t, 0.0, first["sold"], 0.001)

@@ -62,7 +62,11 @@ func (q *Queries) CreateTicket(ctx context.Context, arg CreateTicketParams) (Cre
 
 const getTicketDetailByCode = `-- name: GetTicketDetailByCode :one
 SELECT t.ticket_code, t.status, a.name AS attendee_name,
-       tt.name AS ticket_type_name, e.name AS event_name
+       tt.name AS ticket_type_name, e.name AS event_name,
+       -- The ticket type's admission window (spec 015): the gate checks the
+       -- moment of validation against it. The join already existed, so this is
+       -- a projection change, not a new hop.
+       tt.event_start, tt.event_end
 FROM tickets t
 JOIN attendees a ON a.id = t.attendee_id
 JOIN ticket_types tt ON tt.id = a.ticket_type_id
@@ -76,6 +80,8 @@ type GetTicketDetailByCodeRow struct {
 	AttendeeName   *string
 	TicketTypeName string
 	EventName      string
+	EventStart     time.Time
+	EventEnd       time.Time
 }
 
 // Exact match on the already-canonical stored code so idx_tickets_ticket_code is
@@ -89,6 +95,8 @@ func (q *Queries) GetTicketDetailByCode(ctx context.Context, ticketCode string) 
 		&i.AttendeeName,
 		&i.TicketTypeName,
 		&i.EventName,
+		&i.EventStart,
+		&i.EventEnd,
 	)
 	return i, err
 }
@@ -107,7 +115,9 @@ func (q *Queries) GetTicketStatusByCode(ctx context.Context, ticketCode string) 
 const listTicketDetailsByOrderID = `-- name: ListTicketDetailsByOrderID :many
 SELECT t.ticket_code, t.status, a.name AS attendee_name, a.email AS attendee_email,
        tt.name AS ticket_type_name, e.name AS event_name,
-       e.venue, e.start_date
+       -- The venue is still the event's; the DATE is the ticket type's own
+       -- admission window (spec 015 FR-011). A Day 2 pass must not print Day 1.
+       e.venue, tt.event_start, tt.event_end
 FROM tickets t
 JOIN attendees a ON a.id = t.attendee_id
 JOIN ticket_types tt ON tt.id = a.ticket_type_id
@@ -124,7 +134,8 @@ type ListTicketDetailsByOrderIDRow struct {
 	TicketTypeName string
 	EventName      string
 	Venue          string
-	StartDate      time.Time
+	EventStart     time.Time
+	EventEnd       time.Time
 }
 
 // Everything the ticket PDF prints, for the initial delivery and every resend.
@@ -147,7 +158,8 @@ func (q *Queries) ListTicketDetailsByOrderID(ctx context.Context, orderID uuid.U
 			&i.TicketTypeName,
 			&i.EventName,
 			&i.Venue,
-			&i.StartDate,
+			&i.EventStart,
+			&i.EventEnd,
 		); err != nil {
 			return nil, err
 		}

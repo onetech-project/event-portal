@@ -185,6 +185,8 @@ func (s *Service) TicketTypesForEventSlug(ctx context.Context, slug string) ([]T
 					QuotaRemaining: row.Quota,
 					SalesStart:     row.SalesStart,
 					SalesEnd:       row.SalesEnd,
+					EventStart:     row.EventStart,
+					EventEnd:       row.EventEnd,
 				})
 			}
 			return out, nil

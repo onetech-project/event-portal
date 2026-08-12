@@ -37,8 +37,14 @@ type TicketTypeRow struct {
 	Description *string
 	Price       decimal.Decimal
 	Quota       int32
-	SalesStart  time.Time
-	SalesEnd    time.Time
+	// SalesStart/SalesEnd bound when this type may be BOUGHT.
+	SalesStart time.Time
+	SalesEnd   time.Time
+	// EventStart/EventEnd bound when a ticket of this type ADMITS its holder
+	// (spec 015). EventStart is the instant admission opens, not showtime.
+	// Independent of the sales window in both directions.
+	EventStart time.Time
+	EventEnd   time.Time
 }
 
 // Repository is the only place in the codebase that talks to events/ticket_types.
@@ -124,6 +130,8 @@ func (r *Repository) ListTicketTypesByEventID(ctx context.Context, eventID uuid.
 			Quota:       row.Quota,
 			SalesStart:  row.SalesStart,
 			SalesEnd:    row.SalesEnd,
+			EventStart:  row.EventStart,
+			EventEnd:    row.EventEnd,
 		})
 	}
 	return out, nil
@@ -158,6 +166,8 @@ func (r *Repository) GetTicketTypeByID(ctx context.Context, tx pgx.Tx, id uuid.U
 		Quota:       row.Quota,
 		SalesStart:  row.SalesStart,
 		SalesEnd:    row.SalesEnd,
+		EventStart:  row.EventStart,
+		EventEnd:    row.EventEnd,
 	}, nil
 }
 

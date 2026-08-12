@@ -28,7 +28,29 @@ type TicketDetail struct {
 	TicketTypeName string
 	EventName      string
 	Venue          string
-	StartDate      time.Time
+	// The ticket type's own admission window (spec 015). A Day 2 pass prints
+	// Day 2, not the festival's opening date.
+	EventStart time.Time
+	EventEnd   time.Time
+}
+
+// FormatTicketWindow renders a ticket's admission window for the printed ticket
+// and the email.
+//
+// A window that opens and closes on the same day — the ordinary case — reads as
+// one date with a time range rather than as two near-identical datetimes, which
+// is what a holder glancing at a ticket at the gate actually needs.
+func FormatTicketWindow(start, end time.Time) string {
+	const dateTime = "Mon, 02 Jan 2006 15:04 MST"
+	if end.IsZero() || end.Equal(start) {
+		return start.Format(dateTime)
+	}
+	sy, sm, sd := start.Date()
+	ey, em, ed := end.Date()
+	if sy == ey && sm == em && sd == ed {
+		return fmt.Sprintf("%s - %s", start.Format(dateTime), end.Format("15:04 MST"))
+	}
+	return fmt.Sprintf("%s - %s", start.Format(dateTime), end.Format(dateTime))
 }
 
 // RenderQR draws a ticket code as a QR PNG in memory.
@@ -136,7 +158,7 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 		pdf.MultiCell(detailWidth, 5.5, value, "", "L", false)
 		pdf.Ln(1.5)
 	}
-	labelValue("DATE & TIME", ticket.StartDate.Format("Mon, 02 Jan 2006 15:04 MST"))
+	labelValue("DATE & TIME", FormatTicketWindow(ticket.EventStart, ticket.EventEnd))
 	labelValue("VENUE", ticket.Venue)
 
 	pdf.SetDrawColor(pdfLine[0], pdfLine[1], pdfLine[2])

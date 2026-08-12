@@ -9,7 +9,11 @@ RETURNING id, ticket_code, order_id, attendee_id, status, created_at;
 -- Exact match on the already-canonical stored code so idx_tickets_ticket_code is
 -- used; never UPPER(ticket_code) = ..., which would force a sequential scan.
 SELECT t.ticket_code, t.status, a.name AS attendee_name,
-       tt.name AS ticket_type_name, e.name AS event_name
+       tt.name AS ticket_type_name, e.name AS event_name,
+       -- The ticket type's admission window (spec 015): the gate checks the
+       -- moment of validation against it. The join already existed, so this is
+       -- a projection change, not a new hop.
+       tt.event_start, tt.event_end
 FROM tickets t
 JOIN attendees a ON a.id = t.attendee_id
 JOIN ticket_types tt ON tt.id = a.ticket_type_id
@@ -39,7 +43,9 @@ ORDER BY t.created_at ASC, t.ticket_code ASC;
 -- groups an order's tickets by it and sends each holder their own PDF.
 SELECT t.ticket_code, t.status, a.name AS attendee_name, a.email AS attendee_email,
        tt.name AS ticket_type_name, e.name AS event_name,
-       e.venue, e.start_date
+       -- The venue is still the event's; the DATE is the ticket type's own
+       -- admission window (spec 015 FR-011). A Day 2 pass must not print Day 1.
+       e.venue, tt.event_start, tt.event_end
 FROM tickets t
 JOIN attendees a ON a.id = t.attendee_id
 JOIN ticket_types tt ON tt.id = a.ticket_type_id

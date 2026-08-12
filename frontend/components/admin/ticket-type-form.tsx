@@ -53,6 +53,8 @@ export function TicketTypeForm({
       quota: ticketType?.quota ?? 0,
       salesStart: toDateTimeLocal(ticketType?.sales_start),
       salesEnd: toDateTimeLocal(ticketType?.sales_end),
+      eventStart: toDateTimeLocal(ticketType?.event_start),
+      eventEnd: toDateTimeLocal(ticketType?.event_end),
     },
   });
 
@@ -68,6 +70,8 @@ export function TicketTypeForm({
       quota: values.quota,
       sales_start: toApiDateTime(values.salesStart),
       sales_end: toApiDateTime(values.salesEnd),
+      event_start: toApiDateTime(values.eventStart),
+      event_end: toApiDateTime(values.eventEnd),
     };
 
     if (isEditing) {
@@ -135,6 +139,22 @@ export function TicketTypeForm({
 
           <Field label="Sales end" error={errors.salesEnd?.message}>
             <Input type="datetime-local" {...register("salesEnd")} />
+          </Field>
+
+          <Field
+            label="Event start"
+            error={errors.eventStart?.message}
+            hint="When this ticket ADMITS its holder — the moment the gate opens for it, not showtime. Validation refuses a ticket presented even a moment earlier. Separate from the sales window above."
+          >
+            <Input type="datetime-local" {...register("eventStart")} />
+          </Field>
+
+          <Field
+            label="Event end"
+            error={errors.eventEnd?.message}
+            hint="The last moment this ticket admits its holder. Must fall inside the event's own dates."
+          >
+            <Input type="datetime-local" {...register("eventEnd")} />
           </Field>
 
           <div className="flex gap-2 sm:col-span-2">

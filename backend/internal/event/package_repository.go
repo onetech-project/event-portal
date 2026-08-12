@@ -241,6 +241,13 @@ type PackageDisplayRecord struct {
 	EventAddress   string
 	EventStartDate time.Time
 	EventEndDate   time.Time
+	// AdmissionStarts are every distinct day this bundle admits on, ascending,
+	// derived from its constituent ticket types (spec 015 FR-021a). A package
+	// stores no window of its own.
+	//
+	// A list, not a span: collapsing a Day 1 + Day 2 bundle to one range told the
+	// buyer they were attending on one day when they hold admission for two.
+	AdmissionStarts []time.Time
 }
 
 // PackageDisplaysByIDs resolves package ids to their display labels and owning
@@ -266,6 +273,22 @@ func (r *Repository) PackageDisplaysByIDs(ctx context.Context, ids []uuid.UUID) 
 			EventStartDate: row.EventStartDate,
 			EventEndDate:   row.EventEndDate,
 		}
+	}
+
+	// Second batched query over the same ids: the days each bundle admits on.
+	starts, err := r.queries.ListPackageAdmissionStartsByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list package admission starts: %w", err)
+	}
+	for _, row := range starts {
+		display, ok := displays[row.PackageID]
+		if !ok {
+			// A composition row whose package the first query did not return —
+			// possible only if the package vanished between the two reads.
+			continue
+		}
+		display.AdmissionStarts = append(display.AdmissionStarts, row.EventStart)
+		displays[row.PackageID] = display
 	}
 	return displays, nil
 }

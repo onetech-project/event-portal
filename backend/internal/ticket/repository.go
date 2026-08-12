@@ -70,6 +70,8 @@ func (r *Repository) GetDetailByCode(ctx context.Context, code string) (Detail, 
 		AttendeeName:   strv(row.AttendeeName),
 		TicketTypeName: row.TicketTypeName,
 		EventName:      row.EventName,
+		EventStart:     row.EventStart,
+		EventEnd:       row.EventEnd,
 	}, nil
 }
 
@@ -138,7 +140,8 @@ func (r *Repository) ListDetailsByOrderID(ctx context.Context, orderID uuid.UUID
 			TicketTypeName: row.TicketTypeName,
 			EventName:      row.EventName,
 			Venue:          row.Venue,
-			StartDate:      row.StartDate,
+			EventStart:     row.EventStart,
+			EventEnd:       row.EventEnd,
 		})
 	}
 	return out, nil

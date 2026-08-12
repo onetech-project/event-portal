@@ -227,7 +227,7 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail, recipient strin
 		fmt.Fprintf(&sb, `<div style="font-size:17px;font-weight:bold;padding-top:8px">%s</div>`,
 			html.EscapeString(ticket.EventName))
 		fmt.Fprintf(&sb, `<div style="font-size:13px;color:#52525b;padding-top:4px">%s · %s</div>`,
-			html.EscapeString(ticket.StartDate.Format("Mon, 02 Jan 2006 15:04 MST")),
+			html.EscapeString(FormatTicketWindow(ticket.EventStart, ticket.EventEnd)),
 			html.EscapeString(ticket.Venue))
 		sb.WriteString(`<div style="border-top:1px solid ` + emailLine + `;margin-top:12px;padding-top:10px;font-size:12px;color:#a1a1aa">Attendee</div>`)
 		fmt.Fprintf(&sb, `<div style="font-size:15px;font-weight:bold">%s</div>`,

@@ -60,6 +60,25 @@ export function isoDaysFromNow(days: number): string {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+export function isoHoursFromNow(hours: number): string {
+  return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * The default admission window for a ticket type seeded against a
+ * default-dated event (spec 015).
+ *
+ * Deliberately an hour INSIDE the event's +30d/+31d span rather than equal to
+ * it. The event row and the ticket row are created by separate calls that read
+ * the clock at different moments, so a nominally identical +31d would land a
+ * few milliseconds AFTER the event's end and trip the containment check
+ * (FR-005). Callers who need an exact match pass the event's own dates
+ * explicitly, as createSellableEvent does.
+ */
+export function defaultEventWindow(): { start: string; end: string } {
+  return { start: isoHoursFromNow(30 * 24 + 1), end: isoHoursFromNow(31 * 24 - 1) };
+}
+
 /**
  * Creates a published event with terms and one ticket type — the minimum a guest
  * needs to complete a purchase.
@@ -76,12 +95,28 @@ export async function createSellableEvent(
     price?: string;
     ticketName?: string;
     status?: "PUBLISHED" | "DRAFT";
+    /**
+     * The EVENT's own dates. Default to the standard +30d/+31d. Override both
+     * together to seed an event that is running now — a validation scenario
+     * needs one, because a ticket's admission window must sit inside its event
+     * (spec 015 FR-005) and validation admits no tolerance (FR-014).
+     */
+    startDate?: string;
+    endDate?: string;
+    /** The ticket's admission window. Defaults to the event's own dates. */
+    eventStart?: string;
+    eventEnd?: string;
   },
 ): Promise<{ event: SeededEvent; ticketType: SeededTicketType }> {
+  const startDate = options.startDate ?? isoDaysFromNow(30);
+  const endDate = options.endDate ?? isoDaysFromNow(31);
+
   const event = await createEvent(token, {
     slug: options.slug,
     name: options.name ?? `UAT ${options.slug}`,
     status: options.status ?? "PUBLISHED",
+    startDate,
+    endDate,
   });
 
   await putTerms(token, event.id, "<p>These are the UAT terms and conditions.</p>");
@@ -91,6 +126,8 @@ export async function createSellableEvent(
     name: options.ticketName ?? "Regular",
     price: options.price ?? "150000.00",
     quota: options.quota ?? 10,
+    eventStart: options.eventStart ?? startDate,
+    eventEnd: options.eventEnd ?? endDate,
   });
 
   return { event, ticketType };
@@ -98,7 +135,13 @@ export async function createSellableEvent(
 
 export async function createEvent(
   token: string,
-  options: { slug: string; name: string; status?: "PUBLISHED" | "DRAFT" },
+  options: {
+    slug: string;
+    name: string;
+    status?: "PUBLISHED" | "DRAFT";
+    startDate?: string;
+    endDate?: string;
+  },
 ): Promise<SeededEvent> {
   const { status, data } = await request<SeededEvent>("/admin/events", {
     method: "POST",
@@ -109,8 +152,8 @@ export async function createEvent(
       description: "Created by the UAT suite.",
       venue: "UAT Arena",
       address: "1 Test Street",
-      start_date: isoDaysFromNow(30),
-      end_date: isoDaysFromNow(31),
+      start_date: options.startDate ?? isoDaysFromNow(30),
+      end_date: options.endDate ?? isoDaysFromNow(31),
       banner_url: "https://placehold.co/1200x400/png",
       status: options.status ?? "PUBLISHED",
     }),
@@ -154,6 +197,53 @@ export async function putTerms(token: string, eventId: string, content: string):
   }
 }
 
+export type SeededPackage = {
+  id: string;
+  name: string;
+};
+
+/**
+ * Creates a bundle over the given ticket types, one of each per unit.
+ *
+ * A package holds no inventory of its own — what it can sell is derived from its
+ * constituents' remaining quota — so there is deliberately no quota argument
+ * here, and sending one would be rejected by the API.
+ */
+export async function createPackage(
+  token: string,
+  options: {
+    eventId: string;
+    name: string;
+    price: string;
+    ticketTypeIds: string[];
+    salesStart?: string;
+    salesEnd?: string;
+  },
+): Promise<SeededPackage> {
+  const { status, data } = await request<SeededPackage>("/admin/packages", {
+    method: "POST",
+    token,
+    body: JSON.stringify({
+      event_id: options.eventId,
+      name: options.name,
+      description: "Bundle created by the UAT suite.",
+      price: options.price,
+      sales_start: options.salesStart ?? isoDaysFromNow(-1),
+      sales_end: options.salesEnd ?? isoDaysFromNow(29),
+      is_active: true,
+      components: options.ticketTypeIds.map((id) => ({
+        ticket_type_id: id,
+        quantity_per_unit: 1,
+      })),
+    }),
+  });
+
+  if (status !== 201) {
+    throw new Error(`create package failed with ${status}: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
 export async function createTicketType(
   token: string,
   options: {
@@ -164,6 +254,13 @@ export async function createTicketType(
     /** Defaults to a window that is open now; override to close it. */
     salesStart?: string;
     salesEnd?: string;
+    /**
+     * The admission window (spec 015). Required by the API, and must sit inside
+     * the parent event's own dates. Defaults to the standard +30d/+31d event
+     * span, which is what createEvent seeds.
+     */
+    eventStart?: string;
+    eventEnd?: string;
   },
 ): Promise<SeededTicketType> {
   const { status, data } = await request<SeededTicketType>("/admin/ticket-types", {
@@ -176,6 +273,8 @@ export async function createTicketType(
       quota: options.quota,
       sales_start: options.salesStart ?? isoDaysFromNow(-1),
       sales_end: options.salesEnd ?? isoDaysFromNow(29),
+      event_start: options.eventStart ?? defaultEventWindow().start,
+      event_end: options.eventEnd ?? defaultEventWindow().end,
     }),
   });
 
@@ -199,6 +298,9 @@ export async function updateTicketTypeWindow(
     quota: number;
     salesStart: string;
     salesEnd: string;
+    /** Full replace: omitting these would blank the admission window. */
+    eventStart?: string;
+    eventEnd?: string;
   },
 ): Promise<void> {
   const { status, data } = await request(`/admin/ticket-types/${ticketTypeId}`, {
@@ -211,6 +313,8 @@ export async function updateTicketTypeWindow(
       quota: options.quota,
       sales_start: options.salesStart,
       sales_end: options.salesEnd,
+      event_start: options.eventStart ?? defaultEventWindow().start,
+      event_end: options.eventEnd ?? defaultEventWindow().end,
     }),
   });
   if (status !== 200) {
@@ -255,8 +359,20 @@ export async function publicEventList(): Promise<Array<{ slug: string; name: str
 
 export async function publicTicketTypes(
   slug: string,
-): Promise<Array<{ id: string; name: string; quota_remaining: number }>> {
-  const { data } = await request<Array<{ id: string; name: string; quota_remaining: number }>>(
+): Promise<Array<{
+  id: string;
+  name: string;
+  quota_remaining: number;
+  event_start: string;
+  event_end: string;
+}>> {
+  const { data } = await request<Array<{
+  id: string;
+  name: string;
+  quota_remaining: number;
+  event_start: string;
+  event_end: string;
+}>>(
     `/ticket/${encodeURIComponent(slug)}`,
   );
   return data;
@@ -275,6 +391,74 @@ export async function adminOrders(
     `/admin/orders${query ? `?${query}` : ""}`,
     { token },
   );
+  return data;
+}
+
+export type SeededFee = {
+  id: string;
+  name: string;
+  fee_type: "PERCENT" | "FIXED";
+  value: string;
+};
+
+/**
+ * Add one fee to the master list, so an order books with `total_amount`
+ * genuinely above its `subtotal`.
+ *
+ * Call this per-test rather than relying on the seed: migration 000010 inserts
+ * `PPN (11%)` and `Admin Fee`, but `resetDatabase` TRUNCATEs `fees` along with
+ * everything else (support/db.ts), so by the time a scenario runs there are no
+ * fees at all and every order has `total_amount === subtotal`. A fee assertion
+ * written against that state passes whatever the code does.
+ */
+export async function createFee(
+  token: string,
+  fee: {
+    name: string;
+    feeType: "PERCENT" | "FIXED";
+    value: string;
+    position?: number;
+  },
+): Promise<SeededFee> {
+  const { status, data } = await request<SeededFee>("/admin/fees", {
+    method: "POST",
+    token,
+    body: JSON.stringify({
+      name: fee.name,
+      fee_type: fee.feeType,
+      value: fee.value,
+      position: fee.position ?? 1,
+      is_active: true,
+    }),
+  });
+  if (status !== 201) {
+    throw new Error(`create fee failed with ${status}: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+export type PublicOrder = {
+  order_id: string;
+  status: string;
+  total_amount: string;
+  subtotal: string | null;
+  fees: Array<{ name: string; amount: string }>;
+  payment: { amount: string } | null;
+};
+
+/**
+ * The guest order read the order screens route on. Used here to assert against
+ * the authoritative figures rather than against what the panel happens to
+ * render — the point of spec 011 FR-016b is that the stored total does NOT move,
+ * and only the API can say so.
+ */
+export async function publicOrder(orderNumber: string): Promise<PublicOrder> {
+  const { status, data } = await request<PublicOrder>(
+    `/ticket/order/${encodeURIComponent(orderNumber)}`,
+  );
+  if (status !== 200) {
+    throw new Error(`read order ${orderNumber} failed with ${status}`);
+  }
   return data;
 }
 

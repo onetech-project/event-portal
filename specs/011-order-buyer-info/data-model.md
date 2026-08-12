@@ -202,3 +202,25 @@ The steps are not freely reorderable — each of these is a hard dependency, not
 ## 7.6 End-of-journey modal (FR-022 – FR-024) — no schema impact
 
 Frontend-only; listed here so the feature's data surface is complete. `frontend/components/order/expired-state.tsx` (full-page card, two buttons) is replaced by an `EndOfJourneyDialog` rendered *over* each order page's normal tree rather than in place of it. The order's EXPIRED/CANCELLED state is read from the same `status` field as today — which, per R19, does not change shape.
+
+## 8. Form-step fee presentation (FR-016, FR-016a – FR-016c) — no schema impact, and no wire impact either
+
+Listed for completeness, and to record a stronger claim than §7.6's: Track C changes neither storage nor the wire. It selects between two fields that both already exist on the guest order read.
+
+| Field | Source | Track C effect |
+|---|---|---|
+| `orders.total_amount` | column, frozen at booking (TX-B) | **Unchanged** — same value stored, charged, sent to the gateway, and printed on the receipt |
+| `orders.subtotal` | column, frozen at booking, `NULL` on pre-`000010` orders | **Unchanged** — newly *rendered* on the form step, having previously been rendered only on the payment step |
+| `order_fees` rows | frozen per-order snapshot | **Unchanged** — same rows, same names, same amounts, same computation moment |
+| `TicketOrderDetail.subtotal` / `.fees` / `.total_amount` | `backend/internal/order/dto.go:330-336` | **Unchanged** — no field added, removed, renamed, or retyped |
+
+**Which figure each phase renders** (the whole of the change):
+
+| Phase | Before | After |
+|---|---|---|
+| Registration (holder forms) | `total_amount`, note "Includes all taxes and fees" | `subtotal ?? total_amount`, note "taxes and fees added at the next step" |
+| Awaiting payment (checkout) | `total_amount`, itemized rows above it | **Unchanged** |
+
+The `??` is nullish, not falsy, by decision R28: `"0.00"` is a real subtotal and must render as `Rp 0`; only a `NULL` subtotal (an order predating fees) takes the fallback, and for such an order the stored total already excludes fees, so the fallback is exact rather than approximate.
+
+**Invariant the tests must hold** (SC-005a): for every order, the amount charged after this change equals the amount that would have been charged before it. Track C has no legitimate path to violating this, which is precisely why it should be asserted — a display change that moves money would do so silently.
