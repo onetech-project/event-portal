@@ -407,9 +407,11 @@ const GENDERS = [
 ];
 
 /**
- * A valid spec-011 phone (FR-006, clarified 2026-08-07): 10-15 digits, stored
- * exactly as typed. The local `08…` form is what this fixture enters, so it is
- * also what the payload carries — the form normalises nothing.
+ * A valid spec-011 phone (FR-006, clarified 2026-08-07, floor raised
+ * 2026-08-13): 12-15 digits, stored exactly as typed. The local `08…` form is
+ * what this fixture enters, so it is also what the payload carries — the form
+ * normalises nothing. Twelve digits is now the minimum, which this value meets
+ * exactly.
  */
 const PHONE = "081234567890";
 
@@ -445,7 +447,7 @@ async function fillCard(
 ) {
   const names = screen.getAllByPlaceholderText(/as written on id card/i);
   const emails = screen.getAllByPlaceholderText("name@example.com");
-  const phones = screen.getAllByPlaceholderText("08123456789");
+  const phones = screen.getAllByPlaceholderText("081234567890");
   const dobs = screen.getAllByPlaceholderText("DD/MM/YYYY");
   const genders = screen.getAllByRole("combobox");
   await user.type(names[index], person.name);
@@ -526,9 +528,22 @@ describe("order page — registration phase (payment not started)", () => {
     expect(screen.getByText("Jakarta, Indonesia")).toBeInTheDocument();
     expect(screen.getByText(/gate opens at .* WIB/i)).toBeInTheDocument();
 
-    // NOTE: spec 011 FR-013 asks for the Booking ID in this header; it was
-    // removed from the panel by hand to match the design, so the assertion is
-    // suspended rather than deleted — restore both together, or amend FR-013.
+    // FR-013 and FR-014 as amended 2026-08-13: the card carries neither the
+    // Booking ID nor a per-unit price. Both are absence assertions, so each
+    // leans on the rendered positives above (venue, gate time) and the QRIS
+    // radio below — a panel that failed to render would otherwise satisfy them
+    // both at once (research R30).
+    expect(screen.queryByText(PENDING.order_id)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ORD-/)).not.toBeInTheDocument();
+
+    // HELD's line is Regular x2 at 250.000, subtotal 500.000. The unit price is
+    // the one figure that must NOT appear, and 250.000 collides with none of
+    // the line subtotal (500.000), the fee (50.000), or the total (550.000).
+    // "Regular" also names each holder card on this step, so the panel's copy
+    // is one of several — getAllByText, not getByText.
+    expect(screen.getAllByText("Regular").length).toBeGreaterThan(0);
+    expect(screen.getByText("x2")).toBeInTheDocument();
+    expect(screen.queryByText(/Rp\s?250[.,]000/)).not.toBeInTheDocument();
 
     // QRIS is a pre-selected radio — the sole payment method.
     expect(screen.getByRole("radio", { name: /pay with qris/i })).toBeChecked();
@@ -552,7 +567,7 @@ describe("order page — registration phase (payment not started)", () => {
     // (FR-016a) and a note that no longer claims the fees are already in it.
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
     expect(screen.getByTestId("order-total-figure")).toHaveTextContent("Rp 500.000");
-    expect(screen.getByText(/taxes and fees added at the next step/i)).toBeInTheDocument();
+    expect(screen.getByText(/Excludes taxes and fees/i)).toBeInTheDocument();
     expect(screen.queryByText(/includes all taxes and fees/i)).not.toBeInTheDocument();
 
     // The fee-inclusive figure appears nowhere on this step — the assertion
@@ -597,7 +612,7 @@ describe("order page — registration phase (payment not started)", () => {
     // Untouched fields now show their errors…
     expect(await screen.findAllByText("Select a gender.")).toHaveLength(2);
     expect(screen.getAllByText("Full name is required.")).toHaveLength(2);
-    expect(screen.getAllByText("Enter a phone number of 10-15 digits.")).toHaveLength(2);
+    expect(screen.getAllByText("Enter a phone number of 12-15 digits.")).toHaveLength(2);
     expect(screen.getAllByText("Date of birth is required.")).toHaveLength(2);
     // …and nothing was submitted.
     expect(
@@ -605,28 +620,34 @@ describe("order page — registration phase (payment not started)", () => {
     ).toBe(false);
   });
 
-  it("rejects a phone number outside 10-15 digits with the exact message", async () => {
+  it("rejects a phone number outside 12-15 digits with the exact message", async () => {
     vi.stubGlobal("fetch", registrationFetch(HELD));
 
     renderOrder();
-    const phones = await screen.findAllByPlaceholderText("08123456789");
+    const phones = await screen.findAllByPlaceholderText("081234567890");
     // The numeric mobile keyboard (FR-006); the mask and schema do the rest.
     expect(phones[0]).toHaveAttribute("inputmode", "numeric");
 
     const user = userEvent.setup();
-    await user.type(phones[0], "081234");
+    // Eleven digits — an ordinary local-form Indonesian number, and the case
+    // the 2026-08-13 floor added. Under the old 10-digit floor this passed, so
+    // it is the input that distinguishes the two rules; a shorter value would
+    // have been rejected either way and would prove nothing.
+    await user.type(phones[0], "08123456789");
     await user.tab(); // mode "onTouched": the error appears on leaving the field.
 
     expect(
-      await screen.findByText("Enter a phone number of 10-15 digits."),
+      await screen.findByText("Enter a phone number of 12-15 digits."),
     ).toBeInTheDocument();
 
-    // A full-length number clears it again.
+    // The same subscriber number in international form is twelve digits and
+    // clears it. Nothing normalises between the two spellings — the floor is
+    // counted on what was typed.
     await user.clear(phones[0]);
-    await user.type(phones[0], PHONE);
+    await user.type(phones[0], "628123456789");
     await waitFor(() =>
       expect(
-        screen.queryByText("Enter a phone number of 10-15 digits."),
+        screen.queryByText("Enter a phone number of 12-15 digits."),
       ).not.toBeInTheDocument(),
     );
   });
@@ -638,10 +659,14 @@ describe("order page — registration phase (payment not started)", () => {
     vi.stubGlobal("fetch", registrationFetch(HELD));
 
     renderOrder();
-    const phones = await screen.findAllByPlaceholderText("08123456789");
+    const phones = await screen.findAllByPlaceholderText("081234567890");
     const user = userEvent.setup();
 
     await user.type(phones[0], "abc0812-345 def6789");
+    // Eleven digits: the mask filters characters, it does NOT enforce the
+    // 12-digit floor. There is deliberately no typing floor — a guest cannot be
+    // stopped mid-number at digit 11 — so the length is checked on submit and
+    // this value is legitimately still too short at this point.
     expect(phones[0]).toHaveValue("08123456789");
 
     // FR-006 keeps whichever form the guest chose, so the local and

@@ -22,10 +22,10 @@ Verify each SC-001 shape; in every case **no "Buyer contact" card appears anywhe
 
 1. With any held order open: **Expect** Continue to Payment **disabled** initially.
 2. Enter `user@` as an email, blur → inline error on that field; button stays disabled. `user@email.com` clears it.
-3. Phone: free text, digits only. `081234` (too short) → inline "Enter a phone number of 10-15 digits."; `081234567890` passes, and so does `628123456789` — both forms are accepted and each is stored exactly as typed. Letters and punctuation never appear at all: type `abc0812-345 def6789` and watch it land on `08123456789`. Typing past 15 digits is ignored. Mobile keyboards show the numeric layout via `inputMode`.
+3. Phone: free text, digits only. `081234` (too short) → inline "Enter a phone number of 12-15 digits."; **`08123456789` (11 digits) is also too short** and shows the same error — that is the 2026-08-13 floor doing its work, and it is the one case that behaved differently before the change. `081234567890` passes, and so does `628123456789` — both forms are accepted and each is stored exactly as typed. Letters and punctuation never appear at all: type `abc0812-345 def67890` and watch it land on `081234567890`. Typing past 15 digits is ignored (there is no typing floor — the minimum is checked on submit, not keystroke by keystroke). Mobile keyboards show the numeric layout via `inputMode`.
 4. Leave one form's Gender and DOB untouched, fill everything else, then **click the (disabled) Continue button area** → the click-capture reveal runs validation and the untouched fields show their inline errors (US2-AS5 mechanism, research R5). A whitespace-only name and a future DOB also show errors.
 5. Fill every field of every form validly → **button enables**; blank one field → disables again.
-6. API-level check (bypass UI): `POST /api/v1/ticket/checkout/{ORD-…}` with a 9-digit phone → `400` envelope code `400001`, field map keyed `attendees[i].phone`. A body **without** `buyer_*` fields succeeds; a body **with** stale `buyer_*` fields is accepted (ignored).
+6. API-level check (bypass UI): `POST /api/v1/ticket/checkout/{ORD-…}` with an **11-digit** phone (`08123456789`) → `400` envelope code `400001`, field map keyed `attendees[i].phone`, message "Enter a phone number of 12-15 digits." — the server refuses the same value the form does, so a client that skips the UI gains nothing. A body **without** `buyer_*` fields succeeds; a body **with** stale `buyer_*` fields is accepted (ignored).
 
 ## Scenario C — Checkout, primary contact, payment (US2 / FR-010, FR-017)
 
@@ -127,10 +127,51 @@ first, through the admin API — never by writing the `fees` table.
    renders `Rp 0` on the form step, not the fee-inclusive total. This is what separates
    nullish coalescing from a falsy check, and a `||` implementation fails here.
 
+## Scenario K — The phone floor is 12, and history is not re-judged (FR-006 / research R29)
+
+1. Open any held order's holder forms. In one form's Phone field type `08123456789`
+   (11 digits). **Expect** the inline error "Enter a phone number of 12-15 digits." and
+   Continue to Payment **disabled**. Under the pre-2026-08-13 rule this value was valid,
+   so this step is the whole change — run it against unfixed code first and watch it pass
+   where it should now fail.
+2. Prefix `62` and drop the leading `0` → `628123456789` (12 digits). **Expect** the error
+   to clear. The same subscriber number is refused in one spelling and accepted in the
+   other; that is FR-006's counted-as-typed rule, not a bug.
+3. Keep typing past 15 digits. **Expect** the extra keystrokes to be dropped silently, as
+   before — the ceiling is enforced while typing, the floor only on submit.
+4. Server side, bypassing the form: `POST /api/v1/ticket/checkout/{ORD-…}` with an
+   11-digit `attendees[i].phone`. **Expect** `400`, envelope code `400001`, the same
+   message string. Both validators must move together or the guest reads one rule beneath
+   a field enforcing another.
+5. **History is untouched.** Find (or create through the API, before this change ships) an
+   order whose holder phone is 10 or 11 digits. **Expect** it to open in the admin order
+   view, render its phone, accept a resend, and — if still payable — reach the gateway
+   with that value. No migration ran, `attendees.phone` still has no CHECK, and nothing
+   sweeps or flags the row. `\d attendees` in psql must show `character varying(50)` with
+   no constraint attached.
+
+## Scenario L — The summary card carries no Booking ID and no per-unit price (FR-013, FR-014 / SC-005)
+
+1. Open the holder forms for an order with a multi-quantity line (e.g. `Regular` × 2).
+   **Expect** the summary card to show the event name, the event date, the ticket line with
+   its name, quantity badge, and line subtotal — and **no Booking ID anywhere on the card**.
+2. On the same line, **expect no per-unit figure**: for a 2 × 275.000 line only the
+   550.000 subtotal is rendered, never the 275.000. The unit price still exists on the
+   order and is still what the subtotal is derived from; it is simply not displayed.
+3. Continue to `/checkout` and repeat both checks on that step's summary — the amendment
+   applies to the panel on both steps, since it is one component.
+4. **Expect the Booking ID to still be reachable** where the guest actually needs it: the
+   confirmation screen and the receipt email both disclose it. Removing it from the panel
+   is a density decision, not a decision to stop telling the guest their order number.
+5. Sanity-pin against a vacuous pass: each absence check above must sit beside a rendered
+   positive on the same card (the event name, the QRIS radio). A panel that failed to
+   render would otherwise satisfy every "not present" assertion at once.
+
 ## Automated checks
 
 - Backend: `cd backend && ./scripts/test.sh ./...` plus `go build ./... && go vet ./...`. The notification suite encodes the single-recipient contract directly: its fixture's two holders both have addresses that are NOT the buyer's, so a regression back to fan-out fails immediately rather than passing vacuously.
 - Frontend: `./node_modules/.bin/vitest run` and `./node_modules/.bin/next build` (see project memory `frontend-toolchain-invocation.md`; node is not on PATH and there is no `test` script). `checkout/page.test.tsx` covers the QR screen and the FR-021 forwards; `booking-stage.test.ts` pins one rail stage per address.
 - Track A starting signal: the two existing "Time's Up" tests (`page.test.tsx:157`, `checkout/page.test.tsx:236`) **assert a `repeat order` link that FR-024 deletes**, so they fail the moment the modal lands — that failure is expected, not a regression.
 - **Rev. 4 (Track C) additions**: the panel component test gains one case per phase plus the `null` and `"0.00"` subtotal cases, all on a fixture where `subtotal ≠ total_amount` — the existing fixture at `order-summary-panel.test.tsx:25-27` sets them equal and must not be reused unmodified. `page.test.tsx:541` asserts `/includes all taxes and fees/i` on the form step and **fails the moment Track C lands** — that failure is expected, not a regression. The e2e scenario (Principle VIII) creates a fee via `POST /api/v1/admin/fees` before booking, then asserts the form-step figure, the checkout figure, and the charged amount; on unfixed code it must be seen red first, which on a fee-less database it would not be.
+- **Rev. 5 (Tracks D & E) additions**: the phone floor's starting signal is that **no existing test goes red on its own** — the e2e holder fixture is `081298765432` (12 digits, `guest-purchase.spec.ts:98`) and passes under both rules, exactly the R27 trap in a new place. The new e2e scenario must drive an **11-digit** value and be seen failing against `{10,15}` before the regex moves. The five verbatim assertions of the message string (`checkout_forms_test.go:164`, `page.test.tsx:600`/`:621`/`:629`, plus the two source constants) move in the same change or the suite reports a copy mismatch instead of a rule change. For Track E nothing goes red at all — no production code changes — so its signal is the opposite: the two suspended comment blocks (`page.test.tsx:529-531`, `checkout/page.test.tsx:125-126`) must become live negative assertions, each paired with a rendered positive so absence cannot pass vacuously.
 - **Rev. 3 additions**: the modal's three sealed dismissal routes (Escape / backdrop / scroll) and its single-button content belong in a component test, not only in Scenario G — a manual-only check will not survive a Base UI upgrade that adds a dismissal reason. Assert on the *page behind* too: the forms must still be in the DOM with their typed values, which is what distinguishes FR-022 from the old full-page swap. On the backend, the `packages.is_active` conversion needs a test that an inactive package is absent from the public booking list, since that filter is the only thing standing between a retired bundle and a guest buying it.

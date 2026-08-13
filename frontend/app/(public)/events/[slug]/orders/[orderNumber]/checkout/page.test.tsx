@@ -117,13 +117,19 @@ describe("checkout page — awaiting payment", () => {
     expect(screen.getByText(/complete purchase/i)).toBeInTheDocument();
     expect(screen.getByText("Jazz Night 2026")).toBeInTheDocument();
     // The summary lists the ticket line with its quantity badge and line
-    // subtotal (Figma 206-3145 shows no per-unit price on this line).
+    // subtotal — and NOT a per-unit price (FR-014 as amended 2026-08-13 to the
+    // shipped design, Figma 206-3145).
     expect(screen.getByText("Regular")).toBeInTheDocument();
     expect(screen.getByText("x2")).toBeInTheDocument();
     // The line subtotal and the grand total are both Rp 550.000 here.
     expect(screen.getAllByText(/550[.,]000/).length).toBeGreaterThan(0);
-    // NOTE: spec 011 FR-013's Booking ID was removed from the panel by hand to
-    // match the design; assertion suspended until UI and spec agree again.
+    // The absent unit price is 275.000, a figure that appears nowhere else on
+    // this screen — which is what makes its absence mean something. Paired with
+    // the rendered positives above so a panel that failed to render cannot
+    // satisfy this vacuously (research R30).
+    expect(screen.queryByText(/Rp\s?275[.,]000/)).not.toBeInTheDocument();
+    // FR-013 as amended: no Booking ID on the card either.
+    expect(screen.queryByText(/ORD-/)).not.toBeInTheDocument();
     // How to pay is a collapsible on the summary (Figma 203-1157).
     expect(screen.getByRole("button", { name: /how to pay with qris/i })).toBeInTheDocument();
 

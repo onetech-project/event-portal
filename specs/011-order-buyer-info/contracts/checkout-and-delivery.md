@@ -4,11 +4,19 @@
 
 ## 1. `POST /api/v1/ticket/checkout/:order_id` — buyer fields removed, phone rule added
 
-> Phone rule clarified 2026-08-07: 10-15 digits, nothing else, **verbatim**.
-> The field carries no country code of its own — the guest types the whole
-> number in either `62…` or `08…` form and that form is what is stored and sent
-> on. No normalisation, no `+`. This widens the first cut of this contract
-> (digits-only 10-12) rather than changing its shape.
+> Phone rule clarified 2026-08-07 and narrowed 2026-08-13: **12-15 digits**,
+> nothing else, **verbatim**. The field carries no country code of its own — the
+> guest types the whole number in either `62…` or `08…` form and that form is
+> what is stored and sent on. No normalisation, no `+`. The shape has never
+> changed across the three cuts (digits-only 10-12 → 10-15 → 12-15): it is one
+> length check with no prefix branch, and the 2026-08-13 clarification kept it
+> that way deliberately. Because the floor is counted on the value as typed, an
+> 11-digit local number (`08123456789`) is refused while the same number in
+> `62…` form (`628123456789`, 12 digits) is accepted.
+>
+> **At rest, nothing is re-validated.** Rows written under either earlier rule
+> stay valid permanently; `attendees.phone` keeps `VARCHAR(50)` with no CHECK,
+> and no migration or sweep accompanies this change (research R29).
 
 ### Request (breaking — single release train, same pattern as spec 010)
 
@@ -18,7 +26,7 @@
   // Unknown fields sent by stale clients are ignored by binding (not rejected).
   "attendees": [ { "id": "<slot uuid>",           // one element per slot, unchanged
                    "name": "…", "email": "…",
-                   "phone": "081234567890",        // NEW RULE: ^[0-9]{10,15}$
+                   "phone": "081234567890",        // NEW RULE: ^[0-9]{12,15}$
                    "dob": "2000-01-31",
                    "gender": "FEMALE" } ]          // still the NAME from GET /ticket/genders
 }
@@ -28,7 +36,7 @@ Validation deltas (all reported in the existing `400001` field map):
 
 | Field | Rule | Message |
 |---|---|---|
-| `attendees[i].phone` | `^[0-9]{10,15}$` — length only, no prefix required, stored verbatim (was: non-empty, then digits-only 10-12) | "Enter a phone number of 10-15 digits." (same string as the client-side error) |
+| `attendees[i].phone` | `^[0-9]{12,15}$` — length only, no prefix required, stored verbatim (was: non-empty, then digits-only 10-12) | "Enter a phone number of 12-15 digits." (same string as the client-side error) |
 | `buyer_*` | no longer validated (fields gone) | — |
 
 Unchanged: slot coverage (`matchVisitorsToSlots`), bundle-unit consistency (spec 010 `400001` map), name/email/dob rules, gender **name** membership in the active master list, order-state guards (`409003`/`409004`/`410001`), response body, `502001` semantics.

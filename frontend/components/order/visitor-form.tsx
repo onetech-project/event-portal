@@ -78,14 +78,17 @@ const dobSchema = z
 // schema only requires a choice; the server checks membership.
 const genderSchema = z.string().min(1, "Select a gender.");
 
-// Spec 011 FR-006 (clarified 2026-08-07) — 10-15 digits, and nothing but
-// digits. Length is the whole rule: no prefix is required, so the guest may
-// enter `628123456789` or `08123456789` and whichever they chose is what gets
-// stored. The message matches the server's word-for-word: both surface on the
-// same inline field slot.
-const PHONE_MESSAGE = "Enter a phone number of 10-15 digits.";
+// Spec 011 FR-006 (clarified 2026-08-07, floor raised 2026-08-13) — 12-15
+// digits, and nothing but digits. Length is the whole rule: no prefix is
+// required, and the digits are counted on the value exactly as typed. The guest
+// may enter `628123456789` or `081234567890` and whichever they chose is what
+// gets stored — but a shorter local-form number like `08123456789` is eleven
+// digits and is refused, which is the one case the raised floor changes. The
+// message matches the server's word-for-word: both surface on the same inline
+// field slot.
+const PHONE_MESSAGE = "Enter a phone number of 12-15 digits.";
 
-const phoneSchema = z.string().regex(/^[0-9]{10,15}$/, PHONE_MESSAGE);
+const phoneSchema = z.string().regex(/^[0-9]{12,15}$/, PHONE_MESSAGE);
 
 const visitorSchema = z.object({
   /** The slot ids this card fills (a whole bundle unit, or one standalone slot). */
@@ -553,7 +556,9 @@ function PhoneInput({
           className="h-auto px-3 py-4"
           inputMode="numeric"
           type="tel"
-          placeholder="08123456789"
+          // Twelve digits: the placeholder must not advertise an example the
+          // field would refuse (FR-006's floor, raised 2026-08-13).
+          placeholder="081234567890"
           value={field.value as string}
           onChange={(event) => field.onChange(phoneDigits(event.target.value))}
           onBlur={field.onBlur}

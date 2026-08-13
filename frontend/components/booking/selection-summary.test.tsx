@@ -156,8 +156,11 @@ describe("SelectionSummary", () => {
     // 3 × Rp50.000, as both the line subtotal and the grand total.
     expect(screen.getAllByText(/Rp\s?150[.,]000/)).toHaveLength(2);
     // Every line counts in "Ticket(s)", bundles included, and the count is
-    // pluralised — 69cb500 dropped the separate "Bundle" unit label without
-    // updating these assertions, leaving them red on main until now.
+    // pluralised. 59b2293 had introduced a separate "Bundle" unit label here
+    // and unpluralised the total; this commit's own change reverted the total
+    // but left the line label behind, so these two assertions disagreed with
+    // each other's panel and stayed red on main. The line and the total must
+    // count the same things in the same words.
     expect(screen.getByText("3 Tickets")).toBeTruthy();
     expect(screen.getByText("Total 3 Tickets")).toBeTruthy();
   });

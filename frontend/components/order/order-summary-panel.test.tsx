@@ -212,7 +212,7 @@ describe("OrderSummaryPanel fee presentation", () => {
     // FR-016a: the heading is shared across both steps; the note is what
     // distinguishes them, because the old one lied above a fee-free number.
     expect(screen.getByText(/total payment/i)).toBeInTheDocument();
-    expect(screen.getByText(/taxes and fees added at the next step/i)).toBeInTheDocument();
+    expect(screen.getByText(/Excludes taxes and fees/i)).toBeInTheDocument();
     expect(screen.queryByText(/includes all taxes and fees/i)).not.toBeInTheDocument();
   });
 

@@ -47,6 +47,8 @@ Starting point established by the survey — what already matches the spec and w
 
 ## R3. Phone rule enforced on both sides, one message (`^[0-9]{10,12}$` → `^[0-9]{10,15}$`, clarified 2026-08-07)
 
+> **FLOOR SUPERSEDED 2026-08-13 — see R29.** The pattern is now `^[0-9]{12,15}$` and the message reads "12-15 digits". Everything else on this page still holds and is why R29 is a one-constant change: enforcement on both sides, one canonical message string, length alone with no prefix branch, and the value stored verbatim. Read the `{10,15}` occurrences below as the shape of the rule, not as the current bound.
+
 **Decision** (revised 2026-08-07 — see below): Frontend Zod `z.string().regex(/^[0-9]{10,12}$/, "Enter a phone number of 10–12 digits.")` replacing `min(6)` at `visitor-form.tsx:57`; backend adds the identical rule and the **identical message** for every `attendees[i].phone` in `CheckoutFormsRequest.Validate` (`dto.go:255-257`), reported through the existing `400001` field map — one canonical string in both validators, since server errors are remapped onto the same inline slots the Zod messages use. Digits only — no `+`, spaces, or dashes. The input gets `inputMode="numeric"` (mobile numeric keyboard; it does **not** block non-digit typing — the regex does the rejecting) and a digits-only placeholder (e.g. `08123456789`).
 
 **Rationale**: Spec FR-006 is explicit. Validation applies at checkout write time only; existing rows with out-of-range phones (old 7–20 rule) are untouched — `attendees.phone` is `VARCHAR(50)` with no CHECK.
@@ -319,6 +321,41 @@ So the assertion has to be arranged into existence. `POST /api/v1/admin/fees` ex
 **Rationale**: `subtotal` is `string | null` on the wire, and `"0.00"` is falsy-adjacent territory in JS once it passes through any loose check. A free order (fully discounted, or a zero-priced type) has a real `"0.00"` subtotal that must render as `Rp 0`, not fall through to the total. Only `null` — an order predating migration `000010` — takes the fallback, and for those orders the stored total already excludes fees, so the fallback shows the same number the rule asks for rather than approximating it.
 
 **Alternatives considered**: `subtotal || total_amount` — rejected for the `"0.00"` case above. Treating a null subtotal as an error and hiding the total line — rejected, it blanks a figure on a live order to satisfy a rule about a value that order predates.
+
+---
+
+## R29. The phone floor moves 10 → 12; everything that made the rule cheap stays intact (clarified 2026-08-13)
+
+**Decision**: change the length floor only — `^[0-9]{10,15}$` becomes `^[0-9]{12,15}$` on both sides of the wire, the shared message string follows it, and nothing else about the field changes.
+
+**Rationale**: the three properties that made this rule cheap to hold are all preserved by a floor move, and each was re-checked rather than assumed:
+
+- **Length alone, no prefix inspection.** The clarification explicitly rejected a prefix-aware floor (12 for `62…`, 11 for `0…`). That would have reintroduced the prefix branch R3 deliberately removed and turned one regex into a two-branch validator on both sides. The consequence is accepted and specified: an 11-digit local number is rejected in local form and passes in `62…` form.
+- **The typing cap is the ceiling, not the floor.** `visitor-form.tsx:642` masks input with `raw.replace(/\D/g, "").slice(0, 15)`. That enforces the *max* as the guest types and is untouched at 15. There is no corresponding typing floor and there must not be one — you cannot stop a guest mid-number at digit 11, so the floor is a submit-time validation rule only. This is why FR-006's "typing past 15 is ignored" edge case survives the change unmodified.
+- **No database constraint to migrate.** `attendees.phone` is `VARCHAR(50)` with no CHECK (data-model §2). The at-rest clarification requires that this stays true: stored 10- and 11-digit numbers written under the old rule remain valid, readable, and gateway-deliverable forever. **Adding a CHECK is the failure mode here**, not the fix — it would reject exactly the rows the clarification protects, and it would fail at migration time on any environment with real orders.
+
+**The trap, and it is R27's trap wearing different clothes**: the existing e2e holder fixture is `081298765432` (`e2e/specs/guest-purchase.spec.ts:98`) — **12 digits**. It passes under both the old rule and the new one. So the entire existing suite goes green against unfixed code, and a scenario that merely books an order proves nothing about the floor. The acceptance scenario MUST drive an 11-digit value through the real form and assert refusal; run it against the unfixed code and confirm it goes red, because under `{10,15}` an 11-digit number is valid and the assertion genuinely fails.
+
+**Coupling point**: the error string is duplicated by design — one canonical sentence surfaced through two validators into the same inline slot (R3). It appears at `dto.go:233`, `visitor-form.tsx:86`, and is asserted **verbatim** at `checkout_forms_test.go:164` and `page.test.tsx:600`, `:621`, `:629`. Changing the regex without changing all five leaves the guest reading "10-15" beneath a field that rejects 11.
+
+**Alternatives considered**: a prefix-aware floor — rejected above, and by the clarification. Normalizing `0…` to `62…` before counting so both spellings pass — rejected twice already (2026-08-07 reversed exactly this) and it would silently rewrite the value FR-006 requires be stored verbatim. Backfilling or flagging short legacy rows — rejected: digits cannot be invented for a number already taken, so the only reachable outcomes are broken reads or blocked saves.
+
+---
+
+## R30. FR-013/FR-014 amend to the shipped panel: no production change, and the work is un-suspending two tests (clarified 2026-08-13)
+
+**Decision**: the spec bends to Figma `206-3145`. The summary card carries no Booking ID and no per-unit price on the ticket line; the two suspended assertions become live **negative** assertions instead of being restored or deleted.
+
+**Rationale**: this was the one item rev. 3 and rev. 4 both carried openly as "needs a decision, not a task" (plan Complexity Tracking; tasks.md "Still open"). It is now decided, and the decision costs no production code — the panel already looks like this. What it costs is coverage: two comment blocks currently stand where assertions should be, at `page.test.tsx:529-531` and `checkout/page.test.tsx:125-126`.
+
+Two things make the negative assertions worth writing carefully:
+
+- **An absence assertion can pass vacuously.** `queryByText(...)` returning null proves nothing if the panel failed to render at all. Each negative assertion must sit beside a positive sibling in the same block — the event name and the QRIS radio are already asserted there — so a panel that disappeared fails loudly rather than passing twice.
+- **The unit price must be absent as a *rendered figure*, not as a concept.** FR-014 keeps quantity × unit price as the derivation of the line subtotal; only the display goes. On the checkout fixture (`Regular` × 2, line 550.000) the unit price would render as 275.000, a figure that appears nowhere else on that screen — which makes it a clean absence assertion. Pick the fixture so the derived unit price cannot collide with the subtotal, the total, or a fee amount, or the assertion stops distinguishing anything.
+
+**Consequence for the checklist**: `checklists/requirements.md` still carries the note "Open UI/spec disagreement (not a spec defect — flagged for a decision)". That note is now stale and is the last place the disagreement is still recorded as open.
+
+**Alternatives considered**: restoring the Booking ID and the unit price to the panel (option B at clarification time) — not chosen; it would have reverted a deliberate design edit and put a figure back that quantity and subtotal already imply. Deleting the suspended comments without replacing them — rejected: that converts a known gap into an invisible one, and FR-013/FR-014 would then be requirements with no test on either side of the assertion.
 
 ---
 

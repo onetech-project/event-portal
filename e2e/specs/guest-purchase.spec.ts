@@ -510,6 +510,53 @@ test.describe("Guest purchase, end to end", () => {
     expect(await orderRow(orderNumber)).toMatchObject({ total_amount: "550000.00" });
   });
 
+  // Spec 011 FR-006, clarified 2026-08-13: the phone floor is twelve digits,
+  // counted on the value exactly as the guest typed it — no prefix inspection,
+  // so a number can be too short in local form and long enough in international
+  // form. Every other holder fixture in this suite is already twelve digits and
+  // stays valid under both the old floor and the new one (research R29), which
+  // is why this scenario has to type an eleven-digit number itself: nothing
+  // else in the suite can tell the two rules apart.
+  test("an 11-digit phone is refused, and the same number in 62… form is accepted", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-phone-floor",
+      name: "UAT Phone Floor",
+      quota: 5,
+      price: "150000.00",
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    await guest.agreeToTermsAndBook();
+
+    const phone = page
+      .getByRole("form", { name: /visitor registration/i })
+      .getByLabel(/phone number/i)
+      .first();
+    const submit = page.getByRole("button", { name: /continue to payment/i });
+    const tooShort = page.getByText("Enter a phone number of 12-15 digits.");
+
+    // `08123456789` is an ordinary Indonesian local-form number and eleven
+    // digits long. It was valid until 2026-08-13; it is now too short. Against
+    // unfixed code this order proceeds and the two assertions below fail.
+    await guest.fillHolder(0, { ...defaultHolder, phone: "08123456789" });
+
+    await expect(tooShort).toBeVisible();
+    await expect(submit).toBeDisabled();
+
+    // The same subscriber number written internationally is twelve digits and
+    // passes. Nothing normalises between the two forms — the guest's choice is
+    // what is validated and what is stored (FR-006).
+    await phone.fill("628123456789");
+    await phone.blur();
+
+    await expect(tooShort).toHaveCount(0);
+    await expect(submit).toBeEnabled();
+  });
+
   // Manjo notifications carry no signature, no digest, and no field that could
   // authenticate them, so the bearer token is the entire mechanism. Presenting
   // the wrong one is the only way in.

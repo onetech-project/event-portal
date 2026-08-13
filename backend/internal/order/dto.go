@@ -230,15 +230,21 @@ type GenderOption struct {
 // visitorDobFormat is the wire format for dates of birth.
 const visitorDobFormat = "2006-01-02"
 
-// visitorPhonePattern is the spec 011 phone rule (clarified 2026-08-07):
-// 10-15 digits and nothing else. Length is the whole rule — no country code is
-// required or implied, so `628123456789` and `08123456789` are both accepted
-// and each is stored in the form the guest chose. The message below is shared
-// verbatim with the client-side validator so the same failure reads identically
-// whichever side catches it.
-var visitorPhonePattern = regexp.MustCompile(`^[0-9]{10,15}$`)
+// visitorPhonePattern is the spec 011 phone rule (clarified 2026-08-07, floor
+// raised 2026-08-13): 12-15 digits and nothing else. Length is the whole rule —
+// no country code is required or implied, and the digits are counted on the
+// value exactly as the guest typed it, with no prefix inspection. So
+// `628123456789` passes while the same subscriber number written `08123456789`
+// is eleven digits and does not. The message below is shared verbatim with the
+// client-side validator so the same failure reads identically whichever side
+// catches it.
+//
+// This governs writes only. Rows stored under either earlier rule stay valid at
+// rest — `attendees.phone` is VARCHAR(50) with no CHECK, deliberately, because
+// digits cannot be invented for a number already taken.
+var visitorPhonePattern = regexp.MustCompile(`^[0-9]{12,15}$`)
 
-const visitorPhoneMessage = "Enter a phone number of 10-15 digits."
+const visitorPhoneMessage = "Enter a phone number of 12-15 digits."
 
 // Validate rejects malformed forms with a 400001 whose data is a field→message
 // map (contracts/api.md call 8), so the client can mark the exact inputs.

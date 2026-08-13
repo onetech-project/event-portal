@@ -105,3 +105,39 @@ real API, and that route is also what keeps cached reads honest.
 Per constitution Principle VIII the scenario MUST be observed failing against unfixed
 code before the fix lands. On the current fixture data an unfixed run would pass, which is
 exactly the failure mode this section exists to prevent.
+
+## 5. Panel contents outside the money figures (FR-013 / FR-014, amended 2026-08-13)
+
+Added in rev. 5. Sections 1–4 govern **which figure** the panel renders; this section
+governs **what else is on the card**. The two were settled a week apart and had been in
+open disagreement with the shipped component until now.
+
+The clarification bent the spec to the shipped design (Figma `206-3145`), so this section
+documents the component **as it already is**. There is no production change to make here —
+the contract exists so the negative assertions have a written source rather than being
+inferred from a comment in a test file.
+
+| Element | On the card? | Governing requirement |
+|---|---|---|
+| Event name, event date | **Yes** | FR-013 |
+| Ticket line: name, quantity badge, line subtotal | **Yes** | FR-014 |
+| Ticket line: per-unit price | **No** | FR-014 (amended) |
+| Booking ID | **No** | FR-013 (amended) |
+| Payment method section, QRIS fixed | **Yes** | FR-015 |
+| Closing money figure and fee rows | per §2 | FR-016, FR-016a–c |
+
+Two constraints on the amendment, both load-bearing:
+
+- **The unit price is removed from the display, not from the order.** `quantity × unit
+  price` remains the derivation of the line subtotal (FR-014), and the wire payload is
+  unchanged — no field is dropped from `GET /ticket/order/:order_id`. A reviewer checking
+  this looks at the rendered card, not at the API response.
+- **The Booking ID is relocated in emphasis, not withdrawn.** It remains disclosed on the
+  confirmation screen and in the receipt email. Removing it from the panel must not become
+  a reason to remove it from those, which are where the guest keeps it.
+
+**Assertion shape.** Both are absence assertions, and an absence assertion passes when the
+component fails to render at all. Each MUST be paired with a rendered positive on the same
+card in the same test block (the event name and the QRIS radio are already asserted at both
+sites). Choose the fixture so the derived unit price cannot collide with the line subtotal,
+the grand total, or a fee amount — otherwise the assertion stops distinguishing anything.
