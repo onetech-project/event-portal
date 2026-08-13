@@ -318,7 +318,7 @@ sequenceDiagram
             PS->>TS: IssueTicketsForOrder — goroutine
             TS->>DB: INSERT tickets, one per attendee, idempotent
             PS->>NS: SendTicketEmail — goroutine
-            NS->>NS: One email to orders.buyer_email (spec 011 FR-012):<br/>every ticket in the order as one PDF + the receipt.<br/>Holder emails are identity, never delivery targets
+            NS->>NS: One email to orders.buyer_email (spec 011 FR-012):<br/>two attachments — the receipt PDF and one e-ticket PDF<br/>holding every ticket (spec 016). Either failing sends neither.<br/>Holder emails are identity, never delivery targets
             NS->>NS: Render PDF and QRs from ticket_code, nothing stored on disk
             NS->>DB: UPDATE orders SET email_sent = true —<br/>only after that send succeeded
             Note right of NS: A failed send leaves the tickets valid and<br/>email_sent false — resend repeats the same<br/>single delivery to the buyer

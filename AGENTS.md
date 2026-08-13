@@ -34,8 +34,9 @@ Constitution **Principle VIII** makes this an acceptance gate, not an optional t
   cache, so going around them makes the setup lie.
 
 ```bash
-# Postgres and Redis first — the runner does not own them.
-REDIS_PORT=6380 docker compose up -d postgres redis && docker compose run --rm migrate up
+# Postgres, Redis and Mailpit first — the runner does not own them. Mailpit is not
+# optional: the delivery specs read the real message off it (spec 016).
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit && docker compose run --rm migrate up
 
 cd e2e && npm test          # headless
 cd e2e && npm run test:slow # headed, slowed down so a human can follow the flow

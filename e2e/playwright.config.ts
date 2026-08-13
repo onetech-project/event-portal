@@ -115,13 +115,24 @@ export default defineConfig({
             BOOKING_HOLD: `${Math.round(scaled(30_000) / 1000)}s`,
             PAYMENT_SWEEP_INTERVAL: "3s",
 
+            // Pinned, and load-bearing (spec 016 T067). The API otherwise
+            // inherits the developer's zone. Every displayed time is rendered in
+            // Asia/Jakarta by explicit conversion, so a suite running on a
+            // Jakarta machine would pass whether or not that conversion exists —
+            // which is exactly the bug this pin exists to keep visible. UTC also
+            // matches the deployed container, where time.Local is UTC.
+            TZ: "UTC",
+
             REDIS_URL: env.cacheEnabled ? env.redisURL : "",
             CACHE_ENABLED: String(env.cacheEnabled),
             CACHE_TTL: "10m",
             METRICS_ENABLED: "true",
 
-            // Mailpit if it is up; a refused connection only fails the send,
-            // which the suite asserts on via orders.email_sent rather than SMTP.
+            // Mailpit, and it is REQUIRED — not merely tolerated as it was
+            // while nothing inspected the message. The delivery specs read the
+            // real MIME back off it (spec 016), so a refused connection is a
+            // failure, not a shrug. Bring it up with the rest:
+            //   docker compose up -d postgres redis mailpit
             SMTP_HOST: process.env.E2E_SMTP_HOST ?? "localhost",
             SMTP_PORT: process.env.E2E_SMTP_PORT ?? "1025",
             SMTP_FROM: "uat@example.com",

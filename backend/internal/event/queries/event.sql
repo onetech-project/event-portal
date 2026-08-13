@@ -54,7 +54,7 @@ SELECT id, name, quota FROM ticket_types WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 -- ticket_event_end are this ticket type's own admission window (spec 015). Both
 -- pairs travel together because the order page names the event AND each line's
 -- own day, and they are not interchangeable.
-SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug,
+SELECT tt.id, tt.name, tt.description, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
        e.start_date AS event_start_date, e.end_date AS event_end_date,
        tt.event_start AS ticket_event_start, tt.event_end AS ticket_event_end
@@ -301,7 +301,7 @@ WHERE id = $1;
 -- Carries no admission window: a bundle admits on every day its parts admit, and
 -- a single collapsed span cannot say that (spec 015 FR-021a). The days come from
 -- ListPackageAdmissionStartsByIDs below.
-SELECT p.id, p.name, e.name AS event_name, e.slug AS event_slug,
+SELECT p.id, p.name, p.description, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
        e.start_date AS event_start_date, e.end_date AS event_end_date
 FROM packages p

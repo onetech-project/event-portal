@@ -209,6 +209,10 @@ func (r *Repository) TicketTypeQuotasByIDs(ctx context.Context, ids []uuid.UUID)
 // TicketTypeDisplayRecord labels one ticket type with the event it belongs to.
 type TicketTypeDisplayRecord struct {
 	TicketTypeName string
+	// Description is the admin-authored note already rendered on the booking
+	// card. The receipt reuses it as the product sub-line's descriptor rather
+	// than inventing product vocabulary (spec 016 research R-009).
+	Description    string
 	EventName      string
 	EventSlug      string
 	EventVenue     string
@@ -242,6 +246,7 @@ func (r *Repository) TicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UUI
 	for _, row := range rows {
 		displays[row.ID] = TicketTypeDisplayRecord{
 			TicketTypeName:  row.Name,
+			Description:     strv(row.Description),
 			EventName:       row.EventName,
 			EventSlug:       row.EventSlug,
 			EventVenue:      row.EventVenue,
@@ -402,4 +407,14 @@ func toAdminView(row eventsql.Event) EventAdminView {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
+}
+
+// strv unwraps a nullable text column for display. A ticket type's or package's
+// description is optional, and an absent one renders as no descriptor rather
+// than as a placeholder.
+func strv(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

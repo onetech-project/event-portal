@@ -1004,7 +1004,7 @@ func (q *Queries) ListPackageComponentsByPackageIDs(ctx context.Context, package
 }
 
 const listPackageDisplaysByIDs = `-- name: ListPackageDisplaysByIDs :many
-SELECT p.id, p.name, e.name AS event_name, e.slug AS event_slug,
+SELECT p.id, p.name, p.description, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
        e.start_date AS event_start_date, e.end_date AS event_end_date
 FROM packages p
@@ -1015,6 +1015,7 @@ WHERE p.id = ANY($1::uuid[])
 type ListPackageDisplaysByIDsRow struct {
 	ID             uuid.UUID
 	Name           string
+	Description    *string
 	EventName      string
 	EventSlug      string
 	EventVenue     string
@@ -1041,6 +1042,7 @@ func (q *Queries) ListPackageDisplaysByIDs(ctx context.Context, ids []uuid.UUID)
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
+			&i.Description,
 			&i.EventName,
 			&i.EventSlug,
 			&i.EventVenue,
@@ -1315,7 +1317,7 @@ func (q *Queries) ListPublishedPackagesByEventSlug(ctx context.Context, slug str
 }
 
 const listTicketTypeDisplaysByIDs = `-- name: ListTicketTypeDisplaysByIDs :many
-SELECT tt.id, tt.name, e.name AS event_name, e.slug AS event_slug,
+SELECT tt.id, tt.name, tt.description, e.name AS event_name, e.slug AS event_slug,
        e.venue AS event_venue, e.address AS event_address,
        e.start_date AS event_start_date, e.end_date AS event_end_date,
        tt.event_start AS ticket_event_start, tt.event_end AS ticket_event_end
@@ -1327,6 +1329,7 @@ WHERE tt.id = ANY($1::uuid[])
 type ListTicketTypeDisplaysByIDsRow struct {
 	ID               uuid.UUID
 	Name             string
+	Description      *string
 	EventName        string
 	EventSlug        string
 	EventVenue       string
@@ -1355,6 +1358,7 @@ func (q *Queries) ListTicketTypeDisplaysByIDs(ctx context.Context, ids []uuid.UU
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
+			&i.Description,
 			&i.EventName,
 			&i.EventSlug,
 			&i.EventVenue,

@@ -21,6 +21,9 @@ import (
 // owns.
 type TicketTypeDisplay struct {
 	TicketTypeName string
+	// Description is the line's own admin-authored note, printed after the
+	// admission date on the receipt's product sub-line (spec 016 FR-011).
+	Description    string
 	EventName      string
 	EventSlug      string
 	EventVenue     string
@@ -58,7 +61,9 @@ type EventLookup interface {
 // PackageDisplay labels a package line: the package's own name plus the event it
 // belongs to, mirroring TicketTypeDisplay.
 type PackageDisplay struct {
-	PackageName    string
+	PackageName string
+	// Description mirrors TicketTypeDisplay.Description for a bundle line.
+	Description    string
 	EventName      string
 	EventSlug      string
 	EventVenue     string

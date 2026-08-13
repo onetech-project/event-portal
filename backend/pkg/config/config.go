@@ -62,6 +62,24 @@ type Config struct {
 	SMTPFrom     string
 	SMTPFromName string
 
+	// Branding printed on the ticket email and both of its attachments (spec 016
+	// FR-035). Platform-wide by design, NOT per-event: FR-036 forbids storing
+	// branding against an event, so every order's documents carry these same
+	// strings whichever event was bought.
+	//
+	// Every key has a working default, so the API starts and delivers correctly
+	// with none of them set — the same stance the SMTP block above takes.
+	BrandSiteName     string
+	BrandSiteURL      string
+	BrandSupportEmail string
+	BrandLegalEntity  string
+	BrandAttribution  string
+	BrandCopyright    string
+	// BrandLogoPath is an optional file embedded in the PDF header bands. Empty,
+	// missing, or unreadable falls back to a text wordmark — a decorative asset
+	// must never fail a delivery (spec 016 research R-005).
+	BrandLogoPath string
+
 	// TicketLookupRateLimit is the sustained per-IP request rate allowed on the
 	// public GET /tickets/:code endpoint (spec FR-020); TicketLookupBurst is the
 	// short-term allowance above it.
@@ -203,6 +221,14 @@ func Load() (*Config, error) {
 		SMTPPassword: l.str("SMTP_PASSWORD", ""),
 		SMTPFrom:     l.str("SMTP_FROM", "tickets@example.com"),
 		SMTPFromName: l.str("SMTP_FROM_NAME", "Event Ticketing"),
+
+		BrandSiteName:     l.str("BRAND_SITE_NAME", "JIVE"),
+		BrandSiteURL:      l.str("BRAND_SITE_URL", "https://www.jive.co.id"),
+		BrandSupportEmail: l.str("BRAND_SUPPORT_EMAIL", "help@manjo.com"),
+		BrandLegalEntity:  l.str("BRAND_LEGAL_ENTITY", "PT Manjo Teknologi Indonesia"),
+		BrandAttribution:  l.str("BRAND_ATTRIBUTION", "Powered By Manjo"),
+		BrandCopyright:    l.str("BRAND_COPYRIGHT", "© 2026 manjo"),
+		BrandLogoPath:     l.str("BRAND_LOGO_PATH", ""),
 
 		TicketLookupRateLimit: l.float("TICKET_LOOKUP_RATE_LIMIT", 5),
 		TicketLookupBurst:     l.integer("TICKET_LOOKUP_BURST", 10),

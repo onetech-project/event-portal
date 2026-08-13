@@ -234,7 +234,11 @@ func (r *Repository) CountPackagesByEventID(ctx context.Context, eventID uuid.UU
 
 // PackageDisplayRecord labels one package with the event it belongs to.
 type PackageDisplayRecord struct {
-	PackageName    string
+	PackageName string
+	// Description is the bundle's admin-authored note, reused as the receipt's
+	// product sub-line descriptor rather than inventing product vocabulary
+	// (spec 016 research R-009).
+	Description    string
 	EventName      string
 	EventSlug      string
 	EventVenue     string
@@ -266,6 +270,7 @@ func (r *Repository) PackageDisplaysByIDs(ctx context.Context, ids []uuid.UUID) 
 	for _, row := range rows {
 		displays[row.ID] = PackageDisplayRecord{
 			PackageName:    row.Name,
+			Description:    strv(row.Description),
 			EventName:      row.EventName,
 			EventSlug:      row.EventSlug,
 			EventVenue:     row.EventVenue,

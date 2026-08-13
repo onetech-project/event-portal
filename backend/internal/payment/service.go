@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pgauto/cdtc/status"
 
 	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
@@ -770,4 +771,54 @@ func (s *Service) fulfillAsync(requestCtx context.Context, ord OrderRef) {
 			return
 		}
 	}()
+}
+
+// Settlement is what a receipt needs to name a completed payment: the instrument
+// the guest actually paid with, and when the money settled (spec 016 FR-010).
+//
+// It is deliberately narrow. The receipt has no business reading raw gateway
+// payloads, and this domain has no business knowing what a receipt looks like.
+type Settlement struct {
+	// Method is the instrument, not the acquirer: "QRIS", not "manjo". Empty
+	// when no row recorded one, which the caller resolves rather than printing.
+	Method string
+	// PaidAt is when the settling notification was recorded. Empty when the order
+	// has no completed payment row — which for a PAID order means its rows
+	// predate this read, not that it was never paid.
+	PaidAt time.Time
+}
+
+// SettlementForOrder summarises an order's completed payment.
+//
+// It reads the recorded rows rather than asking the gateway: a receipt describes
+// what happened, and re-querying a provider to render a document would put a
+// network call on the delivery path for a fact already stored.
+//
+// The instrument and the timestamp are taken from different rows on purpose. The
+// session-open row carries the instrument; the settling callback carries the
+// time. Insisting both come from one row would leave one of them empty on every
+// ordinary order.
+func (s *Service) SettlementForOrder(ctx context.Context, orderID uuid.UUID) (Settlement, error) {
+	records, err := s.repo.ListByOrder(ctx, orderID)
+	if err != nil {
+		return Settlement{}, err
+	}
+
+	// payments.status holds the gateway status's own NAME, written raw by
+	// applyProviderResult — not the numeric enum — so the settling row is found by
+	// matching that name rather than by converting the column to a status.Status.
+	completed := status.Completed.String()
+
+	var out Settlement
+	// ListByOrder is newest first, so the first match of each kind is the one to
+	// keep and later (older) rows must not overwrite it.
+	for _, rec := range records {
+		if out.Method == "" && rec.PaymentType != "" {
+			out.Method = rec.PaymentType
+		}
+		if out.PaidAt.IsZero() && rec.Status == completed {
+			out.PaidAt = rec.CreatedAt
+		}
+	}
+	return out, nil
 }

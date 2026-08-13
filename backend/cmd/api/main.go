@@ -224,8 +224,13 @@ func run(log *logger.Logger) error {
 
 	ticketSvc := ticket.NewService(pool, ticketRepo, orderRepo, log)
 
+	// A pointer, because payments is wired after the payment service exists —
+	// the same loop checkoutGateway closes below, for the same reason: the two
+	// services are mutually dependent and this file is where that is allowed.
+	deliveryOrders := &notificationOrderAdapter{orders: orderRepo, guestReads: publicOrderSvc}
+
 	notificationSvc := notification.NewService(
-		notificationOrderAdapter{orders: orderRepo, guestReads: publicOrderSvc},
+		deliveryOrders,
 		notificationTicketAdapter{tickets: ticketRepo},
 		notification.NewSMTPMailer(notification.SMTPConfig{
 			Host:     cfg.SMTPHost,
@@ -235,6 +240,18 @@ func run(log *logger.Logger) error {
 			From:     cfg.SMTPFrom,
 			FromName: cfg.SMTPFromName,
 		}),
+		// Platform-wide branding for the email and both attachments (spec 016
+		// FR-035). Identical on every order — the event's own name, venue and
+		// address are the only things that vary, and those ride on the order.
+		notification.Branding{
+			SiteName:     cfg.BrandSiteName,
+			SiteURL:      cfg.BrandSiteURL,
+			SupportEmail: cfg.BrandSupportEmail,
+			LegalEntity:  cfg.BrandLegalEntity,
+			Attribution:  cfg.BrandAttribution,
+			Copyright:    cfg.BrandCopyright,
+			LogoPath:     cfg.BrandLogoPath,
+		},
 		log)
 
 	paymentSvc := payment.NewService(pool, paymentRepo, gateway,
@@ -249,6 +266,10 @@ func run(log *logger.Logger) error {
 	// Closes the loop: a checkout whose session-open is refused as a duplicate
 	// reference releases its seats and records why, on the order's own history.
 	checkoutGateway.payments = paymentSvc
+
+	// And the other loop: the receipt names the instrument the guest actually
+	// paid with and when it settled, both of which live on the payments table.
+	deliveryOrders.payments = paymentSvc
 
 	adminSvc := admin.NewService(adminRepo, admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL), log)
 

@@ -14,8 +14,17 @@ import {
   publicOrder,
   publicTicketTypes,
   putTerms,
+  resendTicketEmail,
   updateTicketTypeWindow,
 } from "../support/api";
+import {
+  cidReferences,
+  clearMailbox,
+  downloadAttachment,
+  isPDF,
+  pdfPageCount,
+  waitForMail,
+} from "../support/mail";
 import {
   attendeeCountFor,
   orderRow,
@@ -50,6 +59,10 @@ let token: string;
 test.beforeEach(async () => {
   await resetDatabase();
   await seedAdmin();
+  // Mailpit keeps everything it has ever received. Without this, a delivery
+  // assertion matches a PREVIOUS run's message and passes while proving nothing
+  // — a silent failure, which is why it is here rather than left to each spec.
+  await clearMailbox();
   token = await adminLogin();
 });
 
@@ -136,6 +149,83 @@ test.describe("Guest purchase, end to end", () => {
     // And the admin sees the order without any manual refresh of the cache.
     const orders = await adminOrders(token, { status: "PAID" });
     expect(orders.map((o) => o.order_number)).toContain(orderNumber);
+
+    // --- Delivery -----------------------------------------------------------
+    // Spec 016. Up to here the suite only ever checked orders.email_sent, which
+    // says a send succeeded and nothing about what was sent. These read the real
+    // MIME the production mailer composed, off Mailpit, after a real SMTP hop.
+    const mail = await waitForMail(defaultHolder.email);
+
+    expect(mail.Attachments).toHaveLength(2); // FR-001 / SC-001
+    const [receiptPart, ticketsPart] = mail.Attachments;
+
+    // Receipt first, tickets second — fixed so two mail clients cannot show the
+    // buyer a different first attachment (FR-004).
+    expect(receiptPart.FileName).toBe(`receipt-${orderNumber}.pdf`);
+    expect(ticketsPart.FileName).toBe(`tickets-${orderNumber}.pdf`);
+    expect(receiptPart.ContentType).toBe("application/pdf");
+    expect(ticketsPart.ContentType).toBe("application/pdf");
+
+    const receipt = await downloadAttachment(mail.ID, receiptPart.PartID);
+    const ticketsPDF = await downloadAttachment(mail.ID, ticketsPart.PartID);
+    expect(isPDF(receipt)).toBe(true);
+    expect(isPDF(ticketsPDF)).toBe(true);
+
+    // FR-002 / SC-002: one page per issued ticket. This order has two.
+    expect(pdfPageCount(ticketsPDF)).toBe(2);
+
+    // FR-030 / SC-006: ticket codes live in the attachment alone.
+    for (const code of codes) {
+      expect(mail.HTML).not.toContain(code);
+    }
+    expect(mail.HTML).toContain("Buyer Information");
+
+    // FR-023a, FR-025: every cid: the body references resolves to an inline
+    // part, and the inline parts are NOT counted as attachments. A reference
+    // with no part renders as a broken image and raises no error anywhere, so
+    // this pairing is the only thing that catches it.
+    const referenced = cidReferences(mail.HTML);
+    expect(referenced.length).toBeGreaterThan(0);
+    const inlineNames = (mail.Inline ?? []).map((p) => p.ContentID || p.FileName);
+    for (const cid of referenced) {
+      expect(inlineNames).toContain(cid);
+    }
+    expect(mail.Attachments).toHaveLength(2); // unchanged by the inline images
+
+    // FR-024b / SC-014: times render in Asia/Jakarta with a WIB suffix. The API
+    // runs under TZ=UTC (playwright.config.ts), so this passes only if the code
+    // converts — which is the whole point of pinning the zone there.
+    expect(mail.HTML).toContain("WIB");
+    expect(mail.HTML).not.toContain("UTC");
+
+    // FR-037: IDR with Indonesian separators, and no Rp anywhere.
+    expect(mail.HTML).toContain("IDR ");
+    expect(mail.HTML).not.toContain("Rp ");
+
+    // FR-029: the receipt's attribution must not appear in the email body.
+    expect(mail.HTML).not.toContain("Powered By Manjo");
+    expect(mail.HTML).toContain("© 2026 manjo");
+
+    // FR-031a: nested tables only — Outlook on Windows implements neither.
+    expect(mail.HTML).not.toContain("display:flex");
+    expect(mail.HTML).not.toContain("display:grid");
+
+    // --- Resend -------------------------------------------------------------
+    // FR-007 / SC-005: the same pair, with the same already-issued codes.
+    expect((await resendTicketEmail(orderNumber)).status).toBe(202);
+
+    const resent = await waitForMail(defaultHolder.email, { minCount: 2 });
+    expect(resent.ID).not.toBe(mail.ID);
+    expect(resent.Attachments).toHaveLength(2);
+    expect(resent.Attachments[0].FileName).toBe(`receipt-${orderNumber}.pdf`);
+    expect(resent.Attachments[1].FileName).toBe(`tickets-${orderNumber}.pdf`);
+
+    const resentTickets = await downloadAttachment(resent.ID, resent.Attachments[1].PartID);
+    expect(pdfPageCount(resentTickets)).toBe(2);
+
+    // The codes are unchanged: a resend must never invalidate the pass the guest
+    // already holds.
+    expect(await ticketCodesFor(orderNumber)).toEqual(codes);
   });
 
   test("a guest can look up an issued ticket by its code", async ({ page }) => {

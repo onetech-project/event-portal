@@ -482,3 +482,18 @@ export function metricValue(body: string, needle: string): number {
   if (!line) return 0;
   return Number(line.slice(line.lastIndexOf(" ") + 1));
 }
+
+/**
+ * The guest-facing resend (spec 008 FR-024): the buyer asks for their own
+ * tickets again, identified only by the order number.
+ *
+ * It answers 202 with the same bytes whatever it finds, so the status here says
+ * nothing about whether mail went out — that is the point of the endpoint, and
+ * why the delivery assertion reads Mailpit rather than this response.
+ */
+export async function resendTicketEmail(orderNumber: string): Promise<ApiResult<unknown>> {
+  return request<unknown>("/ticket/resend-email", {
+    method: "POST",
+    body: JSON.stringify({ order_id: orderNumber }),
+  });
+}

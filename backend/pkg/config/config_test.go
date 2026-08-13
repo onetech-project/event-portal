@@ -259,3 +259,39 @@ func TestLoadRejectsMalformedInt(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SMTP_PORT")
 }
+
+// Spec 016 FR-035: branding is platform-wide configuration. Every key defaults,
+// so an operator who sets none of them still gets correctly branded documents —
+// the same stance the SMTP block takes, and the reason delivery is not part of
+// the deploy critical path.
+func TestLoadDefaultsEveryBrandingValue(t *testing.T) {
+	setRequired(t)
+
+	cfg, err := config.Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, "JIVE", cfg.BrandSiteName)
+	assert.Equal(t, "https://www.jive.co.id", cfg.BrandSiteURL)
+	assert.Equal(t, "help@manjo.com", cfg.BrandSupportEmail)
+	assert.Equal(t, "PT Manjo Teknologi Indonesia", cfg.BrandLegalEntity)
+	assert.Equal(t, "Powered By Manjo", cfg.BrandAttribution)
+	// No logo ships with the repository, so the default is empty and the
+	// renderers fall back to a text wordmark (research R-005).
+	assert.Empty(t, cfg.BrandLogoPath)
+}
+
+func TestLoadOverridesBrandingFromEnvironment(t *testing.T) {
+	setRequired(t)
+	t.Setenv("BRAND_SITE_NAME", "OTHEREXPO")
+	t.Setenv("BRAND_SUPPORT_EMAIL", "support@example.test")
+	t.Setenv("BRAND_LOGO_PATH", "/srv/assets/logo.png")
+
+	cfg, err := config.Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, "OTHEREXPO", cfg.BrandSiteName)
+	assert.Equal(t, "support@example.test", cfg.BrandSupportEmail)
+	assert.Equal(t, "/srv/assets/logo.png", cfg.BrandLogoPath)
+	// Untouched keys keep their defaults rather than collapsing to empty.
+	assert.Equal(t, "Powered By Manjo", cfg.BrandAttribution)
+}

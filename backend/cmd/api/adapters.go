@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -288,9 +289,12 @@ func (a quotaReserverAdapter) RemainingQuota(ctx context.Context, ticketTypeIDs 
 // guestReads supplies the itemized order summary (line names resolved through
 // the event domain) that every recipient's receipt prints since spec 011 —
 // reusing the guest order read rather than re-deriving displays here.
+// payments supplies the receipt's Transaction Details block (spec 016 FR-010).
+// The composition root may hold both domains; neither may import the other.
 type notificationOrderAdapter struct {
 	orders     *order.Repository
 	guestReads *order.PublicService
+	payments   *payment.Service
 }
 
 func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID uuid.UUID) (notification.OrderDelivery, error) {
@@ -327,11 +331,19 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		} else if it.TicketTypeName != nil {
 			name = *it.TicketTypeName
 		}
+		descriptor := ""
+		if it.Description != nil {
+			descriptor = *it.Description
+		}
 		items = append(items, notification.ReceiptLine{
 			Name:      name,
 			Quantity:  it.Quantity,
 			UnitPrice: it.UnitPrice.Decimal(),
 			Subtotal:  it.Subtotal.Decimal(),
+			// Carried through, never collapsed to a single date: a bundle admits
+			// on several days and spec 015 exists because one value cannot say so.
+			AdmissionStarts: it.AdmissionStarts,
+			Descriptor:      descriptor,
 		})
 	}
 	fees := make([]notification.ReceiptFee, 0, len(detail.Fees))
@@ -344,17 +356,75 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		subtotal = &d
 	}
 
+	buyerPhone := ""
+	if rec.BuyerPhone != nil {
+		buyerPhone = *rec.BuyerPhone
+	}
+
+	// The receipt's Transaction Details block. A failure here must not stop a
+	// delivery: the order is PAID either way, and a receipt missing its
+	// instrument is a far better outcome than a buyer with no tickets.
+	settlement, err := a.payments.SettlementForOrder(ctx, orderID)
+	if err != nil {
+		settlement = payment.Settlement{}
+	}
+
 	return notification.OrderDelivery{
 		ID:          rec.ID,
 		OrderNumber: rec.OrderNumber,
 		BuyerName:   buyerName,
 		BuyerEmail:  buyerEmail,
+		BuyerPhone:  buyerPhone,
+		CreatedAt:   timeOrZero(rec.CreatedAt),
+		UpdatedAt:   timeOrZero(rec.UpdatedAt),
 		Status:      rec.Status,
 		TotalAmount: rec.TotalAmount,
 		Subtotal:    subtotal,
 		Items:       items,
 		Fees:        fees,
+		Event: notification.DeliveryEvent{
+			Name:    detail.Event.Name,
+			Venue:   detail.Event.Venue,
+			Address: detail.Event.Address,
+		},
+		Payment: notification.PaymentSummary{
+			// The instrument, resolved here rather than in the renderer. A null
+			// payment_type falls back to the acquirer's name and then to QRIS, so
+			// the receipt never prints an empty Payment Method cell — and never
+			// hardcodes an instrument that Principle V exists to let us change.
+			Method: firstNonEmpty(settlement.Method, strOrEmpty(rec.PaymentProvider), "QRIS"),
+			Status: "Paid",
+			// The SETTLEMENT time, deliberately not orders.updated_at: that column
+			// moves when email_sent is written, so a resend would claim a later
+			// payment time than the original.
+			PaidAt: settlement.PaidAt,
+		},
 	}, nil
+}
+
+// timeOrZero unwraps a nullable timestamp for display. Zero renders as an
+// omitted stamp rather than as 1 Jan year 1.
+func timeOrZero(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
+}
+
+func strOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (a notificationOrderAdapter) MarkEmailSent(ctx context.Context, orderID uuid.UUID) error {
@@ -433,6 +503,7 @@ func (a orderEventLookupAdapter) TicketTypeDisplays(ctx context.Context, ids []u
 	for id, record := range records {
 		displays[id] = order.TicketTypeDisplay{
 			TicketTypeName:  record.TicketTypeName,
+			Description:     record.Description,
 			EventName:       record.EventName,
 			EventSlug:       record.EventSlug,
 			EventVenue:      record.EventVenue,
@@ -455,6 +526,7 @@ func (a orderEventLookupAdapter) PackageDisplays(ctx context.Context, ids []uuid
 	for id, record := range records {
 		displays[id] = order.PackageDisplay{
 			PackageName:     record.PackageName,
+			Description:     record.Description,
 			EventName:       record.EventName,
 			EventSlug:       record.EventSlug,
 			EventVenue:      record.EventVenue,

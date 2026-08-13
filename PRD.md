@@ -40,7 +40,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 
 **Payment & Delivery:**
 *   Webhook updates Order status (`Pending` -> `Paid` / `Cancelled` / `Expired`).
-*   On `Paid`: Backend generates 1 Ticket per Attendee (with unique Ticket Code + QR Code) and sends **exactly one email to the buyer** — the address on the first ticket holder form — containing every ticket in the order as a PDF plus the receipt. The other holders' emails are identity, not delivery addresses (spec 011 FR-012 / constitution v3.0.0).
+*   On `Paid`: Backend generates 1 Ticket per Attendee (with unique Ticket Code + QR Code) and sends **exactly one email to the buyer** — the address on the first ticket holder form — carrying **two document attachments** — a Payment Receipt document and one E-Ticket document holding every ticket in the order (one page per ticket, no prices; the receipt is also itemized in the body). The other holders' emails are identity, not delivery addresses (spec 011 FR-012 / constitution v3.0.0).
 
 **Admin QR Validation:**
 *   Admin validator accepts manual `Ticket Code` input as primary, or Camera QR scan as secondary.
