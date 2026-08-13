@@ -43,6 +43,15 @@ type OrderRecord struct {
 	PaymentURL      *string
 	EmailSent       *bool
 	CreatedAt       *time.Time
+	// UpdatedAt is the receipt's "Last updated" stamp (spec 016 FR-008). The
+	// column was always selected and always discarded here; nothing new is read.
+	//
+	// It moves on any write to the row, email_sent included, so a RESENT
+	// receipt legitimately carries a later stamp than the original while every
+	// monetary figure is identical. That is correct — the two are different
+	// facts — and it is why the receipt's transaction date comes from the
+	// payment row instead.
+	UpdatedAt *time.Time
 	// PaymentQRString and PaymentExpiresAt are nil for orders created before the
 	// in-app QRIS flow, and for any order whose charge never completed. Readers
 	// must treat nil as "no payment instruction" rather than rendering an empty
@@ -710,6 +719,7 @@ func toOrderRecord(row ordersql.GetOrderByIDRow) OrderRecord {
 		PaymentURL:      row.PaymentUrl,
 		EmailSent:       row.EmailSent,
 		CreatedAt:       row.CreatedAt,
+		UpdatedAt:       row.UpdatedAt,
 
 		Subtotal:         row.Subtotal,
 		PaymentQRString:  row.PaymentQrString,

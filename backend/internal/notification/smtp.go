@@ -17,10 +17,16 @@ type Attachment struct {
 
 // Message is a provider-agnostic outgoing email.
 type Message struct {
-	To          string
-	Subject     string
-	HTMLBody    string
+	To       string
+	Subject  string
+	HTMLBody string
+	// Attachments are DOCUMENTS: the receipt and the e-tickets, and nothing else
+	// (spec 016 FR-001). A buyer counts these.
 	Attachments []Attachment
+	// Inline are images the body references as cid:<Filename> — the brand mark
+	// and the location pin (FR-023a, FR-025). They are message parts, not
+	// documents, and mail clients list them separately from attachments.
+	Inline []Attachment
 }
 
 // Mailer sends email. The service depends on this interface rather than on SMTP
@@ -65,6 +71,31 @@ func (m *SMTPMailer) Compose(msg Message) *mail.Message {
 				"Content-Type": {attachment.ContentType},
 			}),
 			mail.Rename(attachment.Filename),
+			mail.SetCopyFunc(func(w io.Writer) error {
+				_, err := w.Write(content)
+				return err
+			}),
+		)
+	}
+
+	// Embedded, not attached: go-mail gives these Content-Disposition: inline and
+	// a Content-ID derived from the filename, and wraps the HTML part and the
+	// images in a multipart/related. That is what makes cid:<Filename> resolve in
+	// the body — and what keeps them out of the buyer's attachment list.
+	//
+	// SetCopyFunc for the same reason the loop above uses it: go-mail's default
+	// CopyFunc drains the reader once, so a message written twice would carry an
+	// empty image the second time.
+	//
+	// The filename MUST keep its extension. go-mail derives the part's
+	// Content-Type from it via mime.TypeByExtension, and a name without one
+	// becomes application/octet-stream, which Outlook declines to render.
+	for _, inline := range msg.Inline {
+		content := inline.Content
+		out.EmbedReader(inline.Filename, bytes.NewReader(content),
+			mail.SetHeader(map[string][]string{
+				"Content-Type": {inline.ContentType},
+			}),
 			mail.SetCopyFunc(func(w io.Writer) error {
 				_, err := w.Write(content)
 				return err

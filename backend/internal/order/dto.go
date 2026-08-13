@@ -167,6 +167,14 @@ type PublicOrderItem struct {
 	// lines of one order can admit on different days — that is the whole point of
 	// the feature — whereas Event below names the EVENT's own dates (FR-009).
 	AdmissionStarts []time.Time `json:"admission_starts"`
+	// Description is the line's own admin-authored note — the ticket type's or
+	// the package's — already rendered on the booking card. Null when none was
+	// written.
+	//
+	// Added by spec 016: the ticket email's receipt attachment prints it after
+	// the admission date on each product row, and it has no other source. An
+	// additive nullable field, so no existing consumer breaks.
+	Description *string `json:"description"`
 }
 
 // PaymentInstruction is everything the guest needs in order to pay, and nothing

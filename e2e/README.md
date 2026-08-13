@@ -25,7 +25,7 @@ Bring them up first:
 ```bash
 # From the repository root.
 # REDIS_PORT is offset because 6379 is often already taken locally.
-REDIS_PORT=6380 docker compose up -d postgres redis
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit
 docker compose run --rm migrate up
 ```
 

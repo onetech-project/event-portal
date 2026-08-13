@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -115,13 +116,41 @@ func newDeliveryFixture(t *testing.T) deliveryFixture {
 	t.Helper()
 	orderID := uuid.New()
 
+	subtotal := decimal.NewFromInt(500000)
 	orders := &fakeOrders{order: notification.OrderDelivery{
 		ID:          orderID,
 		OrderNumber: "ORD-20260731-ABCDEF",
 		BuyerName:   "Budi Santoso",
 		BuyerEmail:  "budi@example.com",
+		// Realistic, not zero: a fake that returns empty strings hides exactly
+		// the omit-the-row and masking bugs these tests exist to catch.
+		BuyerPhone:  "081234567890",
 		Status:      "PAID",
+		CreatedAt:   time.Date(2026, 7, 31, 10, 15, 0, 0, time.UTC),
+		UpdatedAt:   time.Date(2026, 7, 31, 10, 20, 0, 0, time.UTC),
 		TotalAmount: decimal.NewFromInt(550000),
+		Subtotal:    &subtotal,
+		Items: []notification.ReceiptLine{{
+			Name:            "Regular",
+			Quantity:        2,
+			UnitPrice:       decimal.NewFromInt(250000),
+			Subtotal:        decimal.NewFromInt(500000),
+			AdmissionStarts: []time.Time{time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC)},
+			Descriptor:      "Expo Entrance Ticket",
+		}},
+		Fees: []notification.ReceiptFee{{
+			Name: "PPN (11%)", Amount: decimal.NewFromInt(50000),
+		}},
+		Event: notification.DeliveryEvent{
+			Name:    "Jazz Night 2026",
+			Venue:   "Balai Sarbini",
+			Address: "Jl. Jend. Sudirman Kav. 50, Jakarta Selatan 12190",
+		},
+		Payment: notification.PaymentSummary{
+			Method: "QRIS",
+			Status: "Paid",
+			PaidAt: time.Date(2026, 7, 31, 10, 18, 0, 0, time.UTC),
+		},
 	}}
 	tickets := &fakeTickets{tickets: []notification.TicketDetail{
 		holderTicket("ABC234DEFG", "Ani Lestari", "ani@example.com"),
@@ -130,7 +159,7 @@ func newDeliveryFixture(t *testing.T) deliveryFixture {
 	mailer := &fakeMailer{}
 
 	return deliveryFixture{
-		svc:     notification.NewService(orders, tickets, mailer, testsupport.DiscardLogger()),
+		svc:     notification.NewService(orders, tickets, mailer, testBrand(), testsupport.DiscardLogger()),
 		orders:  orders,
 		tickets: tickets,
 		mailer:  mailer,
@@ -163,20 +192,21 @@ func TestSendTicketEmailSendsOneEmailToTheBuyerWithEveryTicket(t *testing.T) {
 	assert.NotContains(t, f.mailer.toAddresses(), "bayu@example.com")
 	assert.Contains(t, msg.Subject, "Jazz Night 2026")
 
-	require.Len(t, msg.Attachments, 1, "every ticket travels in a single PDF")
-	assert.Equal(t, "application/pdf", msg.Attachments[0].ContentType)
-	assert.Contains(t, msg.Attachments[0].Filename, "ORD-20260731-ABCDEF")
-	assert.True(t, strings.HasPrefix(string(msg.Attachments[0].Content), "%PDF-"),
+	// Spec 016 FR-001: two attachments now — the receipt and the merged tickets.
+	require.Len(t, msg.Attachments, 2, "a receipt and one PDF holding every ticket")
+	assert.Equal(t, "application/pdf", msg.Attachments[1].ContentType)
+	assert.Contains(t, msg.Attachments[1].Filename, "ORD-20260731-ABCDEF")
+	assert.True(t, strings.HasPrefix(string(msg.Attachments[1].Content), "%PDF-"),
 		"the attachment must be a real, non-empty PDF")
 
-	// Every code is in the one PDF's body counterpart, so no holder is dropped.
+	// Ticket codes live in the ATTACHMENT now, never in the body (FR-030).
 	for _, ticket := range f.tickets.tickets {
-		assert.Contains(t, msg.HTMLBody, ticket.TicketCode)
+		assert.NotContains(t, msg.HTMLBody, ticket.TicketCode)
 	}
 
-	onePage, err := notification.RenderTicketsPDF(f.orders.order, f.tickets.tickets[:1])
+	onePage, err := notification.RenderTicketsPDF(f.orders.order, f.tickets.tickets[:1], testBrand())
 	require.NoError(t, err)
-	assert.Greater(t, len(msg.Attachments[0].Content), len(onePage),
+	assert.Greater(t, len(msg.Attachments[1].Content), len(onePage),
 		"the PDF must carry all three pages, not just the first ticket's")
 
 	assert.Equal(t, 1, f.orders.markCalled, "email_sent recorded once, after the send succeeded")
@@ -248,8 +278,12 @@ func TestSendTicketEmailSendsOnceWhenAHolderRepeatsTheBuyerAddress(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, "budi@example.com", recipient)
 	require.Len(t, f.mailer.sent, 1, "still exactly one email")
+	// The buyer is named in the greeting. The OTHER holder is not: since spec
+	// 016 the body carries no per-ticket card, so holder identity lives on the
+	// e-ticket pages (FR-030). Both holders' tickets are still in the attachment.
 	assert.Contains(t, f.mailer.sent[0].HTMLBody, "Budi Santoso")
-	assert.Contains(t, f.mailer.sent[0].HTMLBody, "Bayu Wijaya")
+	require.Len(t, f.mailer.sent[0].Attachments, 2)
+	assert.Contains(t, f.mailer.sent[0].Attachments[1].Filename, "tickets-")
 }
 
 // An order with no buyer snapshot never went through checkout. Refuse rather
@@ -336,9 +370,10 @@ func TestSendTicketEmailStillSucceedsIfRecordingTheFlagFails(t *testing.T) {
 	assert.Len(t, f.mailer.sent, 1)
 }
 
-// The buyer's one email names every holder in the order and carries every
-// ticket code, so the buyer can hand the right pass to the right person.
-func TestSendTicketEmailBodyNamesEveryHolderAndTicket(t *testing.T) {
+// Spec 016 FR-023..FR-029: the body is the Figma 741-5105 confirmation, in
+// order. Each section is asserted by its own heading rather than by a blob of
+// HTML, so a failure names which section regressed.
+func TestSendTicketEmailBodyHasEverySectionOfTheDesign(t *testing.T) {
 	f := newDeliveryFixture(t)
 
 	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
@@ -347,38 +382,74 @@ func TestSendTicketEmailBodyNamesEveryHolderAndTicket(t *testing.T) {
 
 	body := f.mailer.sent[0].HTMLBody
 
-	assert.Contains(t, body, "TICKET HOLDER")
-	assert.Contains(t, body, "Ani Lestari")
-	assert.Contains(t, body, "Bayu Wijaya")
-	assert.Contains(t, body, "ABC234DEFG")
-	assert.Contains(t, body, "HJK567LMNP")
-	// Addressed to the buyer, so the buyer's own address appears on the copy.
-	assert.Contains(t, body, "budi@example.com")
-}
-
-// Figma 251-2: the email is a receipt — PAID badge, invoice number, the
-// e-ticket cards with their codes, and the amount paid.
-func TestSendTicketEmailBodyIsTheReceiptLayout(t *testing.T) {
-	f := newDeliveryFixture(t)
-
-	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
-	require.NoError(t, err)
-	require.Len(t, f.mailer.sent, 1)
-
-	body := f.mailer.sent[0].HTMLBody
-	assert.Contains(t, body, "PAID")
-	assert.Contains(t, body, "E-Ticket")
-	assert.Contains(t, body, "Total Payment")
-	assert.Contains(t, body, "Rp 550.000")
-	assert.Contains(t, body, "ORD-20260731-ABCDEF")
-	for _, ticket := range f.tickets.tickets {
-		assert.Contains(t, body, ticket.TicketCode)
+	sections := []string{
+		"cid:jive-logo.png",               // FR-023a real logo, referenced by content ID
+		"Hooray, you've got your ticket!", // FR-023 headline
+		"Budi Santoso",                    // FR-023 greeting
+		"Order Status",                    // FR-024
+		"PAID",
+		"Order Number",
+		"ORD-20260731-ABCDEF",
+		"Order Date",
+		"Payment Method",
+		"QRIS",
+		"Jazz Night 2026", // FR-025 event block
+		"Balai Sarbini",
+		"Jakarta Selatan 12190",
+		"Ticket Details", // FR-026
+		"Total Payment",
+		"IDR 550.000",
+		"Buyer Information",     // FR-027
+		"Important Information", // FR-028
+		"valid ID card",
+		"non-refundable",
+		"do not reply", // FR-029
+		"© 2026 manjo",
+		"cid:location-pin.png", // FR-025 the venue's pin icon
 	}
+	for _, want := range sections {
+		assert.Contains(t, body, want)
+	}
+
+	// Order matters: the design reads top to bottom and a section rendered out of
+	// sequence is a regression a Contains-only assertion would miss.
+	assertInOrder(t, body,
+		"Hooray", "Order Status", "Jazz Night 2026", "Ticket Details",
+		"Buyer Information", "Important Information", "© 2026 manjo")
+
+	// FR-029: the receipt's attribution must not appear in the email body.
+	assert.NotContains(t, body, "Powered By Manjo")
+	// FR-031a: nested tables only. Outlook on Windows implements neither.
+	assert.NotContains(t, body, "display:flex")
+	assert.NotContains(t, body, "display:grid")
 }
 
-// Spec 011 FR-016: the receipt email is where the itemization lives — each
-// purchased line, the pre-fee Ticket Total, the frozen fees, and the Total
-// Payment (the order page's form step deliberately shows none of it).
+// FR-030 / SC-006. The per-ticket cards moved to the attachment. Leaving a copy
+// in the body would give a buyer two places to read a ticket code, one of them
+// unscannable.
+func TestSendTicketEmailBodyCarriesNoTicketCodeOrQR(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	for _, ticket := range f.tickets.tickets {
+		assert.NotContains(t, body, ticket.TicketCode)
+		assert.NotContains(t, body, ticket.AttendeeName,
+			"holder names belong on the e-ticket pages, not in the body")
+	}
+	assert.NotContains(t, body, "Show at entry")
+	// The body DOES carry images now (FR-023a, FR-025) — but only inline ones.
+	// A data: URI is stripped by Gmail and a remote URL is blocked by default in
+	// Outlook and Gmail, so either would render as nothing for most recipients.
+	assert.NotContains(t, body, "data:image")
+	assert.NotContains(t, body, `src="http`)
+	assert.NotContains(t, body, `src='http`)
+}
+
+// Spec 011 FR-016 carried forward: the itemization lives in this email — each
+// purchased line, the frozen fees, and the Total Payment.
 func TestSendTicketEmailBodyItemizesTheFullOrderSummary(t *testing.T) {
 	f := newDeliveryFixture(t)
 	subtotal := decimal.NewFromInt(500000)
@@ -395,18 +466,81 @@ func TestSendTicketEmailBodyItemizesTheFullOrderSummary(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, f.mailer.sent, 1)
 
-	{
-		body := f.mailer.sent[0].HTMLBody
-		assert.Contains(t, body, "Early Bird")
-		assert.Contains(t, body, "x2")
-		assert.Contains(t, body, "Rp 300.000")
-		assert.Contains(t, body, "VIP Duo Bundle")
-		assert.Contains(t, body, "Ticket Total")
-		assert.Contains(t, body, "Rp 500.000")
-		assert.Contains(t, body, "Platform fee")
-		assert.Contains(t, body, "Rp 50.000")
-		assert.Contains(t, body, "Total Payment")
-		assert.Contains(t, body, "Rp 550.000")
+	body := f.mailer.sent[0].HTMLBody
+	assert.Contains(t, body, "Early Bird")
+	assert.Contains(t, body, "2 x IDR 150.000")
+	assert.Contains(t, body, "IDR 300.000")
+	assert.Contains(t, body, "VIP Duo Bundle")
+	assert.Contains(t, body, "Platform fee")
+	assert.Contains(t, body, "IDR 50.000")
+	assert.Contains(t, body, "Total Payment")
+	assert.Contains(t, body, "IDR 550.000")
+}
+
+// FR-013. A pre-fee order records no subtotal. It shows the total alone — no
+// subtotal row, and no fee rows invented to fill the gap.
+func TestSendTicketEmailBodyCollapsesAPreFeeOrderToTheTotal(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.orders.order.Subtotal = nil
+	f.orders.order.Fees = nil
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.Contains(t, body, "Total Payment")
+	assert.Contains(t, body, "IDR 550.000")
+	assert.NotContains(t, body, "PPN")
+	assert.NotContains(t, body, "IDR 500.000", "no subtotal row on a pre-fee order")
+}
+
+// FR-027, FR-032, FR-033 / SC-008. Both surfaces render the SAME buyer contact
+// values, masked identically — two shapes for one value read as two buyers.
+func TestSendTicketEmailMasksBuyerContactIdenticallyInBodyAndReceipt(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	msg := f.mailer.sent[0]
+	maskedEmail := notification.MaskEmail("budi@example.com")
+	maskedPhone := notification.MaskPhone("081234567890")
+
+	assert.Contains(t, msg.HTMLBody, maskedEmail)
+	assert.Contains(t, msg.HTMLBody, maskedPhone)
+	assert.NotContains(t, msg.HTMLBody, "budi@example.com",
+		"the body shows the masked address, not the raw one")
+
+	receipt, err := notification.RenderReceiptPDFPlain(f.orders.order, testBrand())
+	require.NoError(t, err)
+	assert.Contains(t, string(receipt), maskedEmail)
+	assert.Contains(t, string(receipt), maskedPhone)
+}
+
+// An unrecorded phone omits its row rather than rendering a blank or a
+// fully-masked placeholder (FR-027).
+func TestSendTicketEmailBodyOmitsThePhoneRowWhenNoneWasRecorded(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.orders.order.BuyerPhone = ""
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.Contains(t, body, "Buyer Information")
+	assert.NotContains(t, body, "Phone Number")
+}
+
+// assertInOrder checks that each needle appears after the previous one.
+func assertInOrder(t *testing.T, haystack string, needles ...string) {
+	t.Helper()
+	at := 0
+	for _, needle := range needles {
+		i := strings.Index(haystack[at:], needle)
+		if !assert.GreaterOrEqual(t, i, 0, "%q must appear after %d", needle, at) {
+			return
+		}
+		at += i + len(needle)
 	}
 }
 
@@ -421,4 +555,267 @@ func TestSendTicketEmailBodyCollapsesTheSummaryWithoutASubtotal(t *testing.T) {
 
 	assert.Contains(t, f.mailer.sent[0].HTMLBody, "Total Payment")
 	assert.NotContains(t, f.mailer.sent[0].HTMLBody, "Ticket Total")
+}
+
+// testBrand is the platform branding every delivery test renders with. Values
+// are distinctive so an assertion cannot pass on a coincidence.
+func testBrand() notification.Branding {
+	return notification.Branding{
+		SiteName:     "JIVE",
+		SiteURL:      "https://www.jive.co.id",
+		SupportEmail: "help@manjo.com",
+		LegalEntity:  "PT Manjo Teknologi Indonesia",
+		Attribution:  "Powered By Manjo",
+		Copyright:    "© 2026 manjo",
+	}
+}
+
+// --- Spec 016: two attachments, and what happens when one cannot be built ---
+
+// FR-001 / SC-001. Exactly two attachments, receipt first, both real PDFs, both
+// named for the order and distinguishable from each other (FR-004).
+func TestSendTicketEmailCarriesTheReceiptAndTheTicketsAsTwoAttachments(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	require.Len(t, f.mailer.sent, 1)
+
+	attachments := f.mailer.sent[0].Attachments
+	require.Len(t, attachments, 2, "exactly two: never one, never three")
+
+	assert.Equal(t, "receipt-ORD-20260731-ABCDEF.pdf", attachments[0].Filename)
+	assert.Equal(t, "tickets-ORD-20260731-ABCDEF.pdf", attachments[1].Filename)
+	assert.NotEqual(t, attachments[0].Filename, attachments[1].Filename,
+		"two files saved to one folder must not collide")
+
+	for _, a := range attachments {
+		assert.Equal(t, "application/pdf", a.ContentType)
+		assert.True(t, strings.HasPrefix(string(a.Content), "%PDF-"),
+			"%s must be a real, non-empty PDF", a.Filename)
+		assert.Contains(t, a.Filename, "ORD-20260731-ABCDEF")
+	}
+
+	assert.NotEqual(t, attachments[0].Content, attachments[1].Content,
+		"the receipt and the tickets are different documents")
+}
+
+// FR-006. If the RECEIPT cannot be built, nothing is sent and the order is not
+// marked delivered — a half-delivered email carrying one of the two documents
+// would leave email_sent TRUE and the resend disarmed.
+func TestSendTicketEmailSendsNothingWhenTheReceiptCannotBeBuilt(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.orders.order.OrderNumber = "" // a receipt with nothing to identify it
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+
+	require.Error(t, err)
+	assert.Empty(t, f.mailer.sent, "no partial email may go out")
+	assert.Zero(t, f.orders.markCalled, "email_sent stays FALSE so resend stays armed")
+}
+
+// FR-006, the other document. An unrenderable ticket aborts the same way.
+func TestSendTicketEmailSendsNothingWhenTheTicketsCannotBeBuilt(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.tickets.tickets[1].TicketCode = "" // no code, so no QR, so no page
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+
+	require.Error(t, err)
+	assert.Empty(t, f.mailer.sent)
+	assert.Zero(t, f.orders.markCalled)
+}
+
+// FR-007 / SC-005. A resend reuses the already-issued codes verbatim and
+// produces the same pair. Regenerating a code would invalidate the pass the
+// guest already holds.
+func TestResendProducesTheSamePairWithTheSameTicketCodes(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	_, err = f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	require.Len(t, f.mailer.sent, 2)
+	first, second := f.mailer.sent[0], f.mailer.sent[1]
+
+	require.Len(t, second.Attachments, 2, "a resend carries the same two attachments")
+	assert.Equal(t, first.Attachments[0].Filename, second.Attachments[0].Filename)
+	assert.Equal(t, first.Attachments[1].Filename, second.Attachments[1].Filename)
+	assert.Equal(t, first.To, second.To)
+
+	assert.Equal(t, len(first.Attachments[1].Content), len(second.Attachments[1].Content),
+		"the same tickets render the same document")
+
+	// And the codes really are the originals. The shipped attachment is
+	// compressed, so the codes are read from an uncompressed render of the same
+	// input rather than from the message bytes.
+	plain, err := notification.RenderTicketsPDFPlain(f.orders.order, f.tickets.tickets, testBrand())
+	require.NoError(t, err)
+	for _, ticket := range f.tickets.tickets {
+		require.NotEmpty(t, ticket.TicketCode)
+		assert.Contains(t, string(plain), ticket.TicketCode,
+			"a resend reuses the issued code; regenerating one would invalidate the pass the guest holds")
+	}
+}
+
+// FR-038 / SC-009. The receipt prints the figures FROZEN onto the order. A fee
+// master-data edit after the order must not change an already-placed order's
+// documents — the frozen order_fees rows are what render.
+func TestResendPrintsTheFrozenFiguresNotCurrentFeeMasterData(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	original := f.mailer.sent[0].Attachments[0].Content
+
+	// The order's own frozen lines are untouched; only "master data" changed,
+	// which this domain never reads. Rendering again must be identical.
+	_, err = f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	resent := f.mailer.sent[1].Attachments[0].Content
+
+	assert.Equal(t, len(original), len(resent))
+
+	receipt, err := notification.RenderReceiptPDFPlain(f.orders.order, testBrand())
+	require.NoError(t, err)
+	assert.Contains(t, string(receipt), "IDR 550.000", "the charged total, unchanged")
+	assert.Contains(t, string(receipt), "PPN \\(11%\\)", "the frozen fee name, unchanged")
+}
+
+// FR-023a, FR-025 / T104. Every cid: the body references must have a matching
+// inline part, and every inline part must be referenced.
+//
+// This is the assertion that makes a broken-image regression impossible to ship
+// silently: a cid: whose part is missing renders as a broken image and raises no
+// error anywhere — not in the send, not in the SMTP exchange, and not in any
+// assertion that only counts attachments.
+func TestEveryCIDReferenceHasAMatchingInlinePart(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	msg := f.mailer.sent[0]
+
+	referenced := map[string]bool{}
+	for _, m := range regexp.MustCompile(`src="cid:([^"]+)"`).FindAllStringSubmatch(msg.HTMLBody, -1) {
+		referenced[m[1]] = true
+	}
+	require.NotEmpty(t, referenced, "the body is expected to reference at least the logo")
+
+	carried := map[string]bool{}
+	for _, part := range msg.Inline {
+		carried[part.Filename] = true
+		assert.NotEmpty(t, part.Content, "%s is referenced but carries no bytes", part.Filename)
+		assert.Equal(t, "image/png", part.ContentType)
+		assert.True(t, strings.HasSuffix(part.Filename, ".png"),
+			"%s needs an image extension or the part becomes application/octet-stream", part.Filename)
+	}
+
+	for name := range referenced {
+		assert.True(t, carried[name], "body references cid:%s with no matching inline part", name)
+	}
+	for name := range carried {
+		assert.True(t, referenced[name], "inline part %s is carried but never referenced", name)
+	}
+
+	// And the documents are still exactly two — inline images are not documents.
+	assert.Len(t, msg.Attachments, 2)
+}
+
+// FR-007 / T105. A resend carries the same inline parts as the original, not
+// just the same two attachments.
+func TestResendCarriesTheSameInlineParts(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	_, err = f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	require.Len(t, f.mailer.sent, 2)
+
+	first, second := f.mailer.sent[0], f.mailer.sent[1]
+	require.Len(t, second.Inline, len(first.Inline))
+	for i := range first.Inline {
+		assert.Equal(t, first.Inline[i].Filename, second.Inline[i].Filename)
+		// Byte-identical: go-mail's default CopyFunc drains its reader once, so a
+		// second send that reused a drained reader would carry an empty image.
+		assert.Equal(t, first.Inline[i].Content, second.Inline[i].Content,
+			"%s must survive a second send with its bytes intact", first.Inline[i].Filename)
+	}
+}
+
+// FR-026c / SC-015. A fee-free order drew a dashed separator between the ticket
+// lines and nothing at all.
+func TestSendTicketEmailOmitsTheDashedRuleWhenThereAreNoFees(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.orders.order.Fees = nil
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.NotContains(t, body, "dashed",
+		"a separator with nothing on one side of it reads as a stray line")
+	assert.Contains(t, body, "Total Payment", "the totals block itself still renders")
+}
+
+// ...and exactly one when there are fees, so the fix does not swing the other way.
+func TestSendTicketEmailDrawsOneDashedRuleWhenThereAreFees(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.Equal(t, 1, strings.Count(body, "dashed"))
+}
+
+// FR-031b / SC-018. The card must be able to shrink below the design's 600px
+// frame, or a phone shows the left portion of it and clips the rest.
+func TestSendTicketEmailBodyIsFluidBelowTheDesignWidth(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	body := f.mailer.sent[0].HTMLBody
+
+	// The card sizes to its container and is merely CAPPED at the design frame.
+	assert.Contains(t, body, "width:100%;max-width:600px",
+		"the card must be fluid with a maximum, not pinned")
+	// Every occurrence of "width:600px" must be part of "max-width:600px". A bare
+	// one is the pinned form that cannot shrink, and is what clipped the body on
+	// a phone. Substring-counting rather than NotContains, because the fluid form
+	// legitimately contains the pinned form's text.
+	assert.Equal(t,
+		strings.Count(body, "max-width:600px"), strings.Count(body, "width:600px"),
+		"a bare width:600px cannot shrink; only max-width:600px may appear")
+
+	// Outlook still gets a fixed layout: it reads the width ATTRIBUTE and the
+	// ghost table, and has no phone client to be responsive for.
+	assert.Contains(t, body, `width="600"`)
+	assert.Contains(t, body, "<!--[if mso]>")
+
+	// device-width is what makes a phone honour the layout instead of rendering
+	// a desktop-width page and zooming out.
+	assert.Contains(t, body, "width=device-width")
+}
+
+// The mobile rules are progressive enhancement ONLY: a client that strips
+// stylesheets must still get workable spacing from the inline styles (FR-031).
+func TestSendTicketEmailBodyMobileRulesAreEnhancementOnly(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	body := f.mailer.sent[0].HTMLBody
+
+	assert.Contains(t, body, "@media only screen and (max-width:600px)")
+	// Every class the media query targets must also carry an inline style, so
+	// stripping the <style> block degrades polish and nothing else.
+	assert.Contains(t, body, `class="sec" style="padding:`)
+	assert.Contains(t, body, `class="amt" align="right"`)
+	assert.Contains(t, body, "width:130px")
 }

@@ -99,6 +99,16 @@ export const config = {
   redisURL: remote ? "" : env("E2E_REDIS_URL", "redis://localhost:6380/0"),
 
   /**
+   * Mailpit's REST API, where the delivered ticket email is read back.
+   *
+   * The suite used to assert delivery only through orders.email_sent, which says
+   * a send succeeded and nothing about what was sent. "Exactly two attachments"
+   * (spec 016 FR-001) is not observable that way, so the specs that assert on the
+   * message itself require Mailpit to actually be up — see mail.ts.
+   */
+  mailpitURL: env("E2E_MAILPIT_URL", "http://localhost:8025"),
+
+  /**
    * The bearer token inbound notifications must present, which must match the
    * API's PG_CALLBACK_TOKEN.
    *

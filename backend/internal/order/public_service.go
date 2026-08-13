@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -303,14 +304,25 @@ func publicItems(items []OrderItemRecord, displays lineDisplays) []PublicOrderIt
 			name := display.PackageName
 			line.PackageName = &name
 			line.AdmissionStarts = display.AdmissionStarts
+			line.Description = optional(display.Description)
 		} else if id := item.Ref.TicketTypeID; id.Valid {
 			display := displays.ticketTypes[id.UUID]
 			name := display.TicketTypeName
 			line.TicketTypeName = &name
 			line.AdmissionStarts = display.AdmissionStarts
+			line.Description = optional(display.Description)
 		}
 
 		out = append(out, line)
 	}
 	return out
+}
+
+// optional turns a blank display string into a null JSON field, so a consumer
+// can tell "no description was written" from "the description is empty".
+func optional(s string) *string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return &s
 }

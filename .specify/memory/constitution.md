@@ -1,5 +1,47 @@
 <!--
 Sync Impact Report
+Version change: 4.0.0 -> 4.1.0 (MINOR - materially expanded guidance. No principle is
+removed or redefined and nothing compliant under 4.0.0 becomes non-compliant: the email
+is still exactly one, to exactly the same address, still carrying every ticket in the
+order in a single PDF. What changes is that the receipt - which 4.0.0 already required
+to travel "together with" that PDF - now also travels as its own detachable document.
+A buyer who received a compliant email under 4.0.0 receives a superset under 4.1.0.)
+
+Trigger: spec 016 (Receipt + E-Ticket Email Attachments). The itemized proof of payment
+existed only as HTML inside the email body, so a buyer needing it for reimbursement or
+an expense claim had nothing to file or forward on its own.
+
+Modified sections:
+  - Critical Data Flow Rules, ticket-generation bullet - delivery carries exactly TWO
+    attachments: a Payment Receipt document and the single E-Ticket document holding
+    every ticket. The receipt stays in the body as well. Two constraints are stated
+    rather than left implicit: the E-Ticket document carries no monetary figure (which
+    is also what dissolves the per-ticket-price problem for bundle-issued tickets), and
+    neither document may be sent without the other - a render failure sends nothing, so
+    email_sent stays FALSE and resend stays armed.
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - PRD.md - UPDATED WITH THIS CHANGE: SS1.4's delivery bullet names two attachments.
+  - ARCHITECTURE.md - UPDATED WITH THIS CHANGE: the post-payment sequence note names
+    both documents.
+  - SCHEMA.md - no impact, and this was verified rather than assumed: spec 016 adds no
+    column, table, or migration. Every value the three surfaces render already had a
+    column; the only newly READ ones (orders.updated_at, payments.payment_type,
+    ticket_types.description, packages.description) were already stored and already
+    selected or trivially selectable.
+
+Templates requiring follow-up: none. The plan template's Constitution Check already
+carries the Principle VIII row this change exercises.
+
+Follow-up TODOs: none. Principle VIII is satisfied in the same change: the guest journey
+spec now reads the delivered message off Mailpit and asserts the two-attachment outcome
+and the per-ticket page count, which orders.email_sent alone could never observe.
+-->
+
+<!--
+Sync Impact Report
 Version change: 3.4.0 → 4.0.0 (MAJOR — the fee-presentation rule is redefined in the
 opposite direction: behavior compliant under 3.4.0 — the form-filling step showing the
 fee-inclusive grand total — is non-compliant under 4.0.0. Same reasoning the 2.0.0 and
@@ -659,8 +701,17 @@ purchase flow at all.
   generated per `Attendee`. Delivery is to the buyer alone: **exactly one email**,
   addressed to the order's primary-contact snapshot `orders.buyer_email` — the
   first holder form's address, that form being both ticket holder 1 and the buyer
-  — carrying **every** ticket in the order as a single PDF together with the
-  receipt. The other holders' `attendees.email` values are holder identity, not
+  — carrying **exactly two document attachments**: a Payment Receipt document, and a single
+  E-Ticket document holding **every** ticket in the order, one page per ticket.
+  The receipt also remains itemized in the email body; the attachment exists so a
+  buyer can file or forward the proof of payment without the email around it. The
+  E-Ticket document carries no monetary figure — money is the receipt's job, and a
+  ticket issued from a bundle has no per-ticket price that could honestly be
+  printed. Neither document may be sent without the other: if either fails to
+  render, no email goes out at all. Images the body references inline (the brand
+  mark, the location pin) are message parts, not documents, and are excluded from
+  that count — a buyer's attachment list still shows exactly two files.
+  The other holders' `attendees.email` values are holder identity, not
   delivery addresses, and MUST NOT be mailed. `email_sent` MUST be set only after
   that email has been delivered; a failure leaves it FALSE so resend stays armed.
   Resend (guest and admin) targets the same single address.
@@ -742,4 +793,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 4.0.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-12
+**Version**: 4.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-12

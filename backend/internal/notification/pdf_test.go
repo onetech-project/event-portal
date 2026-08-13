@@ -19,6 +19,7 @@ func sampleTickets(n int) []notification.TicketDetail {
 		out = append(out, notification.TicketDetail{
 			TicketCode:     codes[i%len(codes)],
 			AttendeeName:   "Attendee",
+			AttendeeEmail:  "attendee@example.com",
 			TicketTypeName: "Regular",
 			EventName:      "Jazz Night 2026",
 			Venue:          "Balai Sarbini",
@@ -34,12 +35,37 @@ func sampleOrder() notification.OrderDelivery {
 		OrderNumber: "ORD-20260731-ABCDEF",
 		BuyerName:   "Budi Santoso",
 		BuyerEmail:  "budi@example.com",
+		BuyerPhone:  "081234567890",
 		Status:      "PAID",
+		Event: notification.DeliveryEvent{
+			Name:    "Jazz Night 2026",
+			Venue:   "Balai Sarbini",
+			Address: "Jl. Jend. Sudirman Kav. 50, Jakarta Selatan 12190",
+		},
 	}
 }
 
+func sampleBrand() notification.Branding {
+	return notification.Branding{
+		SiteName:     "JIVE",
+		SiteURL:      "https://www.jive.co.id",
+		SupportEmail: "help@manjo.com",
+		LegalEntity:  "PT Manjo Teknologi Indonesia",
+		Attribution:  "Powered By Manjo",
+	}
+}
+
+// pdfPageCount counts page objects. The page tree node is "/Type /Pages", so it
+// is excluded — counting it would report one page too many on every document.
+//
+// Page dictionaries are not inside a compressed stream, so this works on the
+// shipped bytes as well as on the uncompressed test variant.
+func pdfPageCount(doc []byte) int {
+	return bytes.Count(doc, []byte("/Type /Page")) - bytes.Count(doc, []byte("/Type /Pages"))
+}
+
 func TestRenderTicketsPDFProducesAPDFDocument(t *testing.T) {
-	out, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(1))
+	out, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(1), sampleBrand())
 
 	require.NoError(t, err)
 	assert.True(t, bytes.HasPrefix(out, []byte("%PDF-")), "output must be a PDF")
@@ -49,25 +75,25 @@ func TestRenderTicketsPDFProducesAPDFDocument(t *testing.T) {
 // One order produces exactly one PDF containing every ticket, not one PDF per
 // ticket (Constitution, Critical Data Flow Rules).
 func TestRenderTicketsPDFGrowsWithTheNumberOfTickets(t *testing.T) {
-	one, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(1))
+	one, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(1), sampleBrand())
 	require.NoError(t, err)
 
-	four, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(4))
+	four, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(4), sampleBrand())
 	require.NoError(t, err)
 
 	assert.Greater(t, len(four), len(one), "every ticket must be rendered into the single document")
 }
 
 func TestRenderTicketsPDFRejectsAnEmptyTicketSet(t *testing.T) {
-	_, err := notification.RenderTicketsPDF(sampleOrder(), nil)
+	_, err := notification.RenderTicketsPDF(sampleOrder(), nil, sampleBrand())
 
 	require.Error(t, err, "an order with no tickets has nothing to deliver")
 }
 
 func TestRenderTicketsPDFIsDeterministicForTheSameInput(t *testing.T) {
-	first, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(2))
+	first, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(2), sampleBrand())
 	require.NoError(t, err)
-	second, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(2))
+	second, err := notification.RenderTicketsPDF(sampleOrder(), sampleTickets(2), sampleBrand())
 	require.NoError(t, err)
 
 	// Byte-for-byte equality would depend on the PDF's embedded timestamp, so
@@ -108,32 +134,49 @@ func TestRenderQRRejectsAnEmptyCode(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Spec 015 FR-011: the printed ticket carries the ticket TYPE's admission
-// window, not the parent event's opening date. Before this feature every ticket
-// of a multi-day event printed the same day.
+// Spec 016 FR-020a: the admission window reads "26 Apr 2026 @ 10:00 - 21:00 WIB".
+//
+// Every case feeds UTC and expects WIB. That +7 shift is the assertion: a test
+// written WIB-in/WIB-out would pass even if the renderer did no conversion at
+// all, which is exactly the bug this format change is bundled with.
 func TestFormatTicketWindowCollapsesASameDayWindow(t *testing.T) {
-	start := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 9, 2, 23, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 4, 26, 3, 0, 0, 0, time.UTC) // 10:00 WIB
+	end := time.Date(2026, 4, 26, 14, 0, 0, 0, time.UTC)  // 21:00 WIB
 
 	got := notification.FormatTicketWindow(start, end)
 
-	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC - 23:00 UTC", got,
-		"a window inside one day reads as one date with a time range, not two near-identical datetimes")
+	assert.Equal(t, "26 Apr 2026 @ 10:00 - 21:00 WIB", got,
+		"a window inside one day reads as one date with a time range")
 }
 
+// The multi-day and single-instant branches are NOT specified by FR-020a. They
+// are pinned here so the document cannot ship one ticket in the new form and
+// another in the old one.
 func TestFormatTicketWindowSpellsOutAMultiDayWindow(t *testing.T) {
-	start := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 4, 26, 3, 0, 0, 0, time.UTC) // 10:00 WIB
+	end := time.Date(2026, 4, 28, 14, 0, 0, 0, time.UTC)  // 21:00 WIB, two days later
 
 	got := notification.FormatTicketWindow(start, end)
 
-	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC - Fri, 04 Sep 2026 23:00 UTC", got)
+	assert.Equal(t, "26 Apr 2026 @ 10:00 - 28 Apr 2026 @ 21:00 WIB", got)
 }
 
 func TestFormatTicketWindowPrintsASingleInstantOnce(t *testing.T) {
-	at := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 4, 26, 3, 0, 0, 0, time.UTC) // 10:00 WIB
 
-	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC", notification.FormatTicketWindow(at, at))
-	assert.Equal(t, "Wed, 02 Sep 2026 09:00 UTC", notification.FormatTicketWindow(at, time.Time{}),
+	assert.Equal(t, "26 Apr 2026 @ 10:00 WIB", notification.FormatTicketWindow(at, at))
+	assert.Equal(t, "26 Apr 2026 @ 10:00 WIB", notification.FormatTicketWindow(at, time.Time{}),
 		"a zero end is not printed as a range")
+}
+
+// The day boundary matters here too: an admission opening at 06:00 WIB is 23:00Z
+// the previous day, so a renderer that skips the conversion prints the wrong
+// DATE on the ticket itself.
+func TestFormatTicketWindowUsesTheJakartaCalendarDay(t *testing.T) {
+	start := time.Date(2026, 4, 26, 23, 0, 0, 0, time.UTC) // 27 Apr 06:00 WIB
+	end := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)   // 27 Apr 17:00 WIB
+
+	got := notification.FormatTicketWindow(start, end)
+
+	assert.Equal(t, "27 Apr 2026 @ 06:00 - 17:00 WIB", got)
 }
