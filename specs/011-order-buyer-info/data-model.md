@@ -42,7 +42,7 @@ Not changed, verified against `SCHEMA.md` + `backend/migrations/`:
 
 ### attendees — the only identity source; gender now referential
 
-Each attendee row's `name/email/phone/dob` plus the new `gender_id` is the canonical holder identity. Gender is submitted and returned as the **name** on the wire; the order service maps name↔id (active-genders load at `service.go:398-408` becomes a name→id map; read queries JOIN `genders` to return the name). New write-time phone validation on both sides: `^[0-9]{10,15}$` (research R3, widened 2026-08-07 from digits-only 10-12); the value is stored exactly as the guest typed it, in either `62…` or `08…` form; existing rows written under the old rule remain valid at rest (`VARCHAR(50)`, no CHECK).
+Each attendee row's `name/email/phone/dob` plus the new `gender_id` is the canonical holder identity. Gender is submitted and returned as the **name** on the wire; the order service maps name↔id (active-genders load at `service.go:398-408` becomes a name→id map; read queries JOIN `genders` to return the name). New write-time phone validation on both sides: `^[0-9]{12,15}$` (research R3, widened 2026-08-07 from digits-only 10-12, then floor raised 10 → 12 on 2026-08-13 per research R29); the value is stored exactly as the guest typed it, in either `62…` or `08…` form. Existing rows written under any earlier rule remain valid at rest — `VARCHAR(50)` with **no CHECK**, and none is to be added: the 2026-08-13 clarification makes at-rest validity permanent, so a 10- or 11-digit legacy number keeps displaying, keeps reaching the gateway, and keeps working for resend. Validation is a write-time rule on the holder forms only.
 
 ### Delivery grouping (derived, not stored)
 
@@ -52,7 +52,7 @@ Recipient set for a PAID order = distinct normalized (trimmed, lowercased) `atte
 
 | Object | File | Change |
 |---|---|---|
-| `CheckoutFormsRequest` | `backend/internal/order/dto.go:189-198` | Remove `BuyerName/BuyerEmail/BuyerPhone/BuyerDob/BuyerGender` + their validation blocks (`:219-235`); add per-visitor phone rule (message: "Enter a phone number of 10-15 digits.") |
+| `CheckoutFormsRequest` | `backend/internal/order/dto.go:189-198` | Remove `BuyerName/BuyerEmail/BuyerPhone/BuyerDob/BuyerGender` + their validation blocks (`:219-235`); add per-visitor phone rule (message: "Enter a phone number of 12-15 digits.") |
 | `TicketOrderDetail` | `backend/internal/order/dto.go:327-328` | Remove `BuyerName`, `BuyerEmail` |
 | Active-genders load | `backend/internal/order/service.go:398-408` | Set → **name→id map**; checkout writes `gender_id` via `UpdateAttendeeDetails` |
 | Order SQL | `backend/internal/order/queries/order.sql` | `UpdateOrderBuyer` → 3 columns; `UpdateAttendeeDetails` → `gender_id`; `ListAttendeeSlotsByOrderID` + `ListAttendeesAdmin` JOIN `genders` for the name; delete `CreateOrder`/`CreateAttendee` statements (`:3-25`); **`sqlc generate`** |
@@ -78,11 +78,11 @@ Recipient set for a PAID order = distinct normalized (trimmed, lowercased) `atte
 | `attendees[]` must cover the order's slots exactly (existing) | `matchVisitorsToSlots`, `order/service.go:607-628` | 400 `attendees` |
 | Bundle-unit field consistency (existing, spec 010) | `validateBundleUnitConsistency`, `service.go:636-666` | 400 `400001` per-field |
 | Name trimmed non-empty; email `net/mail.ParseAddress`; DOB `YYYY-MM-DD` + not future; gender name in active master list (all existing, per visitor) | `CheckoutFormsRequest.Validate` | 400 `400001` field map |
-| **New**: phone `^[0-9]{10,15}$` (length only, stored verbatim), per visitor | `CheckoutFormsRequest.Validate` (replacing non-empty check, `dto.go:255-257`) | `attendees[i].phone`: "Enter a phone number of 10-15 digits." |
+| **New**: phone `^[0-9]{12,15}$` (length only, stored verbatim), per visitor | `CheckoutFormsRequest.Validate` (replacing non-empty check, `dto.go:255-257`) | `attendees[i].phone`: "Enter a phone number of 12-15 digits." |
 | **New**: gender name → `gender_id` resolution at write (name valid ⇒ id exists; FK is the backstop) | checkout fill loop (`service.go:479-491`) | n/a (cannot fail after membership check) |
 | **Removed**: all five `buyer_*` validations | `dto.go:219-235` | — |
 | Primary contact derivation: visitor mapped to first canonical slot → `orders.buyer_name/email/phone` in TX-D → gateway `CustomerName/Email/Phone` | `order/service.go` checkout path (R2, R10) | n/a (derived) |
-| Frontend mirror: Zod `regex(/^[0-9]{10,15}$/, "Enter a phone number of 10-15 digits.")` behind a `PhoneInput` that filters non-digits on the way in but changes nothing else about the value; button gated on `formState.isValid` (`mode: "onTouched"`) with click-capture `trigger()` reveal (R5); all fields marked required (R16) | `visitor-form.tsx`, `ui/field.tsx` | inline field errors |
+| Frontend mirror: Zod `regex(/^[0-9]{12,15}$/, "Enter a phone number of 12-15 digits.")` behind a `PhoneInput` that filters non-digits on the way in but changes nothing else about the value; button gated on `formState.isValid` (`mode: "onTouched"`) with click-capture `trigger()` reveal (R5); all fields marked required (R16) | `visitor-form.tsx`, `ui/field.tsx` | inline field errors |
 
 ## 5. Delivery state machine (per-order, unchanged states — new fan-out semantics)
 

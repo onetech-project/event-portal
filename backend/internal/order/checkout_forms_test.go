@@ -135,17 +135,22 @@ func TestCheckoutOrderRejectsBadFormsWithAFieldMap(t *testing.T) {
 	assert.Equal(t, 0, f.gateway.callCount())
 }
 
-// Spec 011 (clarified 2026-08-07): the phone rule is 10-15 digits and nothing
-// else, and every failure carries the exact shared message keyed to the
-// offending form.
+// Spec 011 (clarified 2026-08-07, floor raised 2026-08-13): the phone rule is
+// 12-15 digits and nothing else, and every failure carries the exact shared
+// message keyed to the offending form.
 func TestCheckoutOrderRejectsMalformedPhonesWithTheExactMessage(t *testing.T) {
 	for name, phone := range map[string]string{
-		"nine digits":         "081234567",
-		"sixteen digits":      "0812345678901234",
-		"contains separators": "0812-3456-789",
-		"contains letters":    "08123456789a",
-		"leading plus":        "+628123456789",
-		"empty":               "",
+		"nine digits":    "081234567",
+		"ten digits":     "0812345678",
+		"sixteen digits": "0812345678901234",
+		// Eleven digits is the case the raised floor added: an ordinary local-
+		// form Indonesian number that was valid until 2026-08-13. The length is
+		// counted on what was typed, so no prefix rescues it.
+		"eleven digits — local form that used to pass": "08123456789",
+		"contains separators":                          "0812-3456-789",
+		"contains letters":                             "08123456789a",
+		"leading plus":                                 "+628123456789",
+		"empty":                                        "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newCheckoutFixture(t)
@@ -161,7 +166,7 @@ func TestCheckoutOrderRejectsMalformedPhonesWithTheExactMessage(t *testing.T) {
 			assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
 			fields, ok := appErr.Data.(map[string]string)
 			require.True(t, ok, "400001 carries the field map as data")
-			assert.Equal(t, "Enter a phone number of 10-15 digits.", fields["attendees[0].phone"])
+			assert.Equal(t, "Enter a phone number of 12-15 digits.", fields["attendees[0].phone"])
 			assert.Equal(t, 0, f.gateway.callCount())
 		})
 	}
@@ -172,9 +177,9 @@ func TestCheckoutOrderRejectsMalformedPhonesWithTheExactMessage(t *testing.T) {
 // exactly as submitted rather than normalised into one another.
 func TestCheckoutAcceptsThePhoneLengthBoundariesAndStoresItVerbatim(t *testing.T) {
 	for name, phone := range map[string]string{
-		"ten digits":         "0812345678",
+		"twelve digits":      "081234567890",
 		"fifteen digits":     "081234567890123",
-		"local form":         "08123456789",
+		"local form":         "0812345678901",
 		"international form": "628123456789",
 	} {
 		t.Run(name, func(t *testing.T) {

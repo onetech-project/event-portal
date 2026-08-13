@@ -60,10 +60,11 @@ export function OrderSummaryPanel({
 
   return (
     <div className="rounded-xl border bg-card">
-      {/* Icon chip + title (Figma 206-3145). NOTE: spec 011 FR-013 also calls
-          for the Booking ID here and FR-014 for a per-unit price on each
-          ticket line; both were removed by hand to match the design. Restore
-          them here, or amend the spec — right now the two disagree. */}
+      {/* Icon chip + title (Figma 206-3145). The card deliberately carries no
+          Booking ID (FR-013) and no per-unit price on its ticket lines
+          (FR-014), both amended to this design on 2026-08-13. The Booking ID is
+          disclosed on the confirmation screen and in the receipt; the unit price
+          stays the figure each line subtotal is derived from. */}
       <header className="flex items-center gap-3 px-4 py-4">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
           <ReceiptText aria-hidden className="size-4" />

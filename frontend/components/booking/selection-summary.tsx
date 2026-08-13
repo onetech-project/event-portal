@@ -143,10 +143,11 @@ export function SelectionSummary({
                         {line.quantity}{" "}
                         {/* A bundle counts as itself, not as the days inside it —
                             the same reason it renders as one line at its own
-                            price rather than decomposed. */}
-                        {line.kind === "package"
-                          ? "Bundle"
-                          : `Ticket${line.quantity > 1 ? "s" : ""}`}
+                            price rather than decomposed. The unit noun stays
+                            "Ticket(s)" for every kind of line, so this count and
+                            the panel's own "Total N Tickets" below are counting
+                            the same things in the same words. */}
+                        {`Ticket${line.quantity > 1 ? "s" : ""}`}
                       </span>
                       <span className="font-bold text-ticket-ink">
                         {/* Presentational only: the server recomputes what is charged. */}

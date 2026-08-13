@@ -2,7 +2,7 @@
 
 **Input**: Design documents from `/specs/011-order-buyer-info/`
 
-**Prerequisites**: plan.md (rev. 4), spec.md (Clarifications 2026-08-06 + 2026-08-07 + 2026-08-12), research.md R1–R28, data-model.md (§1–§6 shipped `000012`; §7 shipped `000013`; §8 no schema impact), contracts/{checkout-and-delivery,schema-revision,fee-presentation}.md, quickstart.md
+**Prerequisites**: plan.md (rev. 5), spec.md (Clarifications 2026-08-06 + 2026-08-07 + 2026-08-12 + 2026-08-13), research.md R1–R30, data-model.md (§1–§6 shipped `000012`; §7 shipped `000013`; §8 no schema impact; §2's phone rule narrowed with no schema impact), contracts/{checkout-and-delivery,schema-revision,fee-presentation}.md, quickstart.md
 
 **Tests**: The spec's success criteria and the existing suites demand test updates; test tasks below are updates/rewrites of existing suites (no new TDD scaffolding was requested). Toolchain: node is not on PATH — run `tsc`/vitest per project memory (`frontend-toolchain-invocation.md`); vitest binary is at `frontend/node_modules/.bin/vitest`.
 
@@ -10,7 +10,8 @@
 
 - **Phases 1–7 (T001–T030) are DELIVERED** — FR-001 – FR-021, through commit `01ce8fe`. Phases 3–6 map to US1 (P1) forms without buyer card, US2 (P2) validation gating, US3 (P2) banner + delivery, US4 (P3) order summary. Left in place as the record; do not re-run.
 - **Phases 8–12 (T031–T051) are rev. 3 and are DELIVERED**, added by the 2026-08-07 clarifications: **Track A** = Phase 8, User Story 6 (P2), the end-of-journey modal; **Track B** = Phases 9–11, the schema revision (FR-025 – FR-029), which maps to **no user story** and therefore carries no story label, per the spec's own scope note below FR-021.
-- **Phases 13–14 (T052–T060) are rev. 4** and are **the only outstanding work in this feature**: **Track C**, the form-step fee presentation (FR-016, FR-016a – FR-016c), under constitution **v4.0.0**. It belongs to **User Story 4 (P3)**, whose Phase 6 shipped the summary card this revision corrects.
+- **Phases 13–14 (T052–T060) are rev. 4 and are DELIVERED**: **Track C**, the form-step fee presentation (FR-016, FR-016a – FR-016c), under constitution **v4.0.0**. It belongs to **User Story 4 (P3)**, whose Phase 6 shipped the summary card that revision corrected.
+- **Phases 15–17 (T061–T072) are rev. 5 and are DELIVERED**, added by the 2026-08-13 clarifications under an unchanged constitution **v4.0.0**: **Track D** = Phase 15, the phone floor moving 10 → 12 (FR-006), belonging to **User Story 2 (P2)**; **Track E** = Phase 16, the FR-013/FR-014 amendment to the shipped summary panel, belonging to **User Story 4 (P3)**. Neither needs an amendment — v4.0.0 governs the panel's money figures and says nothing about phone format, the Booking ID, or a per-unit price. Track E finally closes the disagreement Phases 12 and 14 both left standing.
 
 ## Phase 1: Setup (migration + schema truth)
 
@@ -56,7 +57,7 @@
 
 ## Phase 4: User Story 2 — Validation Gates Continue to Payment (Priority: P2)
 
-**Goal**: Phone `^[0-9]{10,15}$` on both sides with one shared message (clarified 2026-08-07: widened from 10-12, stored verbatim, and the field filters non-digits as they are typed); button disabled until every form is valid; untouched-field errors reachable via click-capture reveal.
+**Goal**: Phone `^[0-9]{10,15}$` on both sides with one shared message (clarified 2026-08-07: widened from 10-12, stored verbatim, and the field filters non-digits as they are typed); button disabled until every form is valid; untouched-field errors reachable via click-capture reveal. **The `{10,15}` bound here is the historical record of what this phase delivered — Phase 15 (Track D) raised the floor to `{12,15}` on 2026-08-13. Implement from Phase 15, not from this line.**
 
 **Independent Test**: Quickstart Scenario B — per-field inline errors, disabled/enabled transitions, reveal on disabled-button click, API-level `400001` for a 9-digit phone.
 
@@ -247,6 +248,94 @@ backend diff in a Track C commit is out of scope and should be challenged in rev
 
 ---
 
+## Phase 15: User Story 2 (cont.) — The Phone Floor Is 12, Not 10 (Priority: P2) — Track D
+
+**Goal**: `^[0-9]{10,15}$` becomes `^[0-9]{12,15}$` on both sides of the wire, with the one
+canonical message moving with it. Length alone — no prefix branch is introduced, so the
+floor is counted on the value exactly as typed. Nothing already stored is re-judged.
+
+**Independent Test**: Quickstart Scenario K — `08123456789` (11 digits) is refused in the
+form and by the API with the same message; `628123456789` is accepted; an existing order
+whose holder phone is 11 digits still opens, still renders, and still resends.
+
+**Track D is backend + frontend + e2e. No migration, no SQL, no DTO shape change.**
+`attendees.phone` stays `VARCHAR(50)` with **no CHECK** — see T066. A schema diff in a
+Track D commit is out of scope and should be challenged in review.
+
+> **Ordering is not a preference here.** T061 comes first and must be seen RED. The e2e
+> holder fixture is `081298765432` — 12 digits — so it passes under both the old floor and
+> the new one, and every existing test stays green against unfixed code (research R29).
+> Writing the scenario after the regex would produce a test that never had the chance to
+> fail, which constitution Governance rejects outright.
+
+- [X] T061 [US2] `e2e/specs/guest-purchase.spec.ts`: add the floor scenario near the existing holder-form validation tests. Fill a holder form with an **11-digit** phone (`08123456789`), assert the inline error "Enter a phone number of 12-15 digits." and that Continue to Payment stays disabled; then correct it to `628123456789` (12 digits) and assert the error clears and the button enables. Do **not** change the existing `081298765432` fixture at `:98` — it is 12 digits, still valid, and its unchanged passing is what proves the change is a floor move rather than a rewrite. **Run this against unfixed code and confirm it fails** (Principle VIII): under `{10,15}` the 11-digit value is accepted, so the first assertion genuinely goes red. If it passes before T062/T064, the value being typed is not 11 digits — recount it.
+- [X] T062 [P] [US2] `backend/internal/order/dto.go`: `visitorPhonePattern` (`:231`) → a `regexp.MustCompile` of `^[0-9]{12,15}$`; `visitorPhoneMessage` (`:233`) → exactly `"Enter a phone number of 12-15 digits."`; update the rule comment at `:226`, which states the 10-15 bound in prose. Change nothing else in the file — the field's type, JSON name, and position in `CheckoutFormsRequest` are unchanged, and this must remain a validation edit rather than a DTO shape edit (Principle III).
+- [X] T063 [US2] `backend/internal/order/checkout_forms_test.go`: update the rule comment at `:138` and the verbatim message assertion at `:164`. Move the boundary cases from 10/15 to **12/15** and add the case the whole track exists for: an 11-digit value is rejected. Keep the existing separators/letters/plus/empty cases and both the `08…` and `62…` verbatim-storage cases — none of those change. Depends on T062 (same rule, adjacent files); running it before T062 lands means asserting the new message against the old constant.
+- [X] T064 [P] [US2] `frontend/components/order/visitor-form.tsx`: `PHONE_MESSAGE` (`:86`) → `"Enter a phone number of 12-15 digits."`; `phoneSchema` (`:88`) → `z.string().regex(/^[0-9]{12,15}$/, PHONE_MESSAGE)`; update the comment block at `:81-85`, which cites the 2026-08-07 clarification and the 10-15 bound. **Also fix the placeholder at `:556`**: it currently reads `08123456789`, an 11-digit value the field now rejects — a field must not advertise an example it refuses. Use `081234567890`. **Do NOT touch `phoneDigits` at `:641-643`**: `slice(0, 15)` is the typing ceiling and stays; there is deliberately no typing floor, because a guest cannot be stopped mid-number at digit 11 (research R29).
+- [X] T065 [US2] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/page.test.tsx`: update the three verbatim message assertions at `:600`, `:621`, `:629` and the rule comment at `:410`. The case at `:608` ("rejects a phone number outside 10-15 digits with the exact message") needs its title and its input updated — rename to the 12-15 bound and drive an 11-digit value so the case exercises the new floor rather than re-testing a length both rules reject. Depends on T064.
+- [X] T066 [US2] Verify the at-rest guarantee rather than assuming it (spec Clarifications 2026-08-13, research R29). Confirm `grep -rn "phone" backend/migrations/` shows no new constraint and that `\d attendees` reports `phone | character varying(50)` with no CHECK. Then walk quickstart **Scenario K step 5** against a database holding an order whose holder phone is 10 or 11 digits: it must open in the admin order view, render its phone, and accept a resend. **Adding a CHECK or a backfill sweep is out of scope and would fail on any environment holding real orders** — this task exists to make that explicit at the point someone would be tempted to "finish the job".
+
+**Checkpoint**: T061 red → green. Both validators refuse 11 digits with one message; the ceiling, the verbatim-storage rule, and every stored row are untouched.
+
+---
+
+## Phase 16: User Story 4 (cont.) — The Summary Card Amendment Gets Its Tests Back (Priority: P3) — Track E
+
+**Goal**: Close the FR-013/FR-014 disagreement that rev. 3 and rev. 4 both carried openly.
+The spec now matches the shipped panel, so nothing is restored and no production behaviour
+changes — the deliverable is that two suspended comment blocks become live assertions and
+the last record of the disagreement is cleared.
+
+**Independent Test**: Quickstart Scenario L — the summary card on both order steps shows
+the event name, the line name, quantity and subtotal, and carries neither a Booking ID nor
+a per-unit price; the Booking ID is still disclosed on the confirmation screen.
+
+**Track E changes no production behaviour.** The only non-test edit is deleting a comment.
+Nothing goes red on its own, which is precisely why the assertions must be written — a gap
+that nothing reports is the failure mode here.
+
+- [X] T067 [P] [US4] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/page.test.tsx`: replace the suspended NOTE at `:529-531` with live negative assertions — the summary card renders **no Booking ID** and **no per-unit price** on the ticket line. Keep them inside the existing block so each sits beside a rendered positive (the event name at `:525` and the QRIS radio at `:534` are already asserted there): an absence assertion passes vacuously if the panel failed to render, and the positive is what rules that out (research R30). Verify the fixture's derived unit price does not collide with its line subtotal, grand total, or a fee amount before asserting on it.
+- [X] T068 [P] [US4] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/checkout/page.test.tsx`: same treatment for the suspended NOTE at `:125-126`. The fixture here is `Regular` × 2 with a 550.000 line, so the absent unit price is 275.000 — a figure that appears nowhere else on that screen, which makes it a clean assertion. The comment at `:119-120` already records that Figma `206-3145` shows no per-unit price; fold it into the assertion rather than leaving it as prose.
+- [X] T069 [US4] `frontend/components/order/order-summary-panel.tsx`: delete the NOTE at `:63-66` recording the FR-013/FR-014 disagreement. It documented a spec-vs-code conflict that no longer exists, and leaving it invites a future reader to "fix" the panel back. Replace it with a one-line reference to FR-013/FR-014 as amended, matching how the surrounding Figma citations read. **No behaviour change** — if this task produces a rendering diff, it exceeded its scope.
+- [X] T070 [US4] `specs/011-order-buyer-info/checklists/requirements.md`: the Notes bullet beginning "**Open UI/spec disagreement (not a spec defect — flagged for a decision)**" is now stale and is the last place the disagreement is recorded as open. Rewrite it to record the resolution — the spec was amended to the shipped design on 2026-08-13, FR-013 drops the Booking ID, FR-014 drops the per-unit price, and the suspended assertions were reinstated as negative checks. Keep the note; do not delete it, because the history of a reversed requirement is worth as much as the requirement.
+
+**Checkpoint**: FR-013 and FR-014 are asserted on both order screens, and no artifact still describes them as undecided.
+
+---
+
+## Phase 17: Polish & Verification (rev. 5)
+
+> **Two pre-existing red tests found during T072, both outside Tracks D and E,
+> both now resolved — recorded rather than absorbed silently.**
+>
+> 1. **The registration-phase fee note.** `order-summary-panel.tsx` renders
+>    `"Excludes taxes and fees"`, while `order-summary-panel.test.tsx` and
+>    `page.test.tsx` both asserted `"taxes and fees added at the next step"` —
+>    contradicting copy and test landed together in commit `10fe9b8`. **Resolved
+>    in favour of the shipped copy**: the two tests were changed to expect
+>    `"Excludes taxes and fees"`. ⚠️ **Governance follow-up owed**: constitution
+>    v4.0.0's fee-presentation bullet and FR-016a both say the note MUST *state
+>    that taxes and fees are added at the next step*. "Excludes taxes and fees"
+>    does not claim the figure includes them (so the prohibition holds), but it
+>    does not make the forward-looking statement either. Either the bullet and
+>    FR-016a are amended to the chosen wording, or the copy moves back — until
+>    one of those happens, `/speckit-analyze` will keep flagging it.
+> 2. **The booking panel's unit noun.** `selection-summary.test.tsx > multiplies
+>    a line by its quantity` expected `"3 Tickets"` for a bundle line while the
+>    component rendered `"3 Bundle"` (also unpluralised). `59b2293` had added a
+>    `line.kind === "package" ? "Bundle"` branch and unpluralised the total;
+>    `7134157`, later, reverted the total to `"Total N Tickets"` and wrote these
+>    assertions but left the line-level branch behind — so the panel counted the
+>    same bundle as "3 Bundle" on the line and "3 Tickets" on the total. The
+>    branch was removed so both count in the same words; bundles remain visually
+>    distinguished by `selectable-row.tsx`'s own "Bundle" badge, which is
+>    untouched.
+
+- [X] T071 [P] Sweep for surfaces still naming the superseded floor: `grep -rn "10-15\|{10,15}" backend/ frontend/ e2e/ specs/011-order-buyer-info/ --exclude-dir=node_modules --exclude-dir=.next`. Expected survivors are records and stay: the historical Clarifications bullet at `spec.md:30`, research R3's heading and its superseded-floor banner, the three-cuts history in `contracts/checkout-and-delivery.md:11`, the delivered T014/T015 lines in this file, and plan.md's deliberate old-vs-new comparisons. Anything else — a source constant, a test assertion, a placeholder, a comment describing the live rule — is stale and belongs in T062–T065.
+- [X] T072 Full verification. Backend: `cd backend && go build ./... && go vet ./... && ./scripts/test.sh ./...`. Frontend: `tsc --noEmit` and `./node_modules/.bin/vitest run` (node is not on PATH and there is no `test` script — project memory `frontend-toolchain-invocation.md`). e2e: `cd e2e && npm test`, and again with `E2E_CACHE_ENABLED=false` (Principle VII's kill switch). Then walk quickstart **Scenario K** end to end, including step 5 against a database that already holds a short legacy number, and **Scenario L** on both order steps. Expected non-events, each worth confirming rather than assuming: no migration ran, `SCHEMA.md` needs no edit, and the amount charged on any order is unchanged.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Rev. 1–2 (delivered)
@@ -287,6 +376,27 @@ T052 (e2e helper)
 - **Parallel**: T056 ‖ T057 ‖ T058 (three different test files, no shared fixture). T059 ‖ T060's frontend leg.
 - **Not parallel**: T054 and T055 are one change — the prop rename breaks the build between them, so they land together rather than as two commits.
 
+### Rev. 5 — two tracks, fully independent of each other
+
+```text
+Track D (Phase 15)                          Track E (Phase 16)
+T061 (e2e scenario, MUST be seen RED)       T067 [P] forms-page assertions
+  ├─→ T062 [P] backend dto.go               T068 [P] checkout-page assertions
+  │     └─→ T063 backend dto tests            └─→ T069 delete the panel NOTE
+  └─→ T064 [P] frontend schema+placeholder          └─→ T070 checklist note
+        └─→ T065 forms-page message tests
+              └─→ T066 at-rest verification
+
+        └────────────┬────────────┘
+                T071 [P] sweep
+                     └─→ T072 full verification
+```
+
+- **Parallel across tracks**: Track D and Track E share no file and no requirement. Either can ship first, or both at once by two people.
+- **Parallel within Track D**: T062 ‖ T064 (one Go file, one TSX file, no shared symbol). Their tests follow each: T063 after T062, T065 after T064, and once both constants have moved T063 ‖ T065.
+- **Parallel within Track E**: T067 ‖ T068 (two different test files). T069 and T070 are sequential only in the sense that they are the same decision recorded in two places.
+- **Not parallel**: T062 and T063 — the test asserts the constant the source task changes, so running the test task first asserts a new message against an old constant. Same for T064/T065.
+
 ### Ordering constraints that are NOT preferences
 
 - T037's eight steps are forced by PostgreSQL, not chosen (no uuid→integer cast; FK must drop before the key changes; backfill before `NOT NULL`) — see data-model §7.2.
@@ -294,10 +404,35 @@ T052 (e2e helper)
 - T034 after T032 **and** T033 — deleting a still-imported component breaks the build.
 - **T053 before T054**, and observed failing. This is the one ordering in rev. 4 that is not a build constraint but a correctness one: on the current fixture data (no fees anywhere) the scenario would pass against unfixed code, so writing it afterwards would produce a test that never could have caught the defect. Constitution Principle VIII and the Governance section both require it to be seen red.
 - **T052 before T053** — the scenario has nothing to assert until a fee exists, because `e2e/support/db.ts:44-45` truncates the table the migration seeds.
+- **T061 before T062 and T064**, and observed failing. The same correctness ordering as T053, for the same reason in a new place: the e2e holder fixture is 12 digits and valid under both floors, so the entire suite stays green against unfixed code (research R29). A scenario written after the regex could never have failed, and constitution Governance rejects a regression test never seen red.
+- **T062 and T064 in the same change** — they are one rule enforced twice. Shipping the backend floor without the frontend one leaves the guest reading "12-15" only after a round trip; shipping the frontend one alone leaves the API accepting what the form refuses. Neither half is a releasable increment.
 
 ## Implementation Strategy
 
-### Rev. 4 — the whole of the remaining work
+### Rev. 5 — the whole of the remaining work
+
+Twelve tasks across two tracks that share no file. **Ship Track E first** if you want a
+clean start: it is four tasks, changes no production behaviour, and its only real content
+is turning two suspended comments into assertions — which also clears the last artifact
+still describing FR-013/FR-014 as undecided. Nothing depends on it and nothing blocks it.
+
+**Track D is the one with a gate.** Six tasks, one regex constant on each side of the
+wire, and its entire risk is that nobody proves it. Write T061 first and watch it go red;
+everything after is mechanical. Do the two source edits (T062, T064) as one change — one
+rule enforced twice is not two increments — then their tests, then T066's at-rest check.
+
+**What would make this go wrong**, in the order it is likely: (1) writing the e2e scenario
+after the regex, producing a test that never could have failed — the fixture is 12 digits
+and passes either way, so this failure is silent; (2) moving the regex without moving all
+five verbatim assertions of the message string, which surfaces as a copy mismatch and is
+actually the rule and the guest-facing text disagreeing; (3) leaving the `08123456789`
+placeholder at `visitor-form.tsx:556`, so the field advertises an example it refuses;
+(4) "finishing the job" with a CHECK constraint or a backfill sweep, which the at-rest
+clarification forbids and which would fail on any environment holding real orders;
+(5) for Track E, deleting the suspended comments instead of replacing them — that converts
+a known gap into an invisible one.
+
+### Rev. 4 — delivered
 
 Track C is nine tasks and two lines of production code. It is a complete increment on its
 own, depends on nothing outstanding, and can ship the moment T060 is green.
@@ -323,5 +458,5 @@ would mean the change stopped being a display rule.
 
 ### Still open, not absorbed into these tasks
 
-- **FR-013 / FR-014 vs. the shipped summary panel** — the Booking ID and per-unit price were hand-removed to match Figma `206-3145`, and two assertions are suspended in `page.test.tsx` / `checkout/page.test.tsx`. This needs a decision (restore the UI, or amend FR-013/FR-014), not a task. Flagged in [checklists/requirements.md](checklists/requirements.md); no task above touches it.
+- ~~**FR-013 / FR-014 vs. the shipped summary panel**~~ — **RESOLVED 2026-08-13 and now Phase 16 (Track E).** The clarification session amended the spec to the shipped design rather than restoring the UI, so this is no longer a decision held open: T067–T070 reinstate the two suspended assertions as negative checks and clear the checklist note.
 - **FR-028's admin branch** — "entries an admin creates or edits MUST record that admin's identifier" has no code path, because no admin CRUD for genders or order statuses exists (only the read-only `GET /ticket/genders`). The columns ship correct and populated with `SYSTEM`; the admin branch activates when that CRUD is built, which is a new admin capability outside this feature (research R22).
