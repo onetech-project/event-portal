@@ -351,6 +351,84 @@ test.describe("Admin console", () => {
     const orders = await adminOrders(token, { eventId: event.id });
     expect(orders.length).toBe(1);
   });
+
+  /**
+   * Spec 017. The reason an operator opens this dialog at all: it is the only
+   * handle that matches an order in this system to a transaction in the
+   * gateway's own records. Without it a payment that never notified has no
+   * thread to pull.
+   *
+   * The payment dialog had no coverage before this — nothing in this file
+   * opened it.
+   */
+  test("the payment view shows the gateway reference for a real order", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-admin-ext-ref",
+      quota: 5,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    const orderNumber = await guest.agreeToTermsAndBook();
+    await guest.fillHolder(0, defaultHolder);
+    await guest.payWithQris();
+    await guest.expectAwaitingPayment();
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openOrders();
+
+    await page
+      .getByRole("row", { name: new RegExp(orderNumber) })
+      .getByRole("button", { name: /payment history/i })
+      .click();
+
+    // The stub mints its reference from the order number, so the expected value
+    // is knowable without reaching into the stub's memory.
+    const expected = `stub-eri-${orderNumber}`;
+    await expect(page.getByText(expected)).toBeVisible();
+
+    // Stated once for the order, not repeated down the notification rows: it is
+    // an order-level fact and only one row carries it.
+    await expect(page.getByText(expected)).toHaveCount(1);
+
+    // And in full — an abbreviated identifier cannot be pasted into the
+    // gateway's search, which is the entire use.
+    await expect(page.getByText(expected)).toHaveText(expected);
+  });
+
+  // An order that never reached checkout has no reference and none can be
+  // recovered. The dialog still has to render (spec 017 FR-018, SC-006).
+  test("the payment view degrades cleanly for an order with no payment session", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-admin-no-ext-ref",
+      quota: 5,
+    });
+
+    // Booked and left there: no holder forms, so checkout never runs and no
+    // session is ever opened.
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openOrders();
+
+    await page
+      .getByRole("row", { name: new RegExp(orderNumber) })
+      .getByRole("button", { name: /payment history/i })
+      .click();
+
+    await expect(page.getByText(/no payment session was opened/i)).toBeVisible();
+    await expect(page.getByText(/seats held vs\. remaining/i)).toBeVisible();
+    await expect(page.getByText(/stub-eri-/)).toHaveCount(0);
+  });
+
 });
 
 /**

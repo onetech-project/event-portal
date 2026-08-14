@@ -218,14 +218,20 @@ CREATE TABLE tickets (
 );
 
 -- 8. PAYMENTS (Webhook & Transaction Logs)
+-- Append-only. Rows are never updated in place: the sequence IS the audit trail.
+-- `status` holds either the provider's RAW transaction status or one of this
+-- domain's own markers (DISPUTED, SETTLED_AFTER_EXPIRY, SETTLE_REFUSED_NO_QUOTA,
+-- SESSION_DUPLICATE, SESSION_OPENED) — both live in one column, which is what
+-- makes the sequence a single readable narrative.
 CREATE TABLE payments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     provider VARCHAR(50) NOT NULL,
-    transaction_id VARCHAR(255) NOT NULL,
+    transaction_id VARCHAR(255) NOT NULL, -- the gateway's network transaction id; falls back to the order number on a marker row that has none of its own
     payment_type VARCHAR(100),
     status VARCHAR(50) NOT NULL,
     raw_response JSONB,
+    ext_ref_id VARCHAR(255), -- gateway's own reference (eri) for the payment session, captured at session open (migration 0015)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

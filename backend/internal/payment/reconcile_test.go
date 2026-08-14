@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -345,4 +346,45 @@ func TestOrderHoldsCoversEveryConstituentOfABundle(t *testing.T) {
 	holds, err := f.svc.OrderHolds(context.Background(), f.orderID)
 	require.NoError(t, err)
 	assert.Len(t, holds, 2, "an operator topping up only the first would be refused again")
+}
+
+// The order-level value an operator reads off the payment view resolves out of
+// this sequence: exactly one row carries the reference, so a client finds it
+// without a second request and without a column that would be blank everywhere
+// else (spec 017 FR-014, FR-015).
+func TestOrderNotificationsCarryTheReferenceOnTheSessionOpenRowAlone(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.svc.RecordSessionOpened(ctx, "ORD-WEBHOOK", payment.PaymentSession{
+		ProviderRef: "A487336098162400838C", QRString: "qr",
+		ExpiresAt: time.Now().Add(14 * time.Minute), ExpiryFromGateway: true,
+	}))
+	require.NoError(t, f.notify(t, status.Completed))
+
+	records, err := f.svc.OrderNotifications(ctx, f.orderID)
+	require.NoError(t, err)
+	require.Len(t, records, 2, "the session-open marker and the settling payload")
+
+	var carrying int
+	for _, r := range records {
+		if r.Status == payment.MarkerSessionOpened {
+			assert.True(t, r.IsMarker, "our own statement, not something the gateway said")
+			assert.Equal(t, "A487336098162400838C", r.ExtRefID)
+			carrying++
+			continue
+		}
+		assert.Empty(t, r.ExtRefID, "a callback does not carry the reference")
+	}
+	assert.Equal(t, 1, carrying, "stated once for the order, never repeated per row")
+}
+
+// An order that never reached checkout has no reference and no row to hold one.
+// It must read as absent rather than as an error (spec 017 FR-018, SC-006).
+func TestOrderNotificationsAreEmptyForAnOrderThatNeverOpenedASession(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	records, err := f.svc.OrderNotifications(context.Background(), f.orderID)
+	require.NoError(t, err)
+	assert.Empty(t, records)
 }

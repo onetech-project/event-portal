@@ -2,6 +2,7 @@ package payment_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -698,4 +699,113 @@ func TestADisputeIsReadableOnTheOrdersOwnHistory(t *testing.T) {
 	}
 	assert.True(t, dispute, "the contradiction")
 	assert.True(t, settlement, "shown alongside the notification that settled the payment")
+}
+
+// --- Session open (spec 017) ----------------------------------------------
+
+// The counterpart of ReleaseDuplicateSession above: the gateway agreed, so the
+// reference it agreed under goes on the order's own record. It is the only
+// moment that value exists — no callback carries it.
+func TestRecordSessionOpenedWritesOneMarkerCarryingTheReference(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+	deadline := time.Now().Add(14 * time.Minute).UTC().Truncate(time.Second)
+
+	require.NoError(t, f.svc.RecordSessionOpened(ctx, "ORD-WEBHOOK", payment.PaymentSession{
+		ProviderRef:       "A487336098162400838C",
+		QRString:          "00020101021226610014COM.STUB.WWW",
+		ExpiresAt:         deadline,
+		ExpiryFromGateway: true,
+	}))
+
+	assert.Equal(t, 1, f.markerCount(t, payment.MarkerSessionOpened),
+		"exactly one row per opened session")
+
+	records, err := f.svc.OrderNotifications(ctx, f.orderID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	row := records[0]
+	assert.Equal(t, payment.MarkerSessionOpened, row.Status)
+	assert.True(t, row.IsMarker, "our own statement must not read as a gateway status")
+	assert.Equal(t, "A487336098162400838C", row.ExtRefID)
+	assert.Equal(t, "qris", row.PaymentType,
+		"the session-open row is where SettlementForOrder reads the instrument")
+	assert.Equal(t, "ORD-WEBHOOK", row.TransactionID,
+		"transaction_id is NOT NULL and the network id does not exist yet, so it falls "+
+			"back to the order number rather than to a blank that would read as a real one")
+	// Parsed rather than substring-matched: the column is JSONB, so Postgres
+	// re-serialises the envelope and the byte layout is not ours to assert on.
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(row.RawPayload, &envelope))
+	assert.Equal(t, true, envelope["expiry_from_gateway"],
+		"whether the gateway agreed to the deadline reaches the order's record, not only the logs")
+	assert.Equal(t, "A487336098162400838C", envelope["ext_ref_id"])
+}
+
+// The order is payable by the time this runs. An audit write that cannot land
+// must not be able to take the session away from the guest.
+func TestRecordSessionOpenedReportsAnUnknownOrderWithoutPanicking(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	err := f.svc.RecordSessionOpened(context.Background(), "ORD-DOES-NOT-EXIST",
+		payment.PaymentSession{ProviderRef: "A4873360", QRString: "qr"})
+
+	require.Error(t, err, "the caller decides what to do; this reports rather than swallows")
+	assert.Zero(t, f.markerCount(t, payment.MarkerSessionOpened))
+}
+
+// A gateway that opened a session but sent no reference still leaves a payable
+// order. The gap is recorded, never fatal (spec 017 FR-004).
+func TestRecordSessionOpenedAcceptsAnAbsentReference(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.svc.RecordSessionOpened(ctx, "ORD-WEBHOOK", payment.PaymentSession{
+		QRString: "00020101021226610014COM.STUB.WWW", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+
+	assert.Equal(t, 1, f.markerCount(t, payment.MarkerSessionOpened))
+	ref, err := f.svc.ExternalRefForOrder(ctx, f.orderID)
+	require.NoError(t, err)
+	assert.Empty(t, ref)
+}
+
+// Regression guard. SettlementForOrder walks the rows newest-first and takes the
+// first non-empty payment_type as the receipt's instrument and the first
+// Completed row as the settlement time. The SESSION_OPENED row is the OLDEST, so
+// it must not win that walk — a receipt naming the wrong instrument is not a
+// cosmetic defect.
+func TestSettlementStillResolvesFromTheNotificationRowsWithASessionOpenRowPresent(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	require.NoError(t, f.svc.RecordSessionOpened(ctx, "ORD-WEBHOOK", payment.PaymentSession{
+		ProviderRef: "A487336098162400838C", QRString: "qr",
+		ExpiresAt: time.Now().Add(time.Minute), ExpiryFromGateway: true,
+	}))
+	require.NoError(t, f.notify(t, status.Completed))
+
+	settlement, err := f.svc.SettlementForOrder(ctx, f.orderID)
+	require.NoError(t, err)
+	assert.Equal(t, "qris", settlement.Method)
+	assert.False(t, settlement.PaidAt.IsZero(),
+		"the settling notification still supplies the time; the session-open row has none")
+}
+
+func TestExternalRefForOrderAnswersFromTheRecordedSession(t *testing.T) {
+	f := newWebhookFixture(t)
+	ctx := context.Background()
+
+	ref, err := f.svc.ExternalRefForOrder(ctx, f.orderID)
+	require.NoError(t, err)
+	assert.Empty(t, ref, "nothing opened yet")
+
+	require.NoError(t, f.svc.RecordSessionOpened(ctx, "ORD-WEBHOOK", payment.PaymentSession{
+		ProviderRef: "A487336098162400838C", QRString: "qr", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+
+	ref, err = f.svc.ExternalRefForOrder(ctx, f.orderID)
+	require.NoError(t, err)
+	assert.Equal(t, "A487336098162400838C", ref)
 }

@@ -278,6 +278,15 @@ export type CheckoutQRResponse = {
   qr_string: string;
   expires_at: string;
   qr_image_url: string;
+  /**
+   * The gateway's own reference for this payment session.
+   *
+   * Always present, empty when the gateway supplied none. Carried for callers
+   * that need to match an order against the gateway's records — and deliberately
+   * rendered on NO guest-facing surface. It is an internal support identifier,
+   * meaningless to a buyer and not something the payment screen should show.
+   */
+  ext_ref_id: string;
 };
 
 /** One SSE frame from GET /ticket/checkout/:order_id/status (unenveloped). */
@@ -304,6 +313,16 @@ export type PaymentNotification = {
   is_marker: boolean;
   payment_type: string;
   raw_payload: unknown;
+  /**
+   * The gateway's own reference for the payment session.
+   *
+   * Non-empty on the SESSION_OPENED marker row and empty on every other: the
+   * gateway supplies it once, on the answer that issues the code, and never on a
+   * callback. So the order-level value is the one non-empty entry in the list —
+   * read it once for the order rather than rendering a column that would be
+   * blank on all but one row.
+   */
+  ext_ref_id: string;
   received_at: string;
 };
 

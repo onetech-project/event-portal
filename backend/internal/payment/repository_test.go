@@ -111,3 +111,92 @@ func TestCreatePaymentAcceptsAMissingPaymentType(t *testing.T) {
 
 	require.NoError(t, err, "payments.payment_type is nullable")
 }
+
+// --- External reference (spec 017) ----------------------------------------
+
+func TestCreatePaymentRoundTripsTheExternalReference(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := payment.NewRepository(pool)
+	ctx := context.Background()
+
+	ord := testsupport.SeedOrder(t, pool, "ORD-EXTREF", "PENDING")
+
+	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
+		OrderID: ord.ID, Provider: "manjo", TransactionID: ord.OrderNumber,
+		PaymentType: "qris", Status: payment.MarkerSessionOpened,
+		RawResponse: []byte(`{"marker":"SESSION_OPENED"}`),
+		ExtRefID:    "A487336098162400838C",
+	}))
+
+	records, err := repo.ListByOrder(ctx, ord.ID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "A487336098162400838C", records[0].ExtRefID,
+		"the gateway's reference survives the round trip verbatim")
+}
+
+// Empty must reach the column as NULL, not ''. The two are different facts: no
+// session-open row at all versus a gateway that answered with a blank reference,
+// and only NULL keeps them distinguishable (spec 017 FR-004).
+func TestCreatePaymentStoresAnAbsentExternalReferenceAsNull(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := payment.NewRepository(pool)
+	ctx := context.Background()
+
+	ord := testsupport.SeedOrder(t, pool, "ORD-EXTREF-NULL", "PENDING")
+
+	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
+		OrderID: ord.ID, Provider: "manjo", TransactionID: "tx-1",
+		Status: "pending", RawResponse: []byte(`{}`),
+	}))
+
+	var isNull bool
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT ext_ref_id IS NULL FROM payments WHERE order_id = $1`, ord.ID).Scan(&isNull))
+	assert.True(t, isNull, "an unset reference is NULL in the column, never an empty string")
+
+	records, err := repo.ListByOrder(ctx, ord.ID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].ExtRefID, "and reads back as empty rather than as a nil deref")
+}
+
+func TestExternalRefByOrderIDFindsTheSessionOpenRow(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := payment.NewRepository(pool)
+	ctx := context.Background()
+
+	ord := testsupport.SeedOrder(t, pool, "ORD-EXTREF-FIND", "PENDING")
+
+	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
+		OrderID: ord.ID, Provider: "manjo", TransactionID: ord.OrderNumber,
+		PaymentType: "qris", Status: payment.MarkerSessionOpened,
+		RawResponse: []byte(`{}`), ExtRefID: "A487336098162400838C",
+	}))
+	// A settlement arriving afterwards carries no reference of its own and must
+	// not displace the one the session was opened under.
+	require.NoError(t, repo.CreatePayment(ctx, payment.PaymentLog{
+		OrderID: ord.ID, Provider: "manjo", TransactionID: "A48593Completed",
+		PaymentType: "qris", Status: "Completed", RawResponse: []byte(`{}`),
+	}))
+
+	ref, err := repo.ExternalRefByOrderID(ctx, ord.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "A487336098162400838C", ref,
+		"the notification rows carry no reference and must not shadow the session-open one")
+}
+
+// No row is a normal answer. Making it an error would force every caller to
+// re-decide that "this order never opened a session" is fine, and the checkout
+// response carries the field present-and-empty either way (spec 017 FR-010).
+func TestExternalRefByOrderIDReturnsEmptyRatherThanErrorWhenNoneWasRecorded(t *testing.T) {
+	pool := testsupport.RequirePool(t)
+	repo := payment.NewRepository(pool)
+	ctx := context.Background()
+
+	ord := testsupport.SeedOrder(t, pool, "ORD-EXTREF-NONE", "PENDING")
+
+	ref, err := repo.ExternalRefByOrderID(ctx, ord.ID)
+	require.NoError(t, err, "an order with no session-open row is not an error")
+	assert.Empty(t, ref)
+}

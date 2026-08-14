@@ -208,10 +208,14 @@ func run(log *logger.Logger) error {
 	// once that exists — see the comment on gatewayAdapter.payments.
 	checkoutGateway := &gatewayAdapter{gateway: gateway, log: log}
 
+	// checkoutGateway serves two of this package's contracts: the gateway itself,
+	// and the read-back of what a started payment was recorded under (spec 017).
+	// Its `payments` back-reference is assigned below, once the payment service
+	// exists — the same loop, for the same reason.
 	orderSvc := order.NewService(pool, orderRepo,
 		eventProviderAdapter{events: eventSvc},
 		checkoutGateway,
-		log).WithCache(listCache).WithTimers(order.Timers{
+		log).WithPaymentRecords(checkoutGateway).WithCache(listCache).WithTimers(order.Timers{
 		BookingHold:   cfg.BookingHold,
 		PaymentWindow: cfg.PaymentWindow,
 	})

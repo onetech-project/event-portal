@@ -168,3 +168,24 @@ type PaymentGateway interface {
 	// in order to pay it.
 	CreateTransaction(ctx context.Context, req PaymentRequest) (PaymentSession, error)
 }
+
+// PaymentRecords is what checkout needs to read back about a payment it has
+// already started — declared by its consumer, like everything else this package
+// needs from outside it (Constitution Principle II).
+//
+// Read-only, and deliberately so. Recording the session belongs to the payment
+// domain and happens in the composition root at the moment the gateway answers;
+// this package never asks for that write, only for what it produced.
+//
+// It exists because two of checkout's three payload-bearing answers are rebuilt
+// from what was stored rather than from a live gateway answer — the
+// already-started refusal, which returns before any gateway call, and the answer
+// served to a checkout that lost the stamping race, whose own session is not the
+// one the order holds. Both must still name the session the guest is paying.
+type PaymentRecords interface {
+	// ExternalRefForOrder returns the gateway's own reference for this order's
+	// payment session, or the empty string when none was recorded. Absent is a
+	// normal answer, not an error: an order may never have opened a session, and
+	// orders predating the record have none to find.
+	ExternalRefForOrder(ctx context.Context, orderID uuid.UUID) (string, error)
+}

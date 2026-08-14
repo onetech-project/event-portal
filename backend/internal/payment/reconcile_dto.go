@@ -30,7 +30,16 @@ type NotificationResponse struct {
 	IsMarker    bool            `json:"is_marker"`
 	PaymentType string          `json:"payment_type"`
 	RawPayload  json.RawMessage `json:"raw_payload"`
-	ReceivedAt  time.Time       `json:"received_at"`
+	// ExtRefID is the gateway's own reference for the payment session (spec 017).
+	// Non-empty on the SESSION_OPENED marker row and empty on every other, because
+	// the gateway supplies it once — on the session-open answer — and never on a
+	// callback. A client resolves ONE order-level value from the sequence rather
+	// than rendering a column that would be blank on all but one row (FR-015).
+	//
+	// Always present, never null, so a client never distinguishes "field missing"
+	// from "no reference".
+	ExtRefID   string    `json:"ext_ref_id"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 // OrderHoldResponse is one row of GET /admin/payment/order/:order_id/holds:
@@ -87,6 +96,7 @@ func toNotificationResponse(records []NotificationRecord) []NotificationResponse
 			IsMarker:      r.IsMarker,
 			PaymentType:   r.PaymentType,
 			RawPayload:    r.RawPayload,
+			ExtRefID:      r.ExtRefID,
 			ReceivedAt:    r.ReceivedAt.UTC(),
 		})
 	}
