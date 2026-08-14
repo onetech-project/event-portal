@@ -53,6 +53,13 @@ export function OrderPaymentPanel({
 
   const shortfall = (holds.data ?? []).filter((hold) => hold.remaining < hold.held);
 
+  // The gateway's reference for this order's payment session. It is an
+  // order-level fact, not a per-notification one — the gateway issues it once,
+  // when it opens the session, and sends it back on nothing afterwards. So
+  // exactly one row in the history below carries it, and it is stated once here
+  // rather than as a column that would be blank on every other row.
+  const extRefId = notifications.data?.find((row) => row.ext_ref_id)?.ext_ref_id ?? "";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
@@ -63,7 +70,24 @@ export function OrderPaymentPanel({
           resend its notification, never by recording the payment here.
         </DialogDescription>
 
+        {/*
+          First, because it is why an operator opens this dialog at all: it is the
+          only handle that matches this order to a transaction in the gateway's
+          own records. Shown in full and select-all — an abbreviated identifier
+          cannot be pasted into the gateway's search, which is the entire use.
+        */}
         <section className="mt-2">
+          <h3 className="mb-1 text-sm font-semibold">Gateway reference</h3>
+          {extRefId ? (
+            <p className="font-mono text-xs break-all select-all">{extRefId}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              — no payment session was opened for this order
+            </p>
+          )}
+        </section>
+
+        <section className="mt-4">
           <h3 className="mb-2 text-sm font-semibold">Seats held vs. remaining</h3>
 
           {holds.isPending ? <Loading /> : null}

@@ -1,0 +1,3005 @@
+openapi: 3.0.3
+
+info:
+  title: Manjo Ticketing API
+  version: 1.0.0
+  description: |
+    Complete HTTP surface of the Go API (`backend/`).
+
+    ## The envelope
+
+    Every JSON endpoint answers `{ "code": 200000, "message": "Success", "data": ... }` on success
+    and `{ "code": <error code>, "message": ..., "data": ... }` on failure — the HTTP status line
+    and the envelope code both carry meaning, and a client that branches only on status will miss
+    distinctions the numeric code makes.
+
+    Two endpoints sit outside it: `GET /healthz` (bare JSON, read by orchestrators) and
+    `GET /api/v1/ticket/order/{order_id}/qris.png` (a PNG).
+
+    ## Identifiers
+
+    Public routes address an **event by its slug** and an **order by its order number**. Admin
+    routes address everything by **UUID**. The two namespaces are not interchangeable — an order
+    has both a public order number and an admin-side UUID, and passing one where the other is
+    expected is a 400 or a 404, never a silent success.
+
+    ## Authentication
+
+    `/api/v1/admin/*` requires a bearer JWT from `POST /api/v1/admin/login`. `POST /v1.0/callback/exec`
+    is the payment gateway's own endpoint and authenticates with a *different* bearer credential
+    (`PG_CALLBACK_TOKEN`). Everything else is deliberately unauthenticated — the guest purchase
+    journey has no accounts (Constitution Principle VI).
+
+    ## Rate limits
+
+    Booking, availability, checkout, ticket lookup and the guest resend each sit behind their own
+    per-IP budget, and the SSE status stream caps concurrent connections per IP rather than
+    requests per second. A 429 from any of them is the server working as designed.
+
+    ## Suggested order
+
+    `admin/login` → create event → create ticket type → author terms → `ticket/availability` →
+    `ticket/book` → record agreement → `ticket/order/{order_id}` → `ticket/checkout/{order_id}` →
+    gateway settlement notification. Tickets are issued by the settlement notification and by
+    nothing else.
+
+  contact:
+    name: Manjo Ticketing
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local development — APP_PORT in backend/.env
+
+security: []
+
+tags:
+  - name: Health & Ops
+    description: Liveness and instrumentation. Mounted at the root, not under /api/v1.
+  - name: Public - Catalogue
+    description: The unauthenticated browse surface. Events are addressed by slug here, never by UUID.
+  - name: Public - Booking & Checkout
+    description: |
+      The guest purchase journey, in order. An order is addressed by its order number throughout.
+  - name: Public - Tickets
+    description: Post-purchase guest self-service.
+  - name: Payment Gateway
+    description: |
+      The provider's own callback. Not part of the app's API surface — documented so the
+      settlement path can be exercised without the real gateway.
+  - name: Admin - Auth
+    description: The one /admin/* route reachable without a token.
+  - name: Admin - Events
+    description: Event CRUD.
+  - name: Admin - Ticket Types
+    description: Ticket type CRUD. `quota` is REMAINING quota, never an original allocation.
+  - name: Admin - Packages
+    description: Bundle CRUD. A package holds no quota of its own — it draws on its constituents.
+  - name: Admin - Event Content
+    description: The authored CMS content behind the public event page.
+  - name: Admin - Orders & Attendees
+    description: |
+      Read-only views over sales. Nothing here writes order or payment state — that has exactly
+      one trigger, a notification from the gateway.
+  - name: Admin - Fees
+    description: Order-level fees, frozen onto an order at booking time.
+  - name: Admin - Ticket Validation
+    description: The door flow.
+  - name: Admin - Payment Ops
+    description: Order-scoped reads for an operator working a stuck payment.
+
+paths:
+  /healthz:
+    get:
+      tags: [Health & Ops]
+      summary: Health check
+      operationId: health
+      description: |
+        Pings Postgres, then Redis if the list cache is enabled.
+
+        `degraded` is a deliberate 200: the cache fails open, so a Redis outage does not stop the
+        API serving (Principle VII).
+      responses:
+        '200':
+          description: Postgres reachable. `cache` is present only when Redis is not.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  cache:
+                    type: string
+                    enum: [unavailable]
+              examples:
+                ok:
+                  value: { status: ok }
+                degraded:
+                  value: { status: degraded, cache: unavailable }
+        '503':
+          description: The database is not reachable (`DATABASE_UNAVAILABLE`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /metrics:
+    get:
+      tags: [Health & Ops]
+      summary: Prometheus metrics
+      operationId: metrics
+      description: |
+        Registered only when `METRICS_ENABLED=true`. Carries the HTTP middleware histograms and
+        the cache hit/miss counters.
+      responses:
+        '200':
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1.0/callback/exec:
+    post:
+      tags: [Payment Gateway]
+      summary: Payment settlement notification
+      operationId: gatewayCallback
+      security:
+        - gatewayCallbackAuth: []
+      description: |
+        Where the gateway delivers payment notifications. Mounted at the root, **not** under
+        /api/v1 — the path is fixed by the provider's dispatch code and is not ours to choose.
+
+        Authenticated by a bearer token compared in constant time (`PG_CALLBACK_TOKEN`), and by
+        nothing else: the body carries no signature and no digest, so the token is the whole
+        mechanism. A body that cannot be parsed cannot be authenticated either, and is refused on
+        the same footing as a bad token.
+
+        **Almost everything answers 200.** The gateway retries any non-200 three times, ten seconds
+        apart, with no dead-letter — so a refusal it cannot act on costs four deliveries and still
+        loses the notification. Unknown reference, withdrawal, unrecognised status and
+        already-final order are therefore all durably recorded and answered 200. Non-200 is
+        reserved for a failed token and for internal faults where a retry genuinely helps.
+
+        A settled deposit is the **only** trigger for ticket issuance. No admin action stands in
+        for it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GatewayNotification'
+      responses:
+        '200':
+          description: |
+            Recorded. Covers settlement, and equally every notification that changed nothing.
+        '401':
+          description: The notification could not be authenticated. Nothing is recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: An internal fault. The gateway's retry is worth taking.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/event:
+    get:
+      tags: [Public - Catalogue]
+      summary: List published events
+      operationId: listPublishedEvents
+      description: |
+        Every PUBLISHED event. Served from the Redis list cache when enabled; a miss or an outage
+        falls through to Postgres rather than failing.
+      responses:
+        '200':
+          description: The published catalogue.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/EventSummary'
+
+  /api/v1/event/{slug}:
+    get:
+      tags: [Public - Catalogue]
+      summary: Get event by slug
+      operationId: getEventBySlug
+      parameters:
+        - $ref: '#/components/parameters/EventSlug'
+      description: |
+        Content-only detail page: description, venue, dates, scale, and the CMS blocks.
+
+        Ticket types and packages are deliberately **not** included — they have their own
+        endpoints, so only the selection page pays for live-quota reads.
+
+        `has_terms: false` means booking will be refused (409001) until an admin authors Terms &
+        Conditions.
+      responses:
+        '200':
+          description: The event.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ticket/{slug}:
+    get:
+      tags: [Public - Catalogue]
+      summary: List ticket types for an event
+      operationId: listTicketTypes
+      parameters:
+        - $ref: '#/components/parameters/EventSlug'
+      description: |
+        Sellable ticket types with **remaining** quota and the per-ticket admission window
+        (`event_start` / `event_end`), which is the ticket's own window and not the parent event's
+        dates.
+      responses:
+        '200':
+          description: Ticket types on sale.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TicketTypeSummary'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/packages/{slug}:
+    get:
+      tags: [Public - Catalogue]
+      summary: List packages for an event
+      operationId: listPackages
+      parameters:
+        - $ref: '#/components/parameters/EventSlug'
+      description: |
+        Active bundles. A package has no quota of its own — `available_units` is derived from the
+        remaining quota of its constituents, and the binding one is the answer.
+      responses:
+        '200':
+          description: Bundles on sale.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PackageSummary'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ticket/terms-condition/{id}:
+    get:
+      tags: [Public - Catalogue]
+      summary: Get Terms & Conditions for an event
+      operationId: getEventTerms
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The event **slug**.
+          schema:
+            type: string
+          example: jazz-night-2026
+      description: |
+        The current T&C document shown by the booking dialog. `content` is sanitized HTML.
+
+        Echo `id` back as `event_terms_id` when recording agreement, so the server can detect the
+        document changing mid-flow.
+      responses:
+        '200':
+          description: The current document.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventTerms'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Public - Booking & Checkout]
+      summary: Record the guest's agreement to the terms
+      operationId: recordAgreement
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The **order number**, not an event slug.
+          schema:
+            type: string
+          example: ORD-20261201-0001
+      description: |
+        Stamps the order with the guest's agreement.
+
+        `event_terms_id` is the id the dialog displayed. If the admin has edited the document
+        since, the server answers 409002 rather than recording agreement to text the guest never
+        saw.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgreementRequest'
+      responses:
+        '200':
+          description: Agreement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The terms document changed since it was displayed (409002).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/ticket/availability:
+    post:
+      tags: [Public - Booking & Checkout]
+      summary: Check whether a selection can still be bought
+      operationId: checkAvailability
+      description: |
+        The pre-flight check in front of the Terms & Conditions gate.
+
+        **A refusal is a 200.** The question was well formed and correctly answered, and the
+        decision body carries every reason at once — which an error envelope could not, since it
+        holds a single code. A guest fixing their selection one rejected line per attempt is the
+        experience this endpoint exists to remove. Only a malformed request is a 4xx.
+
+        Advisory and transient: nothing is reserved, nothing is stored, and a `true` answer confers
+        no right to book — between this call and the guest's Agree click another buyer can take the
+        last seat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelectionRequest'
+      responses:
+        '200':
+          description: The decision, available or not.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AvailabilityDecision'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/ticket/book:
+    post:
+      tags: [Public - Booking & Checkout]
+      summary: Book — create a pending order and hold quota
+      operationId: book
+      description: |
+        Creates a PENDING order and holds quota for an hour. **201**, not 200.
+
+        `order_id` in the response is the public order number every later `/ticket/...` call
+        carries. No buyer or holder identity yet — those arrive with checkout.
+
+        Refused with 409001 if the event has no authored Terms & Conditions: there would be nothing
+        for the guest to have agreed to.
+
+        For a bundle, send `package_id` instead of `ticket_type_id` on the item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelectionRequest'
+      responses:
+        '201':
+          description: The order was created and quota is held.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BookResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Not bookable — no authored terms (409001), a line no longer on sale, or not enough
+            quota remaining.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/ticket/genders:
+    get:
+      tags: [Public - Booking & Checkout]
+      summary: List genders
+      operationId: listGenders
+      description: |
+        The gender master list the holder forms build their options from. Checkout submits the
+        **name**, not the id.
+      responses:
+        '200':
+          description: The master list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/GenderOption'
+
+  /api/v1/ticket/order/{order_id}:
+    get:
+      tags: [Public - Booking & Checkout]
+      summary: Get the guest's order
+      operationId: getOrderDetail
+      parameters:
+        - $ref: '#/components/parameters/OrderNumber'
+      description: |
+        The guest's own order page. Polled while pending, so it is a few indexed reads with no
+        provider call and no writes; answered `Cache-Control: no-store`.
+
+        `slots` is one holder slot per seat — its `id` is what the checkout body addresses.
+        `server_time` is paired with `payment.expires_at` so a countdown survives a wrong device
+        clock. `payment` is present only while the order is actually payable.
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PublicOrderDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ticket/order/{order_id}/qris.png:
+    get:
+      tags: [Public - Booking & Checkout]
+      summary: Render the payment QR as a PNG
+      operationId: getOrderQRImage
+      parameters:
+        - $ref: '#/components/parameters/OrderNumber'
+      description: |
+        Renders the order's stored QRIS payload as a 512px PNG on demand. Nothing is stored — this
+        MVP has no object storage — and the browser never talks to the payment provider.
+
+        Binary, not enveloped. `Cache-Control: private, max-age=60`, short enough that a code which
+        has just expired does not linger in a browser cache.
+      responses:
+        '200':
+          description: The QR image.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ticket/checkout/{order_id}:
+    post:
+      tags: [Public - Booking & Checkout]
+      summary: Submit holder forms and start payment
+      operationId: checkout
+      parameters:
+        - $ref: '#/components/parameters/OrderNumber'
+      description: |
+        Holder forms and payment start in one call — nothing was persisted before it.
+
+        One entry per slot from `GET /api/v1/ticket/order/{order_id}`, and every slot must be
+        filled. There is no buyer block: the topmost holder form doubles as the order's primary
+        contact, derived server-side from canonical slot order.
+
+        Opens a QRIS session at the gateway, so it is rate limited per IP. Calling it twice answers
+        `PAYMENT_ALREADY_STARTED`, carrying the existing QR payload in the envelope's `data` rather
+        than opening a second session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutRequest'
+      responses:
+        '200':
+          description: A payment session is open.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/CheckoutResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Payment already started, the terms were never agreed, or the order is no longer
+            payable. `PAYMENT_ALREADY_STARTED` carries the current QR payload in `data`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/ticket/checkout/{order_id}/status:
+    get:
+      tags: [Public - Booking & Checkout]
+      summary: Live payment status (SSE)
+      operationId: checkoutStatusStream
+      parameters:
+        - $ref: '#/components/parameters/OrderNumber'
+      description: |
+        Server-Sent Events: pushes the order's payment status until it settles or expires, so the
+        confirmation screen does not have to poll.
+
+        Caps **concurrent connections per IP** rather than requests per second — the cost here is
+        held-open sockets, not calls. The connection stays open by design; an API client will look
+        like it is hanging.
+      responses:
+        '200':
+          description: An event stream of status frames, interleaved with keep-alives.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          description: Too many concurrent streams from this IP.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/tickets/{code}:
+    get:
+      tags: [Public - Tickets]
+      summary: Look up a ticket by code
+      operationId: lookupTicket
+      parameters:
+        - $ref: '#/components/parameters/TicketCode'
+      description: |
+        Public ticket lookup. Rate limited per IP (`TICKET_LOOKUP_RATE_LIMIT` /
+        `TICKET_LOOKUP_BURST`) so enumerating codes is impractical.
+      responses:
+        '200':
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PublicTicket'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/ticket/resend-email:
+    post:
+      tags: [Public - Tickets]
+      summary: Resend the tickets to the buyer
+      operationId: resendTicketsPublic
+      description: |
+        Re-sends the tickets to the address **stored on the order**. No address field is read, so
+        no caller can redirect the mail.
+
+        **202 for every outcome that names an order** — delivered, unpaid, or no such order — with
+        identical bytes, so the endpoint cannot be used to discover which order numbers exist. A
+        404 here would be an enumeration oracle. A body that names no order at all is outside that
+        rule and is a 400: answering it "accepted" would tell a caller mail is on its way when
+        nothing was sent.
+
+        Guarded by a per-order-number cooldown. Every attempt that names an order spends the
+        window whatever it finds there, or probing order numbers would be free.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicResendRequest'
+      responses:
+        '202':
+          description: |
+            Accepted. Identical for every outcome that named an order, including an unknown one.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PublicResendResponse'
+        '400':
+          description: No `order_id` was supplied. No cooldown allowance is spent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            Still within the cooldown. `data.retry_after_seconds` says how long — carried in the
+            envelope rather than a header, because a cross-origin page cannot read a header that
+            is not in `Access-Control-Expose-Headers`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RetryAfter'
+
+  /api/v1/admin/login:
+    post:
+      tags: [Admin - Auth]
+      summary: Admin login
+      operationId: adminLogin
+      description: |
+        Returns the access token and when it expires, so the client does not have to decode the
+        token to know. TTL is `JWT_TTL`.
+
+        There is no sign-up flow — accounts are provisioned out of band with
+        `go run ./cmd/seedadmin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Email or password is incorrect. The two are not distinguished.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/events:
+    get:
+      tags: [Admin - Events]
+      summary: List events
+      operationId: adminListEvents
+      security: [{ adminAuth: [] }]
+      description: Every event regardless of status, unlike the public list.
+      responses:
+        '200':
+          description: All events.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/EventAdminView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Events]
+      summary: Create an event
+      operationId: adminCreateEvent
+      security: [{ adminAuth: [] }]
+      description: |
+        `slug` is unique and must be lowercase letters, digits and single hyphens. Uniqueness is
+        decided by the constraint rather than a pre-check, because nothing else can decide it
+        without a race.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The slug is already taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/events/{id}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Admin - Events]
+      summary: Get an event
+      operationId: adminGetEvent
+      security: [{ adminAuth: [] }]
+      description: Full detail, including the event's ticket types with their `sold` counts.
+      responses:
+        '200':
+          description: The event.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventAdminDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin - Events]
+      summary: Update an event
+      operationId: adminUpdateEvent
+      security: [{ adminAuth: [] }]
+      description: Full replacement — send every field. Invalidates the cached public lists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The slug is already taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Admin - Events]
+      summary: Delete an event
+      operationId: adminDeleteEvent
+      security: [{ adminAuth: [] }]
+      description: Guarded — an event with orders against it cannot be deleted.
+      responses:
+        '204':
+          description: Deleted. No body.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The event has orders against it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/ticket-types:
+    get:
+      tags: [Admin - Ticket Types]
+      summary: List ticket types
+      operationId: adminListTicketTypes
+      security: [{ adminAuth: [] }]
+      description: '`event_id` is required — there is no unscoped listing.'
+      parameters:
+        - name: event_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The event's ticket types.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TicketTypeAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Ticket Types]
+      summary: Create a ticket type
+      operationId: adminCreateTicketType
+      security: [{ adminAuth: [] }]
+      description: |
+        `quota` on create is the allocation; from then on the stored value is what **remains**.
+
+        `event_start` / `event_end` bound when the ticket **admits**, not showtime — validation
+        admits no tolerance, so an admin who sets `event_start` to showtime turns away every early
+        arrival. The window must sit inside the parent event's dates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketTypeRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TicketTypeAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/ticket-types/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Admin - Ticket Types]
+      summary: Get a ticket type
+      operationId: adminGetTicketType
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: The ticket type.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TicketTypeAdminView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin - Ticket Types]
+      summary: Update a ticket type
+      operationId: adminUpdateTicketType
+      security: [{ adminAuth: [] }]
+      description: |
+        Full replacement. `event_id` is ignored — a ticket type does not move between events.
+        Writing `quota` sets the **remaining** count, not an allocation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketTypeRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TicketTypeAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Ticket Types]
+      summary: Delete a ticket type
+      operationId: adminDeleteTicketType
+      security: [{ adminAuth: [] }]
+      description: Guarded against deleting a type that has been sold or that a package draws on.
+      responses:
+        '204':
+          description: Deleted. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The ticket type has been sold, or a package depends on it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/packages:
+    get:
+      tags: [Admin - Packages]
+      summary: List packages
+      operationId: adminListPackages
+      security: [{ adminAuth: [] }]
+      parameters:
+        - name: event_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The event's packages.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PackageAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Packages]
+      summary: Create a package
+      operationId: adminCreatePackage
+      security: [{ adminAuth: [] }]
+      description: |
+        `price` is the bundle's all-in price and is deliberately **not** validated against the sum
+        of its constituents.
+
+        There is no quota field. Any quota-like key — `quota`, `stock`, `inventory`, `remaining`,
+        `capacity` — is **rejected** rather than ignored, because ignoring one would train a client
+        to believe packages hold stock.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackageRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PackageAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/packages/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      tags: [Admin - Packages]
+      summary: Get a package
+      operationId: adminGetPackage
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: The package.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PackageAdminView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin - Packages]
+      summary: Update a package
+      operationId: adminUpdatePackage
+      security: [{ adminAuth: [] }]
+      description: Full replacement, components included. `event_id` is immutable and ignored here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackageRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PackageAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Packages]
+      summary: Delete a package
+      operationId: adminDeletePackage
+      security: [{ adminAuth: [] }]
+      description: Guarded against deleting a package that has been sold.
+      responses:
+        '204':
+          description: Deleted. No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The package has been sold.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/packages/{id}/availability:
+    get:
+      tags: [Admin - Packages]
+      summary: Package availability diagnostic
+      operationId: adminPackageAvailability
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      description: |
+        How many bundles can still be sold and why. `limiting_ticket_type` names the constituent
+        that binds — the one an admin has to top up to sell more.
+      responses:
+        '200':
+          description: The diagnostic.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PackageAvailability'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/terms:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Admin - Event Content]
+      summary: Get the Terms & Conditions document
+      operationId: adminGetTerms
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: The current document.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventTerms'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Admin - Event Content]
+      summary: Create or replace the Terms & Conditions
+      operationId: adminUpsertTerms
+      security: [{ adminAuth: [] }]
+      description: |
+        `content` is HTML and is sanitized server-side before storage. Until this document exists,
+        booking against the event is refused with 409001.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TermsUpsertRequest'
+      responses:
+        '200':
+          description: Stored.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/EventTerms'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/activities:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Admin - Event Content]
+      summary: List activities
+      operationId: adminListActivities
+      security: [{ adminAuth: [] }]
+      description: In `position` order.
+      responses:
+        '200':
+          description: The event's activities.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Activity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Event Content]
+      summary: Create an activity
+      operationId: adminCreateActivity
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Activity'
+        '400':
+          $ref: '#/components/responses/IconOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/activities/{blockId}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+      - $ref: '#/components/parameters/BlockId'
+    put:
+      tags: [Admin - Event Content]
+      summary: Update an activity
+      operationId: adminUpdateActivity
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Activity'
+        '400':
+          $ref: '#/components/responses/IconOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Event Content]
+      summary: Delete an activity
+      operationId: adminDeleteActivity
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/guest-stars:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Admin - Event Content]
+      summary: List guest stars
+      operationId: adminListGuestStars
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: The event's guest stars, in `position` order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/GuestStar'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Event Content]
+      summary: Create a guest star
+      operationId: adminCreateGuestStar
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuestStarRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GuestStar'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/guest-stars/{blockId}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+      - $ref: '#/components/parameters/BlockId'
+    put:
+      tags: [Admin - Event Content]
+      summary: Update a guest star
+      operationId: adminUpdateGuestStar
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuestStarRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GuestStar'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Event Content]
+      summary: Delete a guest star
+      operationId: adminDeleteGuestStar
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/guidelines:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Admin - Event Content]
+      summary: List guidelines
+      operationId: adminListGuidelines
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: The event's guidelines, in `position` order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Guideline'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Event Content]
+      summary: Create a guideline
+      operationId: adminCreateGuideline
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuidelineRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Guideline'
+        '400':
+          $ref: '#/components/responses/IconOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/guidelines/{blockId}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+      - $ref: '#/components/parameters/BlockId'
+    put:
+      tags: [Admin - Event Content]
+      summary: Update a guideline
+      operationId: adminUpdateGuideline
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuidelineRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Guideline'
+        '400':
+          $ref: '#/components/responses/IconOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Event Content]
+      summary: Delete a guideline
+      operationId: adminDeleteGuideline
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/orders:
+    get:
+      tags: [Admin - Orders & Attendees]
+      summary: List orders
+      operationId: adminListOrders
+      security: [{ adminAuth: [] }]
+      description: Both filters are optional and combine.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, PAID, CANCELLED, EXPIRED]
+        - name: event_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Matching orders.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OrderSummary'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/attendees:
+    get:
+      tags: [Admin - Orders & Attendees]
+      summary: List attendees
+      operationId: adminListAttendees
+      security: [{ adminAuth: [] }]
+      description: Ticket holders with their submitted details. Both filters are optional.
+      parameters:
+        - name: order_id
+          in: query
+          required: false
+          description: Order **UUID**, not the order number.
+          schema:
+            type: string
+            format: uuid
+        - name: event_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Matching attendees.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendeeSummary'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/orders/{id}/resend-email:
+    post:
+      tags: [Admin - Orders & Attendees]
+      summary: Resend an order's tickets and receipt
+      operationId: adminResendOrderEmail
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      description: |
+        Authenticated and not rate limited, unlike the guest-facing resend — and unlike it, this
+        one names the recipient and 404s on an unknown order.
+
+        `sent_to` comes from the send itself rather than being re-derived, so what the admin is
+        shown is exactly the address that was mailed.
+      responses:
+        '200':
+          description: Sent.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AdminResendResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/fees:
+    get:
+      tags: [Admin - Fees]
+      summary: List fees
+      operationId: adminListFees
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: All fees.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/FeeAdminView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Admin - Fees]
+      summary: Create a fee
+      operationId: adminCreateFee
+      security: [{ adminAuth: [] }]
+      description: |
+        Applies to orders booked from now on. A fee is frozen onto an order at booking time — with
+        any percentage baked into the name, e.g. "PPN (11%)" — so editing one never changes an
+        existing order's total.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeeRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/FeeAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/fees/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    put:
+      tags: [Admin - Fees]
+      summary: Update a fee
+      operationId: adminUpdateFee
+      security: [{ adminAuth: [] }]
+      description: Full replacement. Existing orders keep the fee lines they were sold with.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeeRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/FeeAdminView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Admin - Fees]
+      summary: Delete a fee
+      operationId: adminDeleteFee
+      security: [{ adminAuth: [] }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message:
+                            type: string
+                            example: Fee deleted.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/tickets/validate:
+    post:
+      tags: [Admin - Ticket Validation]
+      summary: Validate a ticket code
+      operationId: adminValidateTicket
+      security: [{ adminAuth: [] }]
+      description: |
+        **Side-effect free**, deliberately: the same code is routinely scanned more than once at a
+        door, so nothing here changes a ticket's state. The irreversible transition has its own
+        endpoint.
+
+        **Always 200.** VALID, ALREADY_USED, NOT_YET_VALID, EXPIRED and INVALID are all normal
+        answers at a door, and the scanner branches on `result` rather than on the status code.
+
+        NOT_YET_VALID and EXPIRED are separate values rather than one OUT_OF_WINDOW because that
+        decision is the server's to make — a gate device's clock is the least trustworthy in the
+        system, and letting the result card derive the wording by comparing the window to its own
+        clock would hand the decision to it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateRequest'
+      responses:
+        '200':
+          description: |
+            The verdict. On INVALID the detail fields are null, so an unknown code discloses
+            nothing.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ValidationResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/tickets/{code}/use:
+    post:
+      tags: [Admin - Ticket Validation]
+      summary: Mark a ticket used
+      operationId: adminMarkTicketUsed
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TicketCode'
+      description: |
+        The irreversible ACTIVE → USED transition. No body.
+
+        It exists separately precisely so that validation can stay repeatable. A documented
+        addition to the PRD's locked API list (specs/003).
+      responses:
+        '200':
+          description: The ticket is now USED.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MarkUsedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The ticket is not ACTIVE — already used, or revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/payment/order/{order_id}/notifications:
+    get:
+      tags: [Admin - Payment Ops]
+      summary: An order's gateway notification history
+      operationId: adminOrderNotifications
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/OrderUuid'
+      description: |
+        Every notification received for the order, including the ones the API answered 200 to but
+        acted on in no other way — unknown status, withdrawal, already-final order. `raw_payload`
+        is the body as delivered.
+      responses:
+        '200':
+          description: The history, newest last.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PaymentNotification'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/payment/order/{order_id}/holds:
+    get:
+      tags: [Admin - Payment Ops]
+      summary: What the order holds against what remains
+      operationId: adminOrderHolds
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/OrderUuid'
+      description: |
+        The second thing an operator checks when seats look wrong: how much quota this order is
+        holding, per ticket type, against how much is left.
+      responses:
+        '200':
+          description: The holds.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OrderHold'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/cache/refresh:
+    post:
+      tags: [Health & Ops]
+      summary: Flush the list cache
+      operationId: adminRefreshCache
+      security: [{ adminAuth: [] }]
+      description: |
+        Discards every cached list, forcing the next read of each to rebuild from Postgres. The
+        operator escape hatch: a suspected inconsistency, a manual database correction, an
+        incident. The flush is attributed to the calling admin in the logs.
+
+        With caching disabled this answers `"disabled"` and 200 rather than an error — the caller
+        wanted "no stale list is being served", and with the cache off that is already true.
+
+        A Redis failure here IS a 503, which does not contradict the fail-open rule elsewhere:
+        that rule governs endpoints serving product data, and here the cache is the subject of the
+        request. Reporting success when nothing was flushed would mislead an operator mid-incident.
+      responses:
+        '200':
+          description: Flushed, or nothing to flush.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/CacheRefreshResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: The cache is not reachable, so it could not be refreshed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+
+  securitySchemes:
+    adminAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The token from `POST /api/v1/admin/login`. HS256, verified against `JWT_SECRET`; only
+        HS256 is accepted, because letting the token's own header select the algorithm is what
+        makes algorithm-confusion forgeries possible.
+    gatewayCallbackAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `PG_CALLBACK_TOKEN` — the payment gateway's credential, entirely separate from the admin
+        JWT. Compared in constant time, and unconditionally: returning early on the first differing
+        byte would leak the expected token a character at a time to anyone able to time the
+        endpoint.
+
+  parameters:
+    EventSlug:
+      name: slug
+      in: path
+      required: true
+      description: The event's public slug.
+      schema:
+        type: string
+      example: jazz-night-2026
+    EventId:
+      name: id
+      in: path
+      required: true
+      description: Event UUID.
+      schema:
+        type: string
+        format: uuid
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: The resource's UUID.
+      schema:
+        type: string
+        format: uuid
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: Order **UUID**, not the order number.
+      schema:
+        type: string
+        format: uuid
+    OrderUuid:
+      name: order_id
+      in: path
+      required: true
+      description: Order **UUID**, not the order number.
+      schema:
+        type: string
+        format: uuid
+    OrderNumber:
+      name: order_id
+      in: path
+      required: true
+      description: The public **order number** from the book response.
+      schema:
+        type: string
+      example: ORD-20261201-0001
+    BlockId:
+      name: blockId
+      in: path
+      required: true
+      description: Content block UUID.
+      schema:
+        type: string
+        format: uuid
+    TicketCode:
+      name: code
+      in: path
+      required: true
+      description: The issued ticket code.
+      schema:
+        type: string
+
+  responses:
+    ValidationError:
+      description: |
+        The request was malformed. `data` carries a field map when more than one field is at fault.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 400001
+            message: Some fields are missing or invalid.
+            data:
+              attendees[0].phone: Phone number must be 12-15 digits.
+    IconOrValidationError:
+      description: |
+        Malformed, or the `icon` is not in the recognized catalog (400004). An unrecognised key is
+        refused rather than stored.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 400004
+            message: Unknown icon key "Music" — pick one from the documented set.
+            data: null
+    Unauthorized:
+      description: No bearer token, or the token is invalid or expired.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 401001
+            message: A bearer token is required.
+            data: null
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: 404001
+            message: Event not found.
+            data: null
+    RateLimited:
+      description: The per-IP budget for this endpoint is exhausted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+
+    Envelope:
+      type: object
+      description: |
+        The one JSON shape every endpoint returns. `code` is 200000 on success regardless of which
+        2xx the status line carries.
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 200000
+        message:
+          type: string
+          example: Success
+        data:
+          nullable: true
+          description: The typed payload, or null.
+
+    Error:
+      type: object
+      description: |
+        The failure envelope. `data` is null except where a contract attaches detail — a validation
+        field map, the current QR payload on PAYMENT_ALREADY_STARTED, the remaining cooldown on a
+        guest resend refusal.
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          description: |
+            The numeric envelope code. Note that several distinct conditions render as 400001, so
+            a client that must tell them apart reads the stable string code where one is offered
+            (see `AvailabilityReason.code`).
+          example: 400001
+        message:
+          type: string
+        data:
+          nullable: true
+
+    Money:
+      type: string
+      description: |
+        A decimal amount as a string, so no precision is lost in transit. Responses are always
+        strings; requests also accept a JSON number.
+      example: "150000.00"
+
+    # --- Public catalogue ---------------------------------------------------
+
+    EventSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        venue: { type: string }
+        address: { type: string }
+        start_date: { type: string, format: date-time }
+        end_date: { type: string, format: date-time }
+        banner_url: { type: string, nullable: true }
+
+    EventDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string, nullable: true }
+        venue: { type: string }
+        address: { type: string }
+        start_date: { type: string, format: date-time }
+        end_date: { type: string, format: date-time }
+        banner_url: { type: string, nullable: true }
+        scale:
+          type: integer
+          format: int64
+          nullable: true
+          description: Expected visitor count for the detail page's info bar.
+        activities:
+          type: array
+          items: { $ref: '#/components/schemas/Activity' }
+        guest_stars:
+          type: array
+          items: { $ref: '#/components/schemas/GuestStar' }
+        guidelines:
+          type: array
+          items: { $ref: '#/components/schemas/Guideline' }
+        has_terms:
+          type: boolean
+          description: |
+            False disables Buy Ticket with a notice — booking is refused while an event has no
+            authored Terms & Conditions (409001).
+
+    TicketTypeSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description:
+          type: string
+          nullable: true
+          description: |
+            Replaces the booking card's standard non-refundable notice for this ticket. Null keeps
+            the standard wording.
+        price: { $ref: '#/components/schemas/Money' }
+        quota_remaining:
+          type: integer
+          format: int32
+          description: Seats still available. Never an original allocation.
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        event_start:
+          type: string
+          format: date-time
+          description: |
+            When admission OPENS for this ticket — the ticket type's own window, not the parent
+            event's dates.
+        event_end: { type: string, format: date-time }
+
+    PackageComponent:
+      type: object
+      properties:
+        ticket_type_id: { type: string, format: uuid }
+        ticket_type_name: { type: string }
+        quantity_per_unit: { type: integer, format: int32 }
+
+    PackageSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { $ref: '#/components/schemas/Money' }
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        available_units:
+          type: integer
+          format: int32
+          description: Derived from the constituents' remaining quota. A package holds none itself.
+        purchasable: { type: boolean }
+        components:
+          type: array
+          items: { $ref: '#/components/schemas/PackageComponent' }
+
+    EventTerms:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Echo back as `event_terms_id` when recording agreement.
+        content:
+          type: string
+          description: Sanitized HTML.
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    Activity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        icon: { $ref: '#/components/schemas/IconKey' }
+        position: { type: integer, format: int32 }
+
+    GuestStar:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        position: { type: integer, format: int32 }
+
+    Guideline:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        description: { type: string }
+        icon: { $ref: '#/components/schemas/IconKey' }
+        position: { type: integer, format: int32 }
+
+    IconKey:
+      type: string
+      nullable: true
+      description: |
+        A kebab-case lucide icon key — `music`, `ban`, `a-arrow-down`. The catalog is generated
+        from the frontend's installed lucide-react into
+        `backend/internal/event/iconkeys/icon_keys.txt`, so the set the admin picker offers and the
+        set the server accepts are the same file. Anything outside it is refused with 400004.
+      example: music
+
+    # --- Booking and checkout -----------------------------------------------
+
+    SelectionItem:
+      type: object
+      description: |
+        One requested line: either an individual ticket type or a package, never both. Exactly one
+        of `ticket_type_id` / `package_id` must be set.
+      properties:
+        ticket_type_id: { type: string, format: uuid, nullable: true }
+        package_id: { type: string, format: uuid, nullable: true }
+        quantity: { type: integer, format: int32, minimum: 1 }
+
+    SelectionRequest:
+      type: object
+      description: The selection a guest is asking about or buying.
+      required: [event_id, items]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: The event **UUID** — not the slug the catalogue routes take.
+        items:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/SelectionItem' }
+
+    AvailabilityDecision:
+      type: object
+      properties:
+        available:
+          type: boolean
+          description: True if and only if `reasons` is empty.
+        reasons:
+          type: array
+          description: |
+            EVERY refusal found, not the first — a guest fixing one rejected line per attempt is
+            the experience this endpoint exists to remove.
+          items: { $ref: '#/components/schemas/AvailabilityReason' }
+
+    AvailabilityReason:
+      type: object
+      properties:
+        item_index:
+          type: integer
+          nullable: true
+          description: |
+            0-based index into the request's `items`. Null for an order-level reason — today only
+            TERMS_MISSING, which is a property of the event rather than of any one line.
+        ticket_type_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The ticket type at fault. For a quota shortfall reached through a bundle this is the
+            CONSTITUENT, which is what explains the refusal to a guest looking at a bundle that
+            seemed available.
+        package_id: { type: string, format: uuid, nullable: true }
+        code:
+          type: string
+          description: |
+            The **stable string** code, never the numeric envelope code — TICKET_TYPE_NOT_ON_SALE,
+            PACKAGE_NOT_ON_SALE and VALIDATION_ERROR all render as 400001, so a client branching on
+            numbers could not tell "your ticket stopped selling" from "your request was malformed".
+          example: TICKET_TYPE_SOLD_OUT
+        message:
+          type: string
+          description: The guest-facing sentence, produced by the same code that produces booking's.
+
+    BookResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          description: The public **order number** every later /ticket/... call carries.
+          example: ORD-20261201-0001
+        status: { type: string, example: PENDING }
+        total_amount: { $ref: '#/components/schemas/Money' }
+        expires_at:
+          type: string
+          format: date-time
+          description: When the quota hold lapses and the seats go back.
+
+    AgreementRequest:
+      type: object
+      required: [agreed, event_terms_id]
+      properties:
+        agreed: { type: boolean }
+        event_terms_id:
+          type: string
+          format: uuid
+          description: The id of the document the dialog displayed.
+
+    GenderOption:
+      type: object
+      properties:
+        id: { type: integer, format: int32 }
+        name:
+          type: string
+          description: What checkout submits. The id is not read by any client.
+          example: MALE
+
+    CheckoutVisitor:
+      type: object
+      description: One filled holder form, addressed to the slot it fills.
+      required: [id, name, email, phone, dob, gender]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The slot id from `GET /api/v1/ticket/order/{order_id}` → `slots[].id`.
+        name: { type: string }
+        email: { type: string, format: email }
+        phone:
+          type: string
+          pattern: '^[0-9]{12,15}$'
+          description: |
+            12-15 digits and nothing else. Length is the whole rule — no country code is required
+            or implied, and the digits are counted exactly as typed. `628123456789` passes, while
+            the same subscriber number written `08123456789` is eleven digits and does not.
+          example: "628123456789"
+        dob:
+          type: string
+          format: date
+          description: Date-only, YYYY-MM-DD.
+          example: "1995-04-17"
+        gender:
+          type: string
+          description: The **name** from `GET /api/v1/ticket/genders`.
+          example: MALE
+
+    CheckoutRequest:
+      type: object
+      description: |
+        The holder forms, arriving with the same call that starts payment — nothing was persisted
+        before it. There is no buyer block: the topmost holder form doubles as the order's primary
+        contact, derived server-side from canonical slot order.
+      required: [attendees]
+      properties:
+        attendees:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/CheckoutVisitor' }
+
+    CheckoutResponse:
+      type: object
+      properties:
+        order_id: { type: string }
+        qr_string:
+          type: string
+          description: The raw QRIS payload a banking app scans. The image is rendered from it.
+        expires_at:
+          type: string
+          format: date-time
+          description: The gateway's own deadline, adopted verbatim — one order, one code, one window.
+        qr_image_url:
+          type: string
+          description: Our own render route. The browser never talks to the payment provider.
+        ext_ref_id:
+          type: string
+          description: |
+            The gateway's own reference for this payment session, carried so a caller can match the
+            order against the gateway's records without a second request.
+
+            Always present, empty when no reference exists — never absent, so a caller does not have
+            to tell a missing field from a missing reference. Opaque: no format is promised and
+            nothing may be derived from it.
+
+            Every answer carrying a payment payload carries this too, and all of them name the same
+            session for the same order: the freshly opened session, the 409004 already-started
+            refusal, and the answer served to a checkout that lost the stamping race.
+
+    PublicOrderDetail:
+      type: object
+      properties:
+        order_id: { type: string }
+        status: { type: string, enum: [PENDING, PAID, CANCELLED, EXPIRED] }
+        total_amount: { $ref: '#/components/schemas/Money' }
+        subtotal: { allOf: [{ $ref: '#/components/schemas/Money' }], nullable: true }
+        fees:
+          type: array
+          items: { $ref: '#/components/schemas/OrderFee' }
+        expires_at: { type: string, format: date-time, nullable: true }
+        terms_agreed_at: { type: string, format: date-time, nullable: true }
+        payment_started: { type: boolean }
+        event: { $ref: '#/components/schemas/OrderEvent' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        slots:
+          type: array
+          description: One holder slot per seat. Details are null until checkout saves the forms.
+          items: { $ref: '#/components/schemas/OrderSlot' }
+        server_time:
+          type: string
+          format: date-time
+          description: |
+            Paired with `payment.expires_at` so a client can render a countdown that a wrong device
+            clock cannot skew.
+        payment:
+          allOf: [{ $ref: '#/components/schemas/PaymentInstruction' }]
+          nullable: true
+          description: Present only while the order is actually payable.
+
+    OrderEvent:
+      type: object
+      properties:
+        name: { type: string }
+        slug:
+          type: string
+          description: What lets an expired order offer a way back to buy again.
+        venue: { type: string }
+        address: { type: string }
+        start_date: { type: string, format: date-time }
+        end_date: { type: string, format: date-time }
+
+    OrderItem:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [ticket, package]
+          description: Tells the client which name field to read.
+        ticket_type_name: { type: string, nullable: true }
+        package_name: { type: string, nullable: true }
+        quantity: { type: integer, format: int32 }
+        unit_price: { $ref: '#/components/schemas/Money' }
+        subtotal: { $ref: '#/components/schemas/Money' }
+        admission_starts:
+          type: array
+          description: |
+            The days THIS line admits on, ascending: one for a ticket line, one per distinct
+            constituent for a bundle. A list rather than a start/end pair, because a single value
+            cannot express a Day 1 + Day 2 bundle.
+          items: { type: string, format: date-time }
+        description: { type: string, nullable: true }
+
+    OrderFee:
+      type: object
+      description: One frozen fee line, exactly as booking computed it.
+      properties:
+        name: { type: string, example: PPN (11%) }
+        amount: { $ref: '#/components/schemas/Money' }
+
+    OrderSlot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        ticket_type_name: { type: string }
+        package_name: { type: string, nullable: true }
+        package_id: { type: string, format: uuid, nullable: true }
+        package_unit:
+          type: integer
+          nullable: true
+          description: |
+            Which purchased bundle unit this slot belongs to — the client renders one visitor form
+            per unit.
+        name: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        dob: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+
+    PaymentInstruction:
+      type: object
+      properties:
+        method:
+          type: string
+          description: The instrument, not the provider — a QRIS code regardless of who acquires it.
+          example: qris
+        provider: { type: string }
+        amount: { $ref: '#/components/schemas/Money' }
+        expires_at: { type: string, format: date-time }
+        qr_image_path:
+          type: string
+          description: A path rather than a full URL, so the client stays origin-agnostic.
+          example: /api/v1/ticket/order/ORD-20261201-0001/qris.png
+
+    # --- Tickets ------------------------------------------------------------
+
+    PublicTicket:
+      type: object
+      description: The public lookup projection — deliberately narrow.
+      properties:
+        ticket_code: { type: string }
+        status: { type: string, enum: [ACTIVE, USED, REVOKED] }
+        event_name: { type: string }
+        attendee_name: { type: string }
+
+    ValidateRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+
+    ValidationResult:
+      type: object
+      properties:
+        result:
+          type: string
+          enum: [VALID, ALREADY_USED, INVALID, NOT_YET_VALID, EXPIRED]
+        ticket_code: { type: string }
+        attendee_name: { type: string, nullable: true }
+        ticket_type_name: { type: string, nullable: true }
+        event_name: { type: string, nullable: true }
+        event_start: { type: string, format: date-time, nullable: true }
+        event_end: { type: string, format: date-time, nullable: true }
+
+    MarkUsedResponse:
+      type: object
+      properties:
+        ticket_code: { type: string }
+        status: { type: string, example: USED }
+
+    PublicResendRequest:
+      type: object
+      description: |
+        The order number is the only field read. Anything else — an email address in particular —
+        is ignored, so the destination stays the buyer's stored address.
+      required: [order_id]
+      properties:
+        order_id: { type: string }
+
+    PublicResendResponse:
+      type: object
+      description: |
+        Deliberately narrower than the admin resend: it names neither the recipient nor whether the
+        order exists.
+      properties:
+        message: { type: string }
+        retry_after_seconds:
+          type: integer
+          description: |
+            Safe to carry alongside that silence precisely because it is identical across every
+            accepted outcome — it describes the cooldown, not the order.
+
+    RetryAfter:
+      type: object
+      properties:
+        retry_after_seconds: { type: integer }
+
+    AdminResendResponse:
+      type: object
+      properties:
+        message: { type: string, example: Email resent }
+        sent_to:
+          type: string
+          description: The address that was actually mailed, taken from the send itself.
+
+    # --- Admin --------------------------------------------------------------
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+        expires_at:
+          type: string
+          format: date-time
+          description: So the client does not have to decode the token to know.
+
+    EventRequest:
+      type: object
+      required: [name, slug, venue, address, start_date, end_date, status]
+      properties:
+        name: { type: string }
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          description: Lowercase letters, digits and single hyphens. Unique.
+          example: jazz-night-2026
+        description: { type: string, nullable: true }
+        venue: { type: string }
+        address: { type: string }
+        start_date: { type: string, format: date-time }
+        end_date: { type: string, format: date-time }
+        banner_url: { type: string, nullable: true }
+        status: { type: string, enum: [DRAFT, PUBLISHED] }
+        scale:
+          type: integer
+          format: int64
+          nullable: true
+          description: Expected visitor count. Null clears it.
+
+    EventAdminView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string, nullable: true }
+        venue: { type: string }
+        address: { type: string }
+        start_date: { type: string, format: date-time }
+        end_date: { type: string, format: date-time }
+        banner_url: { type: string, nullable: true }
+        status: { type: string, enum: [DRAFT, PUBLISHED] }
+        scale: { type: integer, format: int64, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    EventAdminDetail:
+      allOf:
+        - $ref: '#/components/schemas/EventAdminView'
+        - type: object
+          properties:
+            ticket_types:
+              type: array
+              items: { $ref: '#/components/schemas/TicketTypeAdminView' }
+
+    TicketTypeRequest:
+      type: object
+      required: [name, price, quota, sales_start, sales_end, event_start, event_end]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Required on create; ignored on update — a ticket type does not move events.
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { $ref: '#/components/schemas/Money' }
+        quota:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            The allocation on create; the **remaining** count on every write thereafter. This field
+            is never an original allocation once the ticket type exists.
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        event_start:
+          type: string
+          format: date-time
+          description: |
+            When admission OPENS, not showtime. Validation admits no tolerance, so setting this to
+            showtime turns away every early arrival. Must sit inside the parent event's dates.
+        event_end: { type: string, format: date-time }
+
+    TicketTypeAdminView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { $ref: '#/components/schemas/Money' }
+        quota:
+          type: integer
+          format: int32
+          description: The count that REMAINS, never an original allocation.
+        sold: { type: integer }
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        event_start: { type: string, format: date-time }
+        event_end: { type: string, format: date-time }
+
+    PackageComponentRequest:
+      type: object
+      required: [ticket_type_id, quantity_per_unit]
+      properties:
+        ticket_type_id: { type: string, format: uuid }
+        quantity_per_unit: { type: integer, format: int32, minimum: 1 }
+
+    PackageRequest:
+      type: object
+      description: |
+        No quota field exists, and any quota-like key (`quota`, `stock`, `inventory`, `remaining`,
+        `capacity`) is rejected rather than ignored.
+      required: [name, price, sales_start, sales_end, is_active, components]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Required on create; immutable and ignored on update.
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: |
+            The all-in price, deliberately NOT validated against the sum of the constituents.
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        is_active: { type: boolean }
+        components:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PackageComponentRequest' }
+
+    PackageAdminView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { $ref: '#/components/schemas/Money' }
+        sales_start: { type: string, format: date-time }
+        sales_end: { type: string, format: date-time }
+        is_active: { type: boolean }
+        components:
+          type: array
+          items: { $ref: '#/components/schemas/PackageComponent' }
+        available_units: { type: integer, format: int32 }
+        sold: { type: integer, format: int32 }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    PackageAvailability:
+      type: object
+      properties:
+        package_id: { type: string, format: uuid }
+        available_units: { type: integer, format: int32 }
+        purchasable: { type: boolean }
+        limiting_ticket_type:
+          nullable: true
+          description: The constituent that binds — the one to top up to sell more bundles.
+          allOf:
+            - type: object
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+                quota_remaining: { type: integer, format: int32 }
+        components:
+          type: array
+          items:
+            type: object
+            properties:
+              ticket_type_id: { type: string, format: uuid }
+              name: { type: string }
+              quota_remaining: { type: integer, format: int32 }
+              quantity_per_unit: { type: integer, format: int32 }
+              units_supported: { type: integer, format: int32 }
+
+    TermsUpsertRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: HTML. Sanitized server-side before storage.
+
+    ActivityRequest:
+      type: object
+      required: [title, description, position]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        icon: { $ref: '#/components/schemas/IconKey' }
+        position: { type: integer, format: int32 }
+
+    GuestStarRequest:
+      type: object
+      required: [name, position]
+      properties:
+        name: { type: string }
+        position: { type: integer, format: int32 }
+
+    GuidelineRequest:
+      type: object
+      required: [description, position]
+      properties:
+        description: { type: string }
+        icon: { $ref: '#/components/schemas/IconKey' }
+        position: { type: integer, format: int32 }
+
+    OrderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The admin-side UUID — what the resend and payment-ops routes take.
+        order_number:
+          type: string
+          description: The public identifier the guest sees.
+        buyer_name: { type: string }
+        buyer_email: { type: string }
+        status: { type: string, enum: [PENDING, PAID, CANCELLED, EXPIRED] }
+        total_amount: { $ref: '#/components/schemas/Money' }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    AttendeeSummary:
+      type: object
+      properties:
+        name: { type: string }
+        email: { type: string }
+        ticket_type_name: { type: string }
+        order_number: { type: string }
+
+    FeeRequest:
+      type: object
+      required: [name, fee_type, value, position, is_active]
+      properties:
+        name: { type: string, example: PPN }
+        fee_type: { type: string, enum: [PERCENT, FIXED] }
+        value:
+          allOf: [{ $ref: '#/components/schemas/Money' }]
+          description: A percentage for PERCENT, an amount for FIXED. Never negative.
+          example: "11"
+        position:
+          type: integer
+          format: int32
+          description: Orders the lines on the order summary.
+        is_active: { type: boolean }
+
+    FeeAdminView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        fee_type: { type: string, enum: [PERCENT, FIXED] }
+        value: { $ref: '#/components/schemas/Money' }
+        position: { type: integer, format: int32 }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    PaymentNotification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string }
+        transaction_id: { type: string }
+        status: { type: string }
+        is_marker:
+          type: boolean
+          description: |
+            True for a record kept only as an audit trace of a notification that changed nothing.
+        payment_type: { type: string }
+        raw_payload:
+          type: object
+          description: The notification body exactly as delivered.
+        ext_ref_id:
+          type: string
+          description: |
+            The gateway's own reference for the payment session.
+
+            Populated on the SESSION_OPENED marker row alone and empty on every other, because the
+            gateway supplies it once — on the answer that issues the code — and never on a callback.
+            Read the one non-empty entry to get the order-level value; it is stated once for the
+            order rather than repeated down a column that would be blank everywhere else.
+
+            Always present, never null.
+        received_at: { type: string, format: date-time }
+
+    OrderHold:
+      type: object
+      properties:
+        ticket_type_id: { type: string, format: uuid }
+        ticket_type_name: { type: string }
+        held: { type: integer, format: int32 }
+        remaining: { type: integer, format: int32 }
+
+    CacheRefreshResult:
+      type: object
+      properties:
+        status: { type: string, enum: [flushed, disabled] }
+        entries_cleared: { type: integer, format: int64 }
+
+    # --- Payment gateway ----------------------------------------------------
+
+    GatewayNotification:
+      type: object
+      description: |
+        The provider's notification body. The wire tags are abbreviated by the provider, not by us.
+
+        A body that omits `s` decodes as "pending" (the enum's zero value). The order outcome is the
+        same either way — both change nothing — but the audit record distinguishes an absent status
+        from an explicitly-sent one, so it never claims the gateway said "pending" when it said
+        nothing at all.
+      required: [ri, td]
+      properties:
+        ri:
+          type: string
+          description: Reference id — our order number.
+        nti:
+          type: string
+          description: The provider's own transaction id.
+        s:
+          type: integer
+          description: |
+            Payment status: 0 pending, 1 reject, 2 cancel, 3 expired, 4 obscure, **5 completed**.
+            Only 5 settles an order.
+          enum: [0, 1, 2, 3, 4, 5]
+          example: 5
+        td:
+          type: string
+          description: Transaction date.
+        tft:
+          type: string
+          description: Transaction from/to.
+        tt:
+          type: integer
+          description: 0 deposit, 1 withdraw. Only a deposit settles an order.
+          enum: [0, 1]
+          example: 0
+        ai:
+          type: object
+          description: Additional info.
+          properties:
+            rrn: { type: string, nullable: true }

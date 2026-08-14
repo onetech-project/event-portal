@@ -771,4 +771,47 @@ test.describe("Guest purchase, end to end", () => {
     expect(await orderStatusOf(orderNumber)).toBe("PAID");
     expect(await ticketCodesFor(orderNumber)).toHaveLength(1);
   });
+
+  /**
+   * Spec 017. The checkout response gains the gateway's own reference for the
+   * session, so a caller can match the order against the gateway's records
+   * without a second request.
+   *
+   * Intercepted off the real response the browser receives, not fetched
+   * separately: the point is that the app's own checkout call carries it.
+   */
+  test("the checkout response carries the gateway's external reference", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-ext-ref",
+      quota: 5,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    const orderNumber = await guest.agreeToTermsAndBook();
+    await guest.fillHolder(0, defaultHolder);
+
+    const checkout = page.waitForResponse(
+      (r) => r.url().includes("/ticket/checkout/") && r.request().method() === "POST",
+    );
+    await guest.payWithQris();
+    const body = await (await checkout).json();
+
+    // The stub mints the reference from the order number it was handed, so the
+    // expected value is deterministic without reaching into the stub.
+    expect(body.data.ext_ref_id).toBe(`stub-eri-${orderNumber}`);
+
+    // Present-and-empty is the contract when a gateway supplies none; present
+    // and populated is the contract here.
+    expect(typeof body.data.ext_ref_id).toBe("string");
+
+    // And the UI is exactly as it was: this is an internal support identifier,
+    // meaningless to a buyer, and "keep the ui just like today" is a
+    // requirement of this change rather than a side effect of it.
+    await guest.expectAwaitingPayment();
+    const rendered = await page.locator("body").textContent();
+    expect(rendered).not.toContain(body.data.ext_ref_id);
+  });
+
 });

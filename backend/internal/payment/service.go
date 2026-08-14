@@ -91,6 +91,19 @@ const (
 	// MarkerSessionDuplicate records a session-open refused as a duplicate
 	// reference — a code exists that this system will never hold.
 	MarkerSessionDuplicate = "SESSION_DUPLICATE"
+	// MarkerSessionOpened records the gateway issuing a code for this order, and
+	// carries the external reference it issued it under (spec 017). It is the
+	// exact counterpart of MarkerSessionDuplicate: one is written when the gateway
+	// agrees to open a session, the other when it refuses to open a second.
+	//
+	// It exists because the reference arrives once, on the session-open answer,
+	// and on nothing else — an inbound callback does not carry it. Session open is
+	// the only moment it can be captured, and the stranded order that most needs
+	// it is precisely the one whose notification never arrives.
+	//
+	// It is also the row SettlementForOrder has always described itself as
+	// reading for the payment instrument.
+	MarkerSessionOpened = "SESSION_OPENED"
 )
 
 // fulfillmentTimeout bounds the post-payment goroutine. Ticket generation, PDF
@@ -526,6 +539,80 @@ func validJSONOrNull(raw []byte) []byte {
 		return raw
 	}
 	return []byte("null")
+}
+
+// RecordSessionOpened writes the SESSION_OPENED row for a session the gateway
+// has just agreed to open, carrying the external reference it issued (spec 017
+// FR-001).
+//
+// It is the mirror of ReleaseDuplicateSession below, called from the same place
+// on the opposite branch: one records the gateway agreeing, the other the
+// gateway refusing. Neither belongs in the order domain, which must not know
+// this table exists (Principle II).
+//
+// The reference is captured HERE, not later, because here is the only place it
+// is ever available: it rides the session-open answer and no callback carries
+// it. Deferring it to the first notification would store it for exactly the
+// orders that never needed it, and lose it for the stranded one that does.
+//
+// Errors are returned but callers are expected to log and continue. By the time
+// this runs the gateway has already made the order payable, and refusing a live
+// payment session because an audit row would not insert harms the guest and the
+// operator both.
+func (s *Service) RecordSessionOpened(ctx context.Context, orderNumber string, session PaymentSession) error {
+	ord, err := s.orders.OrderByNumber(ctx, orderNumber)
+	if err != nil {
+		return err
+	}
+
+	// What is true at session open and unrecoverable afterwards. expiry_from
+	// _gateway in particular reaches only the logs today, and it is the
+	// difference between a deadline the gateway agreed to and one this system
+	// substituted when the gateway returned nothing usable.
+	envelope, err := json.Marshal(map[string]any{
+		"marker":              MarkerSessionOpened,
+		"raised_at":           s.now().UTC().Format(time.RFC3339),
+		"ext_ref_id":          session.ProviderRef,
+		"expires_at":          session.ExpiresAt.UTC().Format(time.RFC3339),
+		"expiry_from_gateway": session.ExpiryFromGateway,
+	})
+	if err != nil {
+		return fmt.Errorf("encode session-open marker: %w", err)
+	}
+
+	if err := s.repo.CreatePayment(ctx, PaymentLog{
+		OrderID:  ord.ID,
+		Provider: s.gateway.Name(),
+		// The gateway's network transaction id does not exist yet — it arrives on
+		// settlement. transaction_id is NOT NULL, so this falls back to the order's
+		// own reference rather than writing an empty string that would read as a
+		// real, blank gateway id, exactly as writeMarker does.
+		TransactionID: ord.OrderNumber,
+		PaymentType:   "qris",
+		Status:        MarkerSessionOpened,
+		RawResponse:   envelope,
+		ExtRefID:      session.ProviderRef,
+	}); err != nil {
+		return fmt.Errorf("record session-open marker: %w", err)
+	}
+
+	// A gateway that stops sending the reference degrades traceability silently
+	// otherwise: the order is payable, the row is written, and only the missing
+	// column would ever say so.
+	if session.ProviderRef == "" {
+		s.log.WarnContext(ctx, "gateway opened a session without an external reference",
+			"order_number", ord.OrderNumber, "provider", s.gateway.Name())
+	}
+	return nil
+}
+
+// ExternalRefForOrder answers what reference an order's payment session was
+// opened under, or the empty string when none was ever recorded.
+//
+// No reference is a normal answer rather than an error — see
+// Repository.ExternalRefByOrderID.
+func (s *Service) ExternalRefForOrder(ctx context.Context, orderID uuid.UUID) (string, error) {
+	return s.repo.ExternalRefByOrderID(ctx, orderID)
 }
 
 // ReleaseDuplicateSession handles a session-open the gateway refused because it

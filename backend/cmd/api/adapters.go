@@ -151,6 +151,24 @@ func (a *gatewayAdapter) CreateTransaction(ctx context.Context, req order.Paymen
 		return order.PaymentSession{}, err
 	}
 
+	// The gateway has agreed to open a session, so record what it called it —
+	// here, on the same branch that releases the order when it refuses (spec 017
+	// FR-001). This is the only moment the external reference exists: it rides
+	// this answer and no callback carries it.
+	//
+	// Swallowed on failure, deliberately. The order is payable as of the line
+	// above, and destroying a live payment session because an audit row would not
+	// insert would cost the guest their seats to save a record of them.
+	if a.payments != nil {
+		if recordErr := a.payments.RecordSessionOpened(ctx, req.OrderNumber, session); recordErr != nil {
+			a.log.ErrorContext(ctx, "could not record the session-open reference; the order is payable but untraceable to the gateway",
+				"order_number", req.OrderNumber, "error", recordErr.Error())
+		}
+	} else {
+		a.log.ErrorContext(ctx, "session opened with no payment service wired; its gateway reference is not recorded",
+			"order_number", req.OrderNumber)
+	}
+
 	return order.PaymentSession{
 		ProviderRef:       session.ProviderRef,
 		QRString:          session.QRString,
@@ -159,6 +177,23 @@ func (a *gatewayAdapter) CreateTransaction(ctx context.Context, req order.Paymen
 		ExpiryFromGateway: session.ExpiryFromGateway,
 		RedirectURL:       session.RedirectURL,
 	}, nil
+}
+
+// ExternalRefForOrder satisfies order.PaymentRecords: what reference this order's
+// payment session was opened under, read back off the payment domain's own
+// records rather than the gateway.
+//
+// The same adapter serves both contracts because it already holds the payment
+// service for the two writes above, and because this file is the one place a
+// back-reference between the domains is allowed to live. A nil service degrades
+// to "no reference" rather than an error: the caller is assembling a checkout
+// response, and a missing support identifier must never cost a guest their
+// payable code.
+func (a *gatewayAdapter) ExternalRefForOrder(ctx context.Context, orderID uuid.UUID) (string, error) {
+	if a.payments == nil {
+		return "", nil
+	}
+	return a.payments.ExternalRefForOrder(ctx, orderID)
 }
 
 // --- payment.OrderProvider: the webhook's view of the order domain ---------

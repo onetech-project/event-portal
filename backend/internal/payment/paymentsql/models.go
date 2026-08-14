@@ -3,20 +3,3 @@
 //   sqlc v1.31.1
 
 package paymentsql
-
-import (
-	"time"
-
-	"github.com/google/uuid"
-)
-
-type Payment struct {
-	ID            uuid.UUID
-	OrderID       uuid.UUID
-	Provider      string
-	TransactionID string
-	PaymentType   *string
-	Status        string
-	RawResponse   []byte
-	CreatedAt     *time.Time
-}

@@ -119,6 +119,11 @@ type NotificationRecord struct {
 	RawPayload  json.RawMessage
 	ReceivedAt  time.Time
 	PaymentType string
+	// ExtRefID is the gateway's own reference for the payment session. Non-empty
+	// on the SESSION_OPENED row alone, which is what lets a reader resolve one
+	// order-level value out of the whole sequence rather than repeating a blank
+	// down every row (spec 017 FR-015).
+	ExtRefID string
 }
 
 // OrderHold is one ticket type's seats on an order beside what that type has
@@ -154,6 +159,7 @@ func (s *Service) OrderNotifications(ctx context.Context, orderID uuid.UUID) ([]
 			RawPayload:    json.RawMessage(validJSONOrNull(row.RawResponse)),
 			ReceivedAt:    row.CreatedAt,
 			PaymentType:   row.PaymentType,
+			ExtRefID:      row.ExtRefID,
 		})
 	}
 	return out, nil
@@ -351,7 +357,8 @@ func ticketTypeIDs(holds []QuotaHold) []uuid.UUID {
 
 func isMarker(status string) bool {
 	switch status {
-	case MarkerDisputed, MarkerSettledAfterExpiry, MarkerSettleRefusedNoQuota, MarkerSessionDuplicate:
+	case MarkerDisputed, MarkerSettledAfterExpiry, MarkerSettleRefusedNoQuota,
+		MarkerSessionDuplicate, MarkerSessionOpened:
 		return true
 	default:
 		return false

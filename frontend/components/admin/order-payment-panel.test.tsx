@@ -18,6 +18,12 @@ function envelope(data: unknown) {
   });
 }
 
+const EXT_REF_ID = "A487336098162400838C";
+
+/**
+ * Newest first, as the API returns them. Only the oldest row — the session-open
+ * marker — carries the gateway reference; a callback never does.
+ */
 const NOTIFICATIONS = [
   {
     id: "n2",
@@ -27,6 +33,7 @@ const NOTIFICATIONS = [
     is_marker: true,
     payment_type: "qris",
     raw_payload: {},
+    ext_ref_id: "",
     received_at: "2026-08-10T10:20:00Z",
   },
   {
@@ -37,14 +44,26 @@ const NOTIFICATIONS = [
     is_marker: false,
     payment_type: "qris",
     raw_payload: {},
+    ext_ref_id: "",
     received_at: "2026-08-10T10:00:00Z",
+  },
+  {
+    id: "n0",
+    provider: "manjo",
+    transaction_id: "ORD-20260810-A7K2QX",
+    status: "SESSION_OPENED",
+    is_marker: true,
+    payment_type: "qris",
+    raw_payload: {},
+    ext_ref_id: EXT_REF_ID,
+    received_at: "2026-08-10T09:00:00Z",
   },
 ];
 
-function stubApi(holds: unknown) {
+function stubApi(holds: unknown, notifications: unknown = NOTIFICATIONS) {
   const spy = vi.fn().mockImplementation((rawUrl: string | URL) => {
     const url = String(rawUrl);
-    if (url.includes("/notifications")) return Promise.resolve(envelope(NOTIFICATIONS));
+    if (url.includes("/notifications")) return Promise.resolve(envelope(notifications));
     if (url.includes("/holds")) return Promise.resolve(envelope(holds));
     return Promise.reject(new Error(`unexpected fetch: ${url}`));
   });
@@ -99,7 +118,9 @@ describe("OrderPaymentPanel", () => {
 
     // Both live in the same field on the wire; letting a marker read as a gateway
     // status would be misleading on exactly the screen where it matters most.
-    await waitFor(() => expect(screen.getByText("our note")).toBeTruthy());
+    // getAllBy, not getBy: an order has more than one marker on its history —
+    // the session-open one plus whatever was concluded later.
+    await waitFor(() => expect(screen.getAllByText("our note").length).toBeGreaterThan(0));
   });
 
   it("reports seats held against seats remaining", async () => {
@@ -150,5 +171,54 @@ describe("OrderPaymentPanel", () => {
     // gateway. A button here would be a second source of payment truth, and the
     // one least exercised at the moment it matters.
     expect(screen.queryByRole("button", { name: /confirm|mark.*paid|settle/i })).toBeNull();
+  });
+
+  // Spec 017. This is the handle that matches the order to a transaction in the
+  // gateway's own records — without it a stranded payment has no thread to pull.
+  it("shows the gateway reference for the order", async () => {
+    stubApi([{ ticket_type_id: TICKET_ID, ticket_type_name: "Regular", held: 3, remaining: 7 }]);
+    renderPanel();
+
+    await waitFor(() => expect(screen.getByText(EXT_REF_ID)).toBeTruthy());
+  });
+
+  it("states the reference once for the order, not once per notification", async () => {
+    stubApi([{ ticket_type_id: TICKET_ID, ticket_type_name: "Regular", held: 3, remaining: 7 }]);
+    renderPanel();
+
+    // It is an order-level fact. Rendering it per row would repeat one value down
+    // a column that is blank on every row but the session-open one.
+    await waitFor(() => expect(screen.getByText(EXT_REF_ID)).toBeTruthy());
+    expect(screen.getAllByText(EXT_REF_ID)).toHaveLength(1);
+  });
+
+  it("shows the value in full, because an abbreviated one cannot be pasted into the gateway", async () => {
+    stubApi([{ ticket_type_id: TICKET_ID, ticket_type_name: "Regular", held: 3, remaining: 7 }]);
+    renderPanel();
+
+    const shown = await screen.findByText(EXT_REF_ID);
+    expect(shown.textContent).toBe(EXT_REF_ID);
+  });
+
+  it("renders a placeholder for an order whose payment session never opened", async () => {
+    // Orders predating this feature, and any order that never reached checkout,
+    // have no reference and none can be recovered. The dialog must still render.
+    stubApi([{ ticket_type_id: TICKET_ID, ticket_type_name: "Regular", held: 3, remaining: 7 }], []);
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText(/no payment session was opened/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText(EXT_REF_ID)).toBeNull();
+  });
+
+  it("renders the session-open row through the existing marker path", async () => {
+    stubApi([{ ticket_type_id: TICKET_ID, ticket_type_name: "Regular", held: 3, remaining: 7 }]);
+    renderPanel();
+
+    // It is this system's own statement about what the gateway agreed to, not
+    // something the gateway said — same footing as every other marker.
+    await waitFor(() => expect(screen.getByText("SESSION_OPENED")).toBeTruthy());
+    expect(screen.getAllByText("our note").length).toBeGreaterThanOrEqual(2);
   });
 });

@@ -2,10 +2,12 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/manjo/ticketing/backend/internal/payment/paymentsql"
 )
@@ -22,6 +24,10 @@ type PaymentLog struct {
 	Status string
 	// RawResponse is the complete notification payload.
 	RawResponse []byte
+	// ExtRefID is the gateway's own reference for the payment session, known only
+	// at session open. Empty on every notification row: a callback carries our
+	// order number and the gateway's network transaction id, never this.
+	ExtRefID string
 }
 
 // Repository is the only place in the codebase that talks to the payments table.
@@ -41,6 +47,12 @@ func (r *Repository) CreatePayment(ctx context.Context, log PaymentLog) error {
 	if log.PaymentType != "" {
 		paymentType = &log.PaymentType
 	}
+	// Empty means "the gateway supplied none", which must stay distinguishable
+	// from a gateway that answered with a blank one — so NULL, never ''.
+	var extRefID *string
+	if log.ExtRefID != "" {
+		extRefID = &log.ExtRefID
+	}
 
 	_, err := r.queries.CreatePayment(ctx, paymentsql.CreatePaymentParams{
 		OrderID:       log.OrderID,
@@ -49,6 +61,7 @@ func (r *Repository) CreatePayment(ctx context.Context, log PaymentLog) error {
 		PaymentType:   paymentType,
 		Status:        log.Status,
 		RawResponse:   log.RawResponse,
+		ExtRefID:      extRefID,
 	})
 	if err != nil {
 		return fmt.Errorf("record payment notification: %w", err)
@@ -68,7 +81,11 @@ type PaymentRecord struct {
 	// single readable narrative rather than two interleaved ones.
 	Status      string
 	RawResponse []byte
-	CreatedAt   time.Time
+	// ExtRefID is the gateway's own reference for the payment session. Non-empty
+	// on the SESSION_OPENED row and empty on every other, which is what lets a
+	// reader resolve one order-level value out of the whole sequence.
+	ExtRefID  string
+	CreatedAt time.Time
 }
 
 // ListByOrder returns every row recorded against one order, newest first.
@@ -80,7 +97,28 @@ func (r *Repository) ListByOrder(ctx context.Context, orderID uuid.UUID) ([]Paym
 	return toPaymentRecords(rows), nil
 }
 
-func toPaymentRecords(rows []paymentsql.Payment) []PaymentRecord {
+// ExternalRefByOrderID returns the gateway's own reference for an order's payment
+// session, or the empty string when none was ever recorded.
+//
+// No row is a NORMAL answer, not an error: an order whose session never opened,
+// and every order predating the column, simply has no reference. Turning that
+// into an error would force each caller to re-decide that "absent" is fine, and
+// the checkout response has to carry the field present-and-empty either way.
+func (r *Repository) ExternalRefByOrderID(ctx context.Context, orderID uuid.UUID) (string, error) {
+	ref, err := r.queries.GetExternalRefByOrderID(ctx, orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read external reference for order: %w", err)
+	}
+	if ref == nil {
+		return "", nil
+	}
+	return *ref, nil
+}
+
+func toPaymentRecords(rows []paymentsql.ListPaymentsByOrderIDRow) []PaymentRecord {
 	out := make([]PaymentRecord, 0, len(rows))
 	for _, row := range rows {
 		rec := PaymentRecord{
@@ -93,6 +131,9 @@ func toPaymentRecords(rows []paymentsql.Payment) []PaymentRecord {
 		}
 		if row.PaymentType != nil {
 			rec.PaymentType = *row.PaymentType
+		}
+		if row.ExtRefID != nil {
+			rec.ExtRefID = *row.ExtRefID
 		}
 		if row.CreatedAt != nil {
 			rec.CreatedAt = *row.CreatedAt

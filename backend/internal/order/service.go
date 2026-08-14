@@ -46,6 +46,10 @@ type Service struct {
 	now     func() time.Time
 	timers  Timers
 	cache   cache.Lists
+	// payments reads back what a started payment was recorded under. Optional:
+	// nil means the checkout response carries no external reference, which is the
+	// same degradation as an order that never opened a session.
+	payments PaymentRecords
 }
 
 // NewService builds the order service. Timers default to the contract values;
@@ -70,6 +74,17 @@ func NewService(pool db.Beginner, repo *Repository, events EventProvider, gatewa
 // for chaining at the composition root.
 func (s *Service) WithTimers(t Timers) *Service {
 	s.timers = t
+	return s
+}
+
+// WithPaymentRecords installs the read-back seam for a started payment's
+// external reference (spec 017). Optional by construction: without it checkout
+// still works and simply reports no reference, which is what a test that does
+// not care about the reference should get.
+func (s *Service) WithPaymentRecords(p PaymentRecords) *Service {
+	if p != nil {
+		s.payments = p
+	}
 	return s
 }
 
@@ -398,7 +413,7 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		// Idempotent retry: the payment already exists, hand back its payload as
 		// the 409004's data instead of opening a second session.
 		return CheckoutQRResponse{}, apperr.Conflict(apperr.CodePaymentAlreadyStarted,
-			"Payment for this order has already started.").WithData(s.qrResponseFor(ord))
+			"Payment for this order has already started.").WithData(s.qrResponseFor(ctx, ord))
 	}
 
 	slots, err := s.repo.ListAttendeeSlotsByOrderID(ctx, ord.ID)
@@ -532,7 +547,7 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		if err != nil {
 			return CheckoutQRResponse{}, err
 		}
-		return s.qrResponseFor(current), nil
+		return s.qrResponseFor(ctx, current), nil
 	}
 
 	s.log.InfoContext(ctx, "checkout started payment",
@@ -549,12 +564,26 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 		QRString:   session.QRString,
 		ExpiresAt:  deadline.UTC(),
 		QRImageURL: TicketQRImagePath(ord.OrderNumber),
+		// Straight from the gateway's answer: this is the branch that opened the
+		// session, so the reference is already in hand and no read-back is needed
+		// to know which session the guest is about to pay.
+		ExtRefID: session.ProviderRef,
 	}, nil
 }
 
 // qrResponseFor rebuilds the checkout response from an order's stored payment
 // fields — the idempotent-retry and lost-race branches.
-func (s *Service) qrResponseFor(ord OrderRecord) CheckoutQRResponse {
+//
+// The external reference is READ rather than taken from the caller's own
+// session, and that distinction is load-bearing on the lost-race branch: the
+// caller there holds a session the order did not keep, so its own reference
+// would name the wrong one. Reading gives both branches the session the guest is
+// actually paying (FR-011).
+//
+// A missing provider or a failed lookup costs the reference and nothing else. It
+// is a support identifier; refusing to answer a checkout because one could not
+// be read would trade a payable order for an audit convenience.
+func (s *Service) qrResponseFor(ctx context.Context, ord OrderRecord) CheckoutQRResponse {
 	resp := CheckoutQRResponse{
 		OrderID:    ord.OrderNumber,
 		QRImageURL: TicketQRImagePath(ord.OrderNumber),
@@ -564,6 +593,14 @@ func (s *Service) qrResponseFor(ord OrderRecord) CheckoutQRResponse {
 	}
 	if ord.PaymentExpiresAt != nil {
 		resp.ExpiresAt = ord.PaymentExpiresAt.UTC()
+	}
+	if s.payments != nil {
+		ref, err := s.payments.ExternalRefForOrder(ctx, ord.ID)
+		if err != nil {
+			s.log.ErrorContext(ctx, "could not read the payment's external reference; answering without it",
+				"order_number", ord.OrderNumber, "error", err.Error())
+		}
+		resp.ExtRefID = ref
 	}
 	return resp
 }

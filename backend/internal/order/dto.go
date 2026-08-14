@@ -307,6 +307,18 @@ type CheckoutQRResponse struct {
 	// QRImageURL is our own render route — the browser never talks to the
 	// payment provider (FR-009).
 	QRImageURL string `json:"qr_image_url"`
+	// ExtRefID is the gateway's own reference for this payment session, carried so
+	// a caller can match the order against the gateway's records without a second
+	// request (spec 017 FR-008).
+	//
+	// Always present, empty when no reference exists, so a caller never has to
+	// tell an absent field from an absent reference (FR-010). It is opaque: no
+	// format is promised and nothing may be derived from it.
+	//
+	// Every answer that carries a payment payload carries this too — the freshly
+	// opened session, the already-started refusal, and the lost-race answer — and
+	// all three name the same session for the same order (FR-011).
+	ExtRefID string `json:"ext_ref_id"`
 }
 
 // TicketOrderSlot is one attendee slot on the guest order read

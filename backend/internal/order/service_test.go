@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/manjo/ticketing/backend/internal/event"
 	"github.com/manjo/ticketing/backend/internal/order"
@@ -100,6 +101,42 @@ type fakeGateway struct {
 	// onCall runs inside CreateTransaction, which is where a test can observe
 	// what the database looks like at the moment the gateway is called.
 	onCall func(order.PaymentRequest)
+	// providerRef overrides the reference this gateway issues. Empty string means
+	// "issue the default"; use noProviderRef to model a gateway that opens a
+	// session without supplying one at all.
+	providerRef string
+	// records and orders let the fake do what the composition root does for real:
+	// write the reference down the moment the session opens, so the branches that
+	// rebuild a response from storage have something to read (spec 017).
+	records *fakePaymentRecords
+	orders  *order.Repository
+}
+
+// noProviderRef models a gateway that opened a session but supplied no external
+// reference. Distinct from the zero value, which means "use the default".
+const noProviderRef = "\x00none"
+
+// fakePaymentRecords stands in for the payment domain's record of what a session
+// was opened under — the read half of what cmd/api wires for real.
+type fakePaymentRecords struct {
+	mu   sync.Mutex
+	refs map[uuid.UUID]string
+	err  error
+}
+
+func (r *fakePaymentRecords) ExternalRefForOrder(_ context.Context, orderID uuid.UUID) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return "", r.err
+	}
+	return r.refs[orderID], nil
+}
+
+func (r *fakePaymentRecords) record(orderID uuid.UUID, ref string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refs[orderID] = ref
 }
 
 func (g *fakeGateway) Name() string { return "fakegw" }
@@ -114,8 +151,29 @@ func (g *fakeGateway) CreateTransaction(_ context.Context, req order.PaymentRequ
 	if g.err != nil {
 		return order.PaymentSession{}, g.err
 	}
+
+	ref := "txn-" + req.OrderNumber
+	switch g.providerRef {
+	case noProviderRef:
+		ref = ""
+	case "":
+		// default
+	default:
+		ref = g.providerRef
+	}
+
+	// What the composition root does the moment the gateway agrees: write the
+	// reference down, keyed by the order, so the answers rebuilt from storage can
+	// find it. Resolving the id from the number is the same step
+	// RecordSessionOpened takes.
+	if g.records != nil && g.orders != nil {
+		if ord, err := g.orders.GetOrderByNumber(context.Background(), req.OrderNumber); err == nil {
+			g.records.record(ord.ID, ref)
+		}
+	}
+
 	return order.PaymentSession{
-		ProviderRef: "txn-" + req.OrderNumber,
+		ProviderRef: ref,
 		QRString:    g.qrString,
 		QRImageURL:  g.url,
 		// The deadline is the gateway's, adopted verbatim. The adapter guarantees
@@ -145,6 +203,7 @@ type checkoutFixture struct {
 	pool    *testsupport.Pool
 	gateway *fakeGateway
 	repo    *order.Repository
+	records *fakePaymentRecords
 }
 
 func newCheckoutFixture(t *testing.T) checkoutFixture {
@@ -152,20 +211,25 @@ func newCheckoutFixture(t *testing.T) checkoutFixture {
 	pool := testsupport.RequirePool(t)
 
 	repo := order.NewRepository(pool)
+	records := &fakePaymentRecords{refs: map[uuid.UUID]string{}}
 	gw := &fakeGateway{
 		url:       "https://pay.example.com/session",
 		qrString:  "00020101021226620014COM.EXAMPLE.QRIS",
 		expiresAt: time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second),
+		records:   records,
+		orders:    repo,
 	}
 	events := event.NewService(pool, event.NewRepository(pool), nil, testsupport.DiscardLogger())
 	provider := eventProviderAdapter{svc: events}
 
 	return checkoutFixture{
-		svc:     order.NewService(pool, repo, provider, gw, testsupport.DiscardLogger()),
+		svc: order.NewService(pool, repo, provider, gw, testsupport.DiscardLogger()).
+			WithPaymentRecords(records),
 		public:  order.NewPublicService(repo, eventLookupAdapter{svc: events}),
 		pool:    pool,
 		gateway: gw,
 		repo:    repo,
+		records: records,
 	}
 }
 
@@ -300,4 +364,64 @@ func isDeadlockError(err error) bool {
 	}
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.SQLState() == "40P01"
+}
+
+// --- External reference: the lost stamping race (spec 017 FR-011) ----------
+
+// The branch that makes reading the reference necessary rather than merely
+// convenient.
+//
+// A checkout can lose TX-P to a concurrent one and be served the payload the
+// winner stored. Answering from this caller's own `session.ProviderRef` would
+// then name a session the order did not keep — an identifier for a payment
+// nobody is making. So the answer is read back from the record instead, and this
+// asserts that it is.
+//
+// Only the winner's session is recorded here, which is what the live gateway
+// guarantees: it refuses to open a second session under a reference it has
+// already issued, so an order never has two. (A gateway that permitted duplicates
+// could record two, and the newest-first lookup could then resolve the wrong one
+// — the limitation research.md Decision 2 accepts and states rather than designs
+// around.)
+//
+// onCall runs inside CreateTransaction, exactly the window a concurrent winner
+// would land in, and the win goes through the same guarded UPDATE production
+// uses rather than a hand-written one.
+func TestCheckoutLosingTheStampRaceNamesTheStoredSessionNotItsOwn(t *testing.T) {
+	f := newCheckoutFixture(t)
+	ctx := context.Background()
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	// This caller's own session is deliberately NOT recorded: see above.
+	f.gateway.records = nil
+
+	f.gateway.onCall = func(req order.PaymentRequest) {
+		stored, err := f.repo.GetOrderByNumber(ctx, req.OrderNumber)
+		require.NoError(t, err)
+
+		tx, err := f.pool.Begin(ctx)
+		require.NoError(t, err)
+		stamped, err := f.repo.UpdatePaymentDetailsIfUnstarted(ctx, tx, stored.ID, order.PaymentDetails{
+			PaymentURL: "https://pay.example.com/winner",
+			Provider:   "fakegw",
+			QRString:   "WINNER-QR-PAYLOAD",
+			ExpiresAt:  time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second),
+		})
+		require.NoError(t, err)
+		require.True(t, stamped, "the concurrent checkout wins the stamp")
+		require.NoError(t, tx.Commit(ctx))
+
+		// The winner records its session, as the composition root would.
+		f.records.record(stored.ID, "txn-winner")
+	}
+
+	resp, err := f.svc.CheckoutOrder(ctx, orderNumber, formsFor(slotIDs))
+	require.NoError(t, err)
+
+	assert.Equal(t, "WINNER-QR-PAYLOAD", resp.QRString,
+		"the guest is served the code the order actually holds")
+	assert.Equal(t, "txn-winner", resp.ExtRefID,
+		"and the reference for THAT session, not the one this caller opened")
+	assert.NotEqual(t, "txn-"+orderNumber, resp.ExtRefID,
+		"answering from the loser's own session would name a payment nobody is making")
 }
