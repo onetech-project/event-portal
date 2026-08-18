@@ -1,14 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  apiBaseUrl,
-  apiOrigin,
-  qrisAcquirerCode,
-  qrisMerchantId,
-  qrisMerchantName,
-  qrisPrintVersion,
-  qrisTerminalLabel,
-} from "./env";
+import { apiBaseUrl, apiOrigin } from "./env";
 import {
   RUNTIME_CONFIG_KEY,
   runtimeConfig,
@@ -16,14 +8,19 @@ import {
   runtimeConfigScript,
 } from "./runtime-config";
 
-const RUNTIME_NAMES = [
-  "API_BASE_URL",
-  "QRIS_MERCHANT_NAME",
-  "QRIS_MERCHANT_ID",
-  "QRIS_TERMINAL_LABEL",
-  "QRIS_ACQUIRER_CODE",
-  "QRIS_PRINT_VERSION",
-];
+/**
+ * The runtime-over-build-time mechanism, exercised on `API_BASE_URL`.
+ *
+ * It used to be exercised on the five QRIS frame fields, which spec 019 retired
+ * along with the frame text they fed. They were only ever the vehicle: what
+ * matters is the resolution order — bare name, then `NEXT_PUBLIC_` name, then
+ * the default — because that is what lets one image be promoted from UAT to
+ * production without a rebuild. Deleting these cases with the fields would have
+ * been coverage loss dressed up as cleanup, so they were moved rather than
+ * dropped.
+ */
+
+const RUNTIME_NAMES = ["API_BASE_URL"];
 
 afterEach(() => {
   delete window[RUNTIME_CONFIG_KEY];
@@ -35,83 +32,49 @@ afterEach(() => {
 
 describe("runtimeConfigFromEnv", () => {
   it("prefers the runtime variable over the build-time one", () => {
+    // The build inlined UAT; this container was started pointing at production.
+    process.env.NEXT_PUBLIC_API_BASE_URL = "https://uat.example/api/v1";
     process.env.API_BASE_URL = "https://prod.example/api/v1";
-    process.env.NEXT_PUBLIC_QRIS_MERCHANT_NAME = "Stale Build Merchant";
-    process.env.QRIS_MERCHANT_NAME = "Pupuk Kalteng";
 
-    // vitest.setup.ts sets NEXT_PUBLIC_API_BASE_URL before every test.
-    expect(runtimeConfigFromEnv()).toMatchObject({
+    expect(runtimeConfigFromEnv()).toEqual({
       apiBaseUrl: "https://prod.example/api/v1",
-      qrisMerchantName: "Pupuk Kalteng",
     });
   });
 
   it("falls back to the build-time variable, so existing images keep working", () => {
-    process.env.NEXT_PUBLIC_QRIS_TERMINAL_LABEL = "659";
-
-    expect(runtimeConfigFromEnv()).toMatchObject({
+    // vitest.setup.ts sets NEXT_PUBLIC_API_BASE_URL before every test.
+    expect(runtimeConfigFromEnv()).toEqual({
       apiBaseUrl: "http://api.test/api/v1",
-      qrisTerminalLabel: "659",
     });
   });
 
   it("treats an empty runtime variable as unset rather than as a value", () => {
     process.env.API_BASE_URL = "";
-    process.env.QRIS_MERCHANT_ID = "";
-    process.env.NEXT_PUBLIC_QRIS_MERCHANT_ID = "936008580287697876";
 
-    expect(runtimeConfigFromEnv()).toMatchObject({
+    expect(runtimeConfigFromEnv()).toEqual({
       apiBaseUrl: "http://api.test/api/v1",
-      qrisMerchantId: "936008580287697876",
     });
   });
 
-  it("leaves an unconfigured QRIS field empty rather than inventing one", () => {
-    // An invented acquirer code on a payment surface is worse than no line.
-    expect(runtimeConfigFromEnv()).toMatchObject({
-      qrisMerchantName: "",
-      qrisMerchantId: "",
-      qrisTerminalLabel: "",
-      qrisAcquirerCode: "",
-      qrisPrintVersion: "",
+  it("falls back to the built-in default when nothing is configured at all", () => {
+    delete process.env.NEXT_PUBLIC_API_BASE_URL;
+
+    expect(runtimeConfigFromEnv()).toEqual({
+      apiBaseUrl: "http://localhost:8080/api/v1",
     });
   });
 });
 
 describe("runtimeConfig", () => {
   it("uses the injected config, which is what makes one image promotable", () => {
-    window[RUNTIME_CONFIG_KEY] = {
-      apiBaseUrl: "https://uat.example/api/v1",
-      qrisMerchantName: "Pupuk Kalteng",
-      qrisMerchantId: "936008580287697876",
-      qrisTerminalLabel: "659",
-      qrisAcquirerCode: "93600008",
-      qrisPrintVersion: "1.0-2024.11.13",
-    };
+    window[RUNTIME_CONFIG_KEY] = { apiBaseUrl: "https://uat.example/api/v1" };
 
     expect(apiBaseUrl()).toBe("https://uat.example/api/v1");
     expect(apiOrigin()).toBe("https://uat.example");
-    expect(qrisMerchantName()).toBe("Pupuk Kalteng");
-    expect(qrisMerchantId()).toBe("936008580287697876");
-    expect(qrisTerminalLabel()).toBe("659");
-    expect(qrisAcquirerCode()).toBe("93600008");
-    expect(qrisPrintVersion()).toBe("1.0-2024.11.13");
-  });
-
-  it("keeps an injected field empty instead of refilling it from the build", () => {
-    // The build inlined a merchant name; this deployment deliberately has none.
-    // Falling back here would print the previous environment's merchant on a
-    // frame the guest is told to trust.
-    process.env.NEXT_PUBLIC_QRIS_MERCHANT_NAME = "Stale Build Merchant";
-    window[RUNTIME_CONFIG_KEY] = {
-      apiBaseUrl: "https://uat.example/api/v1",
-      qrisMerchantName: "",
-    };
-
-    expect(qrisMerchantName()).toBe("");
   });
 
   it("ignores an injected config that carries no base URL", () => {
+    // apiBaseUrl doubles as the marker for "the server really did inject this".
     window[RUNTIME_CONFIG_KEY] = {};
 
     expect(runtimeConfig().apiBaseUrl).toBe("http://api.test/api/v1");
@@ -122,34 +85,34 @@ describe("runtimeConfig", () => {
 
     expect(apiBaseUrl()).toBe("https://uat.example/api/v1");
   });
+
+  // Not covered, and deliberately noted rather than quietly missing: an
+  // injected field that arrives EMPTY must still win over the environment, so
+  // that a deployment which unsets something does not silently inherit the
+  // build's value. With `apiBaseUrl` the only field, and that field doubling as
+  // the "was this injected at all" marker, the case has no observable form —
+  // an empty base URL is indistinguishable from no injection. The spread in
+  // runtimeConfig() that implements it is kept for the next field added, and
+  // this comment is here so whoever adds one restores the test with it.
 });
 
 describe("runtimeConfigScript", () => {
   it("assigns the whole config to the agreed global", () => {
     const script = runtimeConfigScript({
       apiBaseUrl: "https://prod.example/api/v1",
-      qrisMerchantName: "Pupuk Kalteng",
-      qrisMerchantId: "936008580287697876",
-      qrisTerminalLabel: "659",
-      qrisAcquirerCode: "93600008",
-      qrisPrintVersion: "1.0-2024.11.13",
     });
 
     expect(script).toBe(
       `window.${RUNTIME_CONFIG_KEY}=` +
-        '{"apiBaseUrl":"https://prod.example/api/v1",' +
-        '"qrisMerchantName":"Pupuk Kalteng",' +
-        '"qrisMerchantId":"936008580287697876",' +
-        '"qrisTerminalLabel":"659",' +
-        '"qrisAcquirerCode":"93600008",' +
-        '"qrisPrintVersion":"1.0-2024.11.13"};',
+        '{"apiBaseUrl":"https://prod.example/api/v1"};',
     );
   });
 
   it("escapes '<' so a value can never close the script element early", () => {
+    // The payload is interpolated into an inline <script>; a value carrying
+    // </script> would otherwise turn configuration into markup.
     const script = runtimeConfigScript({
-      ...runtimeConfigFromEnv(),
-      qrisMerchantName: "</script><script>alert(1)</script>",
+      apiBaseUrl: "</script><script>alert(1)</script>",
     });
 
     expect(script).not.toContain("</script>");

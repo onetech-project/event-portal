@@ -303,11 +303,20 @@ A grep that flagged those would train the next reader to ignore it.
 And confirm no migration was added: `git diff --stat backend/migrations/` must be empty, and
 `SCHEMA.md` unchanged.
 
-## Release step — verify the QRIS frame identity (FR-021b, repeat per merchant account)
+## ~~Release step — verify the QRIS frame identity~~ (retired by spec 019)
 
-**This is a release step, not a test**, and it must repeat whenever the merchant account changes. The
-payment instructions tell the guest to check the merchant name before entering a PIN, so a configured
-label that disagrees with the issued code defeats the very check it invites.
+> **This step no longer exists.** [Spec 019](../019-qris-frame-simplify/spec.md) removed the merchant
+> name, registration number and terminal label from the frame, which retires FR-021b: there is no
+> configured label left that could disagree with the issued code. Nothing has to be re-verified when
+> the merchant account changes.
+>
+> The decoding recipe below is kept because it is still the way to read what a code actually carries
+> — useful when diagnosing a gateway problem — but it is no longer a release gate, and the frontend
+> variables it names no longer exist.
+
+**Formerly**: a release step, not a test, repeated whenever the merchant account changed. The
+payment instructions told the guest to check the merchant name before entering a PIN, so a configured
+label that disagreed with the issued code defeated the very check it invited.
 
 Open one session and decode the payload:
 
@@ -318,17 +327,20 @@ curl -s -X POST "$PG_BASE_URL/v1/manjo/transaction/incoming" \
        "ac":{"cr":{"client_id":"'$PG_CLIENT_KEY'","client_secret":"'$PG_SERVER_KEY'"}}}'
 ```
 
-Read these tags out of `qr_r` and compare them to the frontend's configuration:
+What the tags carry — unchanged by spec 019, since the payload was never touched, only what the
+page printed beside it:
 
-| Payload tag | Meaning | Frontend variable | Value observed 2026-08-10 |
+| Payload tag | Meaning | Former frontend variable | Value observed 2026-08-10 |
 | --- | --- | --- | --- |
-| `59` | merchant name | `NEXT_PUBLIC_QRIS_MERCHANT_NAME` | `Pupuk Kalteng` |
-| `26`→`01` | NMID | `NEXT_PUBLIC_QRIS_MERCHANT_ID` | `936008580287697876` |
-| `62`→`07` | terminal label | `NEXT_PUBLIC_QRIS_TERMINAL_LABEL` | `659` |
+| `59` | merchant name | ~~`NEXT_PUBLIC_QRIS_MERCHANT_NAME`~~ retired | `Pupuk Kalteng` |
+| `26`→`01` | NMID | ~~`NEXT_PUBLIC_QRIS_MERCHANT_ID`~~ retired | `936008580287697876` |
+| `62`→`07` | terminal label | ~~`NEXT_PUBLIC_QRIS_TERMINAL_LABEL`~~ retired | `659` |
 | `01` | must be `12` | — | `12` (dynamic; the amount is fixed by the code) |
 
-This check has already earned its place: the values first configured from an older sample
-(`Ayoborong` / `…176412711` / `A01`) were wrong for this environment and were corrected here.
+The check earned its place while it existed: the values first configured from an older sample
+(`Ayoborong` / `…176412711` / `A01`) were wrong for this environment and were corrected here. The
+payer's own app still reads tag `59` out of the code, which is the identity that was always
+authoritative.
 
 ## Settled by observation — no longer open
 

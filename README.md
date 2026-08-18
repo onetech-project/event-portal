@@ -127,8 +127,6 @@ with only the variables changed.
 | Variable | Purpose |
 |---|---|
 | `API_BASE_URL` | Base URL of the Go API including `/api/v1`. Resolved by the *browser*, so it is the published address — never a compose service name. |
-| `QRIS_MERCHANT_NAME`, `QRIS_MERCHANT_ID`, `QRIS_TERMINAL_LABEL` | The QRIS frame identity shown around the payment code. |
-| `QRIS_ACQUIRER_CODE`, `QRIS_PRINT_VERSION` | The QRIS frame footer. |
 
 ```bash
 docker build -t ticketing-frontend:1.4.0 ./frontend       # once, no env baked in
@@ -136,13 +134,13 @@ docker run --env-file frontend/.env.uat  ticketing-frontend:1.4.0
 docker run --env-file frontend/.env.prod ticketing-frontend:1.4.0   # same image
 ```
 
-Only `API_BASE_URL` has a default in the image; a wrong one fails loudly. The QRIS
-fields are left unset on purpose and render nothing when empty, because the payment
-instructions tell the guest to verify the merchant name before entering a PIN — a
-default carried in the image would print one environment's merchant on another's
-payment frame, which is worse than a missing line. **Verify the QRIS identity
-against a code the environment's gateway genuinely issued.** That is a release
-step, not a test, and it repeats whenever the merchant account changes.
+`API_BASE_URL` has a default in the image; a wrong one fails loudly.
+
+The five `QRIS_*` values that used to sit in this table — merchant name,
+registration number, terminal label, acquirer code and printed-layout version —
+were retired with the frame text they fed (spec 019). Nothing reads them now, so a
+deployment still exporting them starts normally and ignores them, and the release
+step that had to re-verify them against a genuinely issued code is gone with them.
 
 Do not reintroduce any of these as `NEXT_PUBLIC_*` build args. Next inlines
 `NEXT_PUBLIC_*` into the JavaScript shipped to the browser, which welds the image

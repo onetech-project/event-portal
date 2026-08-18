@@ -13,11 +13,9 @@
  * there. One image, a different environment per deployment, no rebuild.
  *
  * Everything the browser needs to be configured with belongs here. A value left
- * on the `NEXT_PUBLIC_*` path is a value that quietly re-welds the image, and
- * the QRIS identity is the case that makes this concrete: those fields are
- * absent from the deployment env files, so an image built without them renders
- * an empty merchant name on the payment frame — the very field the payment
- * instructions tell a guest to verify before entering a PIN.
+ * on the `NEXT_PUBLIC_*` path is a value that quietly re-welds the image: it is
+ * inlined as a string constant at build time, so the artifact UAT signed off on
+ * can never be the artifact production runs.
  */
 
 /** The global the server writes and the browser reads. */
@@ -26,20 +24,18 @@ export const RUNTIME_CONFIG_KEY = "__TICKETING_RUNTIME_CONFIG__";
 export type RuntimeConfig = {
   /** Base URL of the Go API, including the `/api/v1` prefix. */
   apiBaseUrl: string;
-
-  /**
-   * The QRIS frame identity: the merchant name a guest is told to verify, the
-   * merchant registration number, and the terminal label. Empty renders nothing
-   * rather than a placeholder — see the note in [env.ts](./env.ts).
-   */
-  qrisMerchantName: string;
-  qrisMerchantId: string;
-  qrisTerminalLabel: string;
-
-  /** The QRIS frame footer: the issuing acquirer and the printed layout version. */
-  qrisAcquirerCode: string;
-  qrisPrintVersion: string;
 };
+
+/*
+ * One field, for now. The five QRIS frame values that used to live here were
+ * retired with the frame text they fed (spec 019). Nothing reads them any more,
+ * so a deployment still exporting `QRIS_MERCHANT_NAME` and friends is simply
+ * not consulted for them — no warning, no failure.
+ *
+ * The type is kept rather than collapsed to a bare string: the injection
+ * mechanism, the `<` escaping below, and the resolution order above are all
+ * still needed, and this is where the next per-environment value belongs.
+ */
 
 const FALLBACK_API_BASE_URL = "http://localhost:8080/api/v1";
 
@@ -70,13 +66,6 @@ export function runtimeConfigFromEnv(): RuntimeConfig {
 
   return {
     apiBaseUrl: read("API_BASE_URL", FALLBACK_API_BASE_URL),
-
-    qrisMerchantName: read("QRIS_MERCHANT_NAME"),
-    qrisMerchantId: read("QRIS_MERCHANT_ID"),
-    qrisTerminalLabel: read("QRIS_TERMINAL_LABEL"),
-
-    qrisAcquirerCode: read("QRIS_ACQUIRER_CODE"),
-    qrisPrintVersion: read("QRIS_PRINT_VERSION"),
   };
 }
 
