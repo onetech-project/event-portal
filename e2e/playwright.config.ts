@@ -207,8 +207,9 @@ export default defineConfig({
         },
         {
           name: "frontend",
-          // Dev mode on purpose: NEXT_PUBLIC_* is baked at build time, so a
-          // production build could not be pointed at this run's API port.
+          // Dev mode on purpose: a run rebuilds nothing and picks up a source
+          // edit immediately. The API URL is no longer a reason — it is read at
+          // start-up now, so a production build could equally be pointed here.
           command: "npm run dev -- --port 3100",
           cwd: frontendDir,
           url: env.frontendURL,
@@ -217,7 +218,7 @@ export default defineConfig({
           stdout: "pipe",
           stderr: "pipe",
           env: {
-            NEXT_PUBLIC_API_BASE_URL: env.apiURL,
+            API_BASE_URL: env.apiURL,
           },
         },
       ]

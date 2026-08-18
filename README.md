@@ -115,9 +115,40 @@ Both are multi-stage.
 - **Backend** — static binary built with `CGO_ENABLED=0`, shipped on
   `distroless/static` as a non-root user. No shell, no package manager, ~37 MB.
 - **Frontend** — Next.js `output: "standalone"`, so the runtime stage carries only
-  the traced `node_modules` and `server.js` and never runs an install. Note that
-  `NEXT_PUBLIC_API_BASE_URL` is inlined at *build* time, so changing it needs a
-  rebuild, not a restart.
+  the traced `node_modules` and `server.js` and never runs an install.
+
+The frontend image carries no environment in it. Every browser-visible setting is
+supplied at *run* time; the server reads them per request and writes them into the
+document, and the browser reads them back from there
+([`frontend/lib/runtime-config.ts`](frontend/lib/runtime-config.ts)). This is what
+makes promotion possible: the image that passed UAT is the image production runs,
+with only the variables changed.
+
+| Variable | Purpose |
+|---|---|
+| `API_BASE_URL` | Base URL of the Go API including `/api/v1`. Resolved by the *browser*, so it is the published address — never a compose service name. |
+| `QRIS_MERCHANT_NAME`, `QRIS_MERCHANT_ID`, `QRIS_TERMINAL_LABEL` | The QRIS frame identity shown around the payment code. |
+| `QRIS_ACQUIRER_CODE`, `QRIS_PRINT_VERSION` | The QRIS frame footer. |
+
+```bash
+docker build -t ticketing-frontend:1.4.0 ./frontend       # once, no env baked in
+docker run --env-file frontend/.env.uat  ticketing-frontend:1.4.0
+docker run --env-file frontend/.env.prod ticketing-frontend:1.4.0   # same image
+```
+
+Only `API_BASE_URL` has a default in the image; a wrong one fails loudly. The QRIS
+fields are left unset on purpose and render nothing when empty, because the payment
+instructions tell the guest to verify the merchant name before entering a PIN — a
+default carried in the image would print one environment's merchant on another's
+payment frame, which is worse than a missing line. **Verify the QRIS identity
+against a code the environment's gateway genuinely issued.** That is a release
+step, not a test, and it repeats whenever the merchant account changes.
+
+Do not reintroduce any of these as `NEXT_PUBLIC_*` build args. Next inlines
+`NEXT_PUBLIC_*` into the JavaScript shipped to the browser, which welds the image
+to one environment and turns every promotion back into a rebuild. Each name is
+still read with that prefix as a fallback so older images keep working, and nothing
+new should use it.
 
 ## Tests
 

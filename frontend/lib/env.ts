@@ -1,14 +1,15 @@
+import { runtimeConfig } from "./runtime-config";
+
 /**
  * Runtime configuration for the browser bundle.
  *
- * Read through a function rather than a module constant so tests (and any future
- * runtime-injected config) can change it without the value being frozen at import
- * time.
+ * Read through a function rather than a module constant so the value is never
+ * frozen at import time: it comes from the config the server injects per
+ * request ([lib/runtime-config.ts](./runtime-config.ts)), which is what lets one
+ * image be promoted from UAT to production unchanged.
  */
 export function apiBaseUrl(): string {
-  return (
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080/api/v1"
-  ).replace(/\/$/, "");
+  return runtimeConfig().apiBaseUrl.replace(/\/$/, "");
 }
 
 /**
@@ -38,17 +39,22 @@ export function apiOrigin(): string {
  * here that disagrees with the code defeats the very check it invites. Verifying
  * these against a genuinely issued code is a release step, not a test, and it
  * repeats whenever the merchant account changes.
+ *
+ * Supplied at run time like the API URL, so that check belongs to the
+ * deployment rather than to the build: a promoted image carries no merchant
+ * identity of its own, and an environment that forgets to set these shows an
+ * empty frame rather than the previous environment's merchant.
  */
 export function qrisMerchantName(): string {
-  return process.env.NEXT_PUBLIC_QRIS_MERCHANT_NAME ?? "";
+  return runtimeConfig().qrisMerchantName;
 }
 
 export function qrisMerchantId(): string {
-  return process.env.NEXT_PUBLIC_QRIS_MERCHANT_ID ?? "";
+  return runtimeConfig().qrisMerchantId;
 }
 
 export function qrisTerminalLabel(): string {
-  return process.env.NEXT_PUBLIC_QRIS_TERMINAL_LABEL ?? "";
+  return runtimeConfig().qrisTerminalLabel;
 }
 
 /**
@@ -61,9 +67,9 @@ export function qrisTerminalLabel(): string {
  * a missing line.
  */
 export function qrisAcquirerCode(): string {
-  return process.env.NEXT_PUBLIC_QRIS_ACQUIRER_CODE ?? "";
+  return runtimeConfig().qrisAcquirerCode;
 }
 
 export function qrisPrintVersion(): string {
-  return process.env.NEXT_PUBLIC_QRIS_PRINT_VERSION ?? "";
+  return runtimeConfig().qrisPrintVersion;
 }

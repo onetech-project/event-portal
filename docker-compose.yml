@@ -128,11 +128,24 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        # Baked into the client bundle at build time, so changing it needs a rebuild.
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080/api/v1}
     container_name: ticketing-frontend
     restart: unless-stopped
+    environment:
+      # All read at start-up, nothing baked into the bundle, so the image built
+      # for UAT is the image promoted to production — only these values change.
+      #
+      # The URL is the one the *browser* resolves, so it is the published API
+      # address, never the compose service name.
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8080/api/v1}
+
+      # The QRIS frame identity and footer. Unset renders an empty frame rather
+      # than a wrong merchant name, which is the safe direction for a field the
+      # guest is told to check before entering a PIN.
+      QRIS_MERCHANT_NAME: ${QRIS_MERCHANT_NAME:-}
+      QRIS_MERCHANT_ID: ${QRIS_MERCHANT_ID:-}
+      QRIS_TERMINAL_LABEL: ${QRIS_TERMINAL_LABEL:-}
+      QRIS_ACQUIRER_CODE: ${QRIS_ACQUIRER_CODE:-}
+      QRIS_PRINT_VERSION: ${QRIS_PRINT_VERSION:-}
     depends_on:
       - api
     ports:

@@ -128,7 +128,7 @@ The runner starts three processes itself and shuts them down afterwards:
 |---|---|---|
 | Manjo gateway stub | 8101 | [`support/gateway-stub.ts`](support/gateway-stub.ts) |
 | Go API | 8100 | `go run ./cmd/api`, so it always tests the working tree |
-| Next.js | 3100 | `next dev`, because `NEXT_PUBLIC_*` is baked at build time |
+| Next.js | 3100 | `next dev`, so a run picks up a source edit without a rebuild |
 
 Ports are offset from the normal dev ones (8080/3000) so a run never collides
 with a stack you already have open.

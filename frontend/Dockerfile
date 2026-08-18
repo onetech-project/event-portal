@@ -19,10 +19,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# NEXT_PUBLIC_* values are inlined into the client bundle at build time, so the
-# API URL has to be supplied here rather than at run time.
-ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8080/api/v1
-ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+# Deliberately no NEXT_PUBLIC_* build args. Inlining configuration here would
+# weld the image to one environment and make "promote the UAT image to prod"
+# impossible. The server reads it all at start-up instead and hands it to the
+# browser — see lib/runtime-config.ts.
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -37,6 +37,15 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+
+# What differs between deployments. Set these per environment; the same image
+# then serves UAT and production without a rebuild.
+#
+# Only the API URL gets a default, because a wrong one fails loudly. The QRIS
+# identity is left unset on purpose: an image that carried a default merchant
+# name would print it on the payment frame of any environment that forgot to
+# configure one, and the instructions tell the guest to trust that name.
+ENV API_BASE_URL=http://localhost:8080/api/v1
 
 # Run as an unprivileged user. node:alpine already provides uid 1000 "node".
 USER node

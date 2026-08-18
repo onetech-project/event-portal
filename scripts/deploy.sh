@@ -11,14 +11,18 @@
 #   ./scripts/deploy.sh --env uat --skip-deploy   # build and push only
 #   ./scripts/deploy.sh --help
 #
-# The frontend's NEXT_PUBLIC_* values come from frontend/.env.<env> and are
-# compiled into the bundle, so --env is required to build it.
+# The frontend image carries no environment in it: API_BASE_URL and the QRIS
+# identity are read when the container starts. So building it needs no --env,
+# and the deploy ships frontend/.env.<env> to the server instead — which is what
+# lets the image that passed uat be the image prod runs, with only that file
+# different.
 #
 # The tag built here is also the tag the server runs. The remote compose files
 # take their image from `${IMAGE_NAME}:${IMAGE_TAG}`, so the deploy rewrites
-# those two keys in the .env beside each one, exports them for the compose
-# invocation, and aborts if the service still resolves to a different image
-# than the one just pushed.
+# those two keys in the .env beside each one — together with the frontend's
+# runtime config — exports the image keys for the compose invocation, and aborts
+# if the service still resolves to a different image than the one just pushed,
+# or if it would never receive that config at all.
 #
 # The backend deploy also uploads backend/migrations/ to the server, since the
 # migrate container bind-mounts them instead of getting them from the image.
@@ -40,18 +44,24 @@ DO_MIGRATIONS=true
 PRUNE_MIGRATIONS=false
 CHECK_REMOTE_IMAGE=true
 WRITE_REMOTE_ENV=true
+WRITE_FRONTEND_ENV=true
+CHECK_REMOTE_ENV=true
 NO_CACHE="--no-cache"
 CLI_APP_ENV=""
 
 usage() {
-  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'
+  # The banner above, minus the shebang: every leading comment line up to the
+  # first line of code. Derived rather than a line range, so editing the banner
+  # cannot silently truncate the help.
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^#[[:space:]]?/, ""); print }' "${BASH_SOURCE[0]}"
   cat <<'EOF'
 
 Options:
   -e, --env <name>   Target environment: uat or prod. Selects frontend/.env.<name>,
-                     whose NEXT_PUBLIC_* values are baked into the frontend image
-                     at build time. Required whenever the frontend is built.
-                     Also becomes the default image tag.
+                     which is shipped to the server as the frontend's runtime
+                     config. Required whenever the frontend is deployed — the
+                     image itself is environment-agnostic, so nothing needs it
+                     at build time. Also becomes the default image tag.
   --frontend-only    Only handle jive-fe
   --backend-only     Only handle jive-be
   --skip-build       Don't build images (assumes they already exist locally)
@@ -66,6 +76,12 @@ Options:
   --no-remote-env    Don't rewrite IMAGE_NAME/IMAGE_TAG in the remote .env.
                      This run still deploys the configured tag, but a reboot
                      or a manual `docker compose up -d` reverts to the old one
+  --no-frontend-env  Don't write frontend/.env.<env> into the remote .env.
+                     The server then keeps whatever runtime config it already
+                     has, and it is not checked
+  --no-env-check     Deploy even if the frontend service never receives the
+                     runtime config (escape hatch; the app then falls back to
+                     its built-in defaults, which point at localhost)
   --cache            Allow Docker layer cache (default is --no-cache)
   -h, --help         Show this help
 EOF
@@ -86,6 +102,8 @@ while [[ $# -gt 0 ]]; do
     --prune-migrations) PRUNE_MIGRATIONS=true ;;
     --no-image-check)   CHECK_REMOTE_IMAGE=false ;;
     --no-remote-env)    WRITE_REMOTE_ENV=false ;;
+    --no-frontend-env)  WRITE_FRONTEND_ENV=false ;;
+    --no-env-check)     CHECK_REMOTE_ENV=false ;;
     --cache)         NO_CACHE="" ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -154,12 +172,15 @@ if [[ "${DO_DEPLOY}" == true ]]; then
   require SSH_HOST SSH_USER
 fi
 
-# Without an environment the frontend build would silently fall back to the
-# Dockerfile's localhost default and ship a bundle that points nowhere.
-if [[ "${DO_FRONTEND}" == true && "${DO_BUILD}" == true && -z "${APP_ENV}" ]]; then
-  echo "error: building the frontend requires --env uat or --env prod" >&2
-  echo "       NEXT_PUBLIC_* values are baked into the image at build time," >&2
-  echo "       so the target environment must be known before docker build." >&2
+# The build is environment-agnostic now, so only the deploy needs to know which
+# environment this is. Without it there is no frontend/.env.<env> to ship, and
+# the container would come up on the Dockerfile's localhost default.
+if [[ "${DO_FRONTEND}" == true && "${DO_DEPLOY}" == true \
+      && "${WRITE_FRONTEND_ENV}" == true && -z "${APP_ENV}" ]]; then
+  echo "error: deploying the frontend requires --env uat or --env prod" >&2
+  echo "       the image carries no configuration; frontend/.env.<env> is" >&2
+  echo "       shipped to the server as the runtime config it reads at start-up." >&2
+  echo "       Pass --no-frontend-env to leave the server's existing config alone." >&2
   exit 1
 fi
 
@@ -194,14 +215,17 @@ step "Configuration"
 [[ -n "${log_env:-}" ]] && info "config file : ${log_env}"
 info "environment : ${APP_ENV:-<none>}"
 info "registry    : ${REGISTRY_PATH}"
-if [[ "${DO_FRONTEND}" == true && "${DO_BUILD}" == true ]]; then
-  info "frontend env: ${FRONTEND_ENV_FILE}"
+if [[ "${DO_FRONTEND}" == true && "${DO_DEPLOY}" == true && "${WRITE_FRONTEND_ENV}" == true ]]; then
+  info "frontend env: ${FRONTEND_ENV_FILE} -> ${REMOTE_FE_DIR}/.env"
 fi
 [[ "${DO_FRONTEND}" == true ]] && info "frontend    : ${FE_IMAGE} (service ${FE_SERVICE})"
 [[ "${DO_BACKEND}"  == true ]] && info "backend     : ${BE_IMAGE} (service ${BE_SERVICE})"
 [[ "${DO_DEPLOY}"   == true ]] && info "server      : ${SSH_USER}@${SSH_HOST}:${SSH_PORT}"
 if [[ "${DO_DEPLOY}" == true && "${WRITE_REMOTE_ENV}" == true ]]; then
   info "remote .env : ${REMOTE_IMAGE_NAME_VAR}, ${REMOTE_IMAGE_TAG_VAR}"
+fi
+if [[ "${DO_DEPLOY}" == true && "${DO_FRONTEND}" == true && "${WRITE_FRONTEND_ENV}" == false ]]; then
+  info "remote .env : frontend runtime config left as-is (--no-frontend-env)"
 fi
 if [[ "${DO_DEPLOY}" == true && "${DO_BACKEND}" == true && "${DO_MIGRATIONS}" == true ]]; then
   info "migrations  : ${LOCAL_MIGRATIONS_DIR} -> ${REMOTE_MIGRATIONS_DIR}"
@@ -215,17 +239,20 @@ printf '%s' "${REGISTRY_PASSWORD}" \
 
 # --- build & push ------------------------------------------------------------
 
-BUILD_ARGS=()
+# The frontend's runtime configuration, as KEY=VALUE lines, ready to be merged
+# into the .env beside the remote compose file.
+FE_ENV_PAIRS=""
 
-# Turns an env file into --build-arg pairs.
+# Reads frontend/.env.<env> into FE_ENV_PAIRS.
 #
-# The values cannot simply be copied into the image: .dockerignore excludes
-# .env.* from the build context on purpose, and NEXT_PUBLIC_* is inlined into
-# the client bundle by `next build`. So the file is read here and handed to
-# docker build as arguments.
-load_build_args() {
-  local file="$1" dockerfile="$2"
-  BUILD_ARGS=()
+# The file cannot simply be copied into the image — .dockerignore excludes
+# .env.* from the build context on purpose, and an image that carried one
+# environment's configuration could not be promoted to another. It is parsed
+# here and shipped to the server instead, where the container reads it at
+# start-up (frontend/lib/runtime-config.ts).
+load_frontend_env() {
+  local file="$1"
+  FE_ENV_PAIRS=""
 
   [[ -f "${file}" ]] || die "no env file at ${file}"
 
@@ -248,19 +275,25 @@ load_build_args() {
       val="${val:1:${#val}-2}"
     fi
 
-    # A NEXT_PUBLIC_* value that has no matching ARG is not inlined by the
-    # build — the app would fall back to a default at run time with no error.
-    if ! grep -qE "^[[:space:]]*ARG[[:space:]]+${key}([[:space:]]|=|$)" "${dockerfile}"; then
-      printf '    \033[1;33mwarning:\033[0m %s is set in %s but no matching ARG in %s — it will NOT reach the build\n' \
-        "${key}" "$(basename "${file}")" "$(basename "${dockerfile}")" >&2
-      continue
+    # NEXT_PUBLIC_* is the build-time spelling. The app still reads it as a
+    # fallback, so this deploys and works — but Next inlined that value into the
+    # bundle of whatever image is running, and shipping it here cannot change
+    # it. Renaming the key is what makes the setting take effect at run time.
+    if [[ "${key}" == NEXT_PUBLIC_* ]]; then
+      printf '    \033[1;33mwarning:\033[0m %s in %s is the build-time spelling; rename it to %s so the server can change it without a rebuild\n' \
+        "${key}" "$(basename "${file}")" "${key#NEXT_PUBLIC_}" >&2
     fi
 
-    BUILD_ARGS+=(--build-arg "${key}=${val}")
+    FE_ENV_PAIRS+="${key}=${val}"$'\n'
     info "${key}=${val}"
   done < "${file}"
 
-  (( ${#BUILD_ARGS[@]} > 0 )) || die "${file} yielded no usable build args"
+  [[ -n "${FE_ENV_PAIRS}" ]] || die "${file} defines no configuration"
+
+  # A frontend that cannot reach the API is not worth deploying, and the failure
+  # would otherwise be a browser-side 404 rather than a deploy error.
+  grep -qE '^(NEXT_PUBLIC_)?API_BASE_URL=' <<<"${FE_ENV_PAIRS}" \
+    || die "${file} sets no API_BASE_URL"
 }
 
 build_and_push() {
@@ -283,12 +316,14 @@ build_and_push() {
 }
 
 if [[ "${DO_FRONTEND}" == true ]]; then
-  BUILD_ARGS=()
-  if [[ "${DO_BUILD}" == true ]]; then
-    step "Frontend build args from ${FRONTEND_ENV_FILE}"
-    load_build_args "${FRONTEND_ENV_FILE}" "${ROOT_DIR}/frontend/Dockerfile"
+  # No build args: the image is the same for every environment, which is the
+  # only reason a uat image can be promoted to prod without being rebuilt.
+  build_and_push "frontend" "${ROOT_DIR}/frontend" "${FE_IMAGE}"
+
+  if [[ "${DO_DEPLOY}" == true && "${WRITE_FRONTEND_ENV}" == true ]]; then
+    step "Frontend runtime config from ${FRONTEND_ENV_FILE}"
+    load_frontend_env "${FRONTEND_ENV_FILE}"
   fi
-  build_and_push "frontend" "${ROOT_DIR}/frontend" "${FE_IMAGE}" ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}
 fi
 
 if [[ "${DO_BACKEND}" == true ]]; then
@@ -352,10 +387,15 @@ fi
 # .env write makes a reboot or a hand-run `docker compose up -d` come back on
 # the same tag instead of whatever was pinned there before.
 #
+# The frontend's runtime config rides in that same .env, by the same rule and
+# for the same reason: the image has none of it, so the file beside the compose
+# file is the whole of the environment's configuration, and it has to survive a
+# restart as much as the tag does.
+#
 # Note the values cannot be exported once for the whole session: the frontend
 # and backend projects use the same two variable names with different values.
 remote_deploy_block() {
-  local dir="$1" service="$2" image_name="$3" tag="$4" image="$5"
+  local dir="$1" service="$2" image_name="$3" tag="$4" image="$5" config="${6:-}"
 
   # Values first, in their own unquoted heredoc; the logic below is quoted so
   # that nothing in it is expanded here instead of on the server.
@@ -369,7 +409,15 @@ name_var='${REMOTE_IMAGE_NAME_VAR}'
 tag_var='${REMOTE_IMAGE_TAG_VAR}'
 write_env='${WRITE_REMOTE_ENV}'
 check='${CHECK_REMOTE_IMAGE}'
+check_config='${CHECK_REMOTE_ENV}'
 EOF
+
+  # The runtime config, held in a variable rather than written out: nothing
+  # touches the server's filesystem until the image check below has passed.
+  # The heredoc is quoted, so no value is expanded by either shell.
+  printf 'cfg=$(cat <<%s\n' "'JIVE_ENV_EOF'"
+  printf '%s' "${config}"
+  printf 'JIVE_ENV_EOF\n)\n'
 
   cat <<'EOF'
 echo "--> $PWD"
@@ -392,16 +440,75 @@ if [ "$check" = true ]; then
   fi
 fi
 
-if [ "$write_env" = true ]; then
+# Rewrites each KEY= line in place and appends the ones that were not there,
+# leaving every other line — comments, blanks, keys this deploy does not own —
+# exactly as it found them.
+merge_env() {
   touch .env
-  awk -v nk="$name_var" -v nv="$img_name" -v tk="$tag_var" -v tv="$img_tag" '
-    $0 ~ "^[[:space:]]*"nk"=" { if (!n++) print nk "=" nv; next }
-    $0 ~ "^[[:space:]]*"tk"=" { if (!t++) print tk "=" tv; next }
-    { print }
-    END { if (!n) print nk "=" nv; if (!t) print tk "=" tv }
+  awk -v pairs="$1" '
+    BEGIN {
+      while ((getline line < pairs) > 0) {
+        if (line !~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+        k = substr(line, 1, index(line, "=") - 1)
+        if (!(k in val)) order[++n] = k
+        val[k] = line
+      }
+    }
+    {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/^export[[:space:]]+/, "", key)
+      if (key ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+        k = substr(key, 1, index(key, "=") - 1)
+        if (k in val) {
+          if (!(k in done)) { print val[k]; done[k] = 1 }
+          next
+        }
+      }
+      print
+    }
+    END { for (i = 1; i <= n; i++) if (!(order[i] in done)) print val[order[i]] }
   ' .env > .env.deploy-tmp && mv .env.deploy-tmp .env
-  echo "    .env: $name_var=$img_name"
-  echo "    .env: $tag_var=$img_tag"
+}
+
+: > .env.deploy-pairs
+if [ "$write_env" = true ]; then
+  printf '%s=%s\n%s=%s\n' "$name_var" "$img_name" "$tag_var" "$img_tag" >> .env.deploy-pairs
+fi
+if [ -n "$cfg" ]; then
+  printf '%s\n' "$cfg" >> .env.deploy-pairs
+fi
+
+if [ -s .env.deploy-pairs ]; then
+  merge_env .env.deploy-pairs
+  while IFS= read -r pair; do
+    [ -n "$pair" ] && echo "    .env: $pair"
+  done < .env.deploy-pairs
+fi
+rm -f .env.deploy-pairs
+
+# Writing the file is not the same as the container reading it: compose uses
+# .env for interpolation, and only passes a name into the container if the
+# service asks for it. A silent miss here would leave the app on its built-in
+# localhost default, which fails in the browser rather than in this deploy.
+if [ -n "$cfg" ] && [ "$check_config" = true ]; then
+  resolved_env="$(docker compose config "$svc" 2>/dev/null || true)"
+  missing="$(printf '%s\n' "$cfg" | while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    key="${pair%%=*}"
+    printf '%s\n' "$resolved_env" | grep -qE "^[[:space:]]*$key:" || printf '%s ' "$key"
+  done)"
+  if [ -n "$missing" ]; then
+    echo "error: service $svc in $PWD never receives: $missing" >&2
+    echo "       the deploy wrote them to $PWD/.env, but the compose file does" >&2
+    echo "       not pass them into the container. Add to the $svc service:" >&2
+    echo "         env_file:" >&2
+    echo "           - .env" >&2
+    echo "       or map each name under environment:. Re-run with --no-env-check" >&2
+    echo "       to deploy anyway — the app would then fall back to its built-in" >&2
+    echo "       defaults, which point at localhost." >&2
+    exit 1
+  fi
 fi
 
 docker compose pull "$svc"
@@ -425,7 +532,8 @@ if [[ "${DO_DEPLOY}" == true ]]; then
   fi
   if [[ "${DO_FRONTEND}" == true ]]; then
     remote_script+=$'\n'"$(remote_deploy_block \
-      "${REMOTE_FE_DIR}" "${FE_SERVICE}" "${REGISTRY_PATH}/${FE_IMAGE_NAME}" "${TAG_FE}" "${FE_IMAGE}")"
+      "${REMOTE_FE_DIR}" "${FE_SERVICE}" "${REGISTRY_PATH}/${FE_IMAGE_NAME}" "${TAG_FE}" "${FE_IMAGE}" \
+      "${FE_ENV_PAIRS}")"
   fi
 
   # REGISTRY_PASSWORD is passed through the remote env rather than interpolated
