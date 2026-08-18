@@ -193,6 +193,7 @@ prerequisites above.
 | `E2E_DATABASE_URL` | `postgres://ticketing:ticketing@localhost:5433/ticketing?sslmode=disable` |
 | `E2E_REDIS_URL` | `redis://localhost:6380/0` |
 | `E2E_CACHE_ENABLED` | `true` — set `false` to run the suite against a cache-free API |
+| `E2E_RATE_LIMIT_ENABLED` | `true` — set `false` to run the suite against an API with all request throttling off (Constitution Principle IX). Scenarios whose whole subject is a throttle refusal skip themselves in that run. |
 | `E2E_MANAGE_SERVERS` | `true` — set `false` to point at servers you started yourself |
 | `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD` | `uat@example.com` / `uat-password-2026` |
 

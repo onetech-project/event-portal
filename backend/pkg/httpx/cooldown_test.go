@@ -96,3 +96,35 @@ func mustTake(t *testing.T, c *httpx.Cooldown, key string) bool {
 	allowed, _ := c.Take(key)
 	return allowed
 }
+
+// --- Disabled cooldown (spec 018 FR-010, FR-012) -----------------------------
+
+// With the resend throttle off, every take succeeds and none reports a wait. The
+// zero is deliberate: the confirmation screen applies its own short debounce to
+// it, which is a send-guard against a held key rather than this limit.
+func TestDisabledCooldownAllowsEveryTakeAndNamesNoWait(t *testing.T) {
+	c := httpx.NewDisabledCooldown()
+
+	for i := range 100 {
+		allowed, retryAfter := c.Take("ORD-1")
+		require.True(t, allowed, "take %d must be allowed while the cooldown is off", i+1)
+		assert.Zero(t, retryAfter, "a disabled cooldown imposes no wait")
+	}
+}
+
+// FR-011: nothing accumulates while the throttle is off, so nothing can be
+// charged against a caller when it comes back on. A disabled cooldown keeps no
+// visitor state at all, which is what makes this true by construction rather
+// than by an explicit reset step.
+func TestDisabledCooldownAccumulatesNothing(t *testing.T) {
+	off := httpx.NewDisabledCooldown()
+	for range 50 {
+		require.True(t, mustTake(t, off, "ORD-1"))
+	}
+
+	// A restart with throttling on builds a fresh cooldown; the earlier traffic
+	// left nothing behind that could count against this key.
+	on := httpx.NewCooldown(resendRate, resendBurst, resendIdleFor)
+	assert.True(t, mustTake(t, on, "ORD-1"),
+		"traffic sent while the throttle was off must not be charged afterwards")
+}

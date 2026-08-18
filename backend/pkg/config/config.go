@@ -80,12 +80,6 @@ type Config struct {
 	// must never fail a delivery (spec 016 research R-005).
 	BrandLogoPath string
 
-	// TicketLookupRateLimit is the sustained per-IP request rate allowed on the
-	// public GET /tickets/:code endpoint (spec FR-020); TicketLookupBurst is the
-	// short-term allowance above it.
-	TicketLookupRateLimit float64
-	TicketLookupBurst     int
-
 	// Observability.
 	ServiceName    string
 	ServiceVersion string
@@ -112,6 +106,22 @@ type Config struct {
 	// an invalidation that was somehow missed, not the freshness mechanism —
 	// correctness comes from invalidating on commit.
 	CacheTTL time.Duration
+
+	// Throttle holds every request-throttling threshold and switch
+	// (Constitution Principle IX). Defaults reproduce the values that were
+	// compiled in before spec 018, so a deployment configuring nothing is
+	// unchanged.
+	Throttle ThrottleConfig
+
+	// TrustedProxyCIDRs decides where the client address comes from. Empty —
+	// the default — means it is taken from the connection and X-Forwarded-For is
+	// ignored, because a per-client throttle keyed on a header any caller can set
+	// is not a throttle. A deployment genuinely behind a proxy names it here.
+	TrustedProxyCIDRs []string
+
+	// DeprecatedAliases lists legacy setting names still in use, so startup can
+	// report them rather than silently honouring a name nobody documents.
+	DeprecatedAliases []DeprecatedAlias
 }
 
 // CacheActive reports whether the cache should be built at all. Both the empty
@@ -120,7 +130,8 @@ type Config struct {
 func (c *Config) CacheActive() bool { return c.CacheEnabled && c.RedisURL != "" }
 
 type loader struct {
-	errs []error
+	errs    []error
+	aliases []DeprecatedAlias
 }
 
 func (l *loader) required(key string) string {
@@ -230,9 +241,6 @@ func Load() (*Config, error) {
 		BrandCopyright:    l.str("BRAND_COPYRIGHT", "© 2026 manjo"),
 		BrandLogoPath:     l.str("BRAND_LOGO_PATH", ""),
 
-		TicketLookupRateLimit: l.float("TICKET_LOOKUP_RATE_LIMIT", 5),
-		TicketLookupBurst:     l.integer("TICKET_LOOKUP_BURST", 10),
-
 		ServiceName:    l.str("OTEL_SERVICE_NAME", "ticketing-api"),
 		ServiceVersion: l.str("SERVICE_VERSION", "dev"),
 		Environment:    l.str("ENVIRONMENT", "local"),
@@ -245,7 +253,17 @@ func Load() (*Config, error) {
 		RedisURL:     l.str("REDIS_URL", "redis://localhost:6379/0"),
 		CacheEnabled: l.boolean("CACHE_ENABLED", true),
 		CacheTTL:     l.duration("CACHE_TTL", 10*time.Minute),
+
+		Throttle:          l.throttle(),
+		TrustedProxyCIDRs: l.cidrs("TRUSTED_PROXY_CIDRS"),
 	}
+
+	cfg.DeprecatedAliases = l.aliases
+
+	// Appends rather than returns, so a bad throttle value is reported alongside
+	// every other configuration problem in one pass — the contract Load() already
+	// keeps for everything else.
+	validateThrottle(cfg.Throttle, &l.errs)
 
 	// Checked after loading rather than inside the duration helper: a bad value
 	// must be reported alongside every other configuration problem, not instead of

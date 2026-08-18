@@ -114,8 +114,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "8080", cfg.AppPort)
 	assert.Equal(t, 12*time.Hour, cfg.JWTTTL)
 	// spec FR-020: the public ticket lookup is rate limited per client IP.
-	assert.Positive(t, cfg.TicketLookupRateLimit)
-	assert.GreaterOrEqual(t, float64(cfg.TicketLookupBurst), cfg.TicketLookupRateLimit)
+	assert.Positive(t, cfg.Throttle.TicketLookup.Rate)
+	assert.GreaterOrEqual(t, float64(cfg.Throttle.TicketLookup.Burst), cfg.Throttle.TicketLookup.Rate)
 	assert.Equal(t, 30*time.Second, cfg.PaymentSweepInterval)
 	assert.Equal(t, time.Hour, cfg.BookingHold)
 	// No longer the deadline — the fallback basis and the expectation (FR-009b/d).
@@ -189,8 +189,10 @@ func TestLoadOverridesDefaultsFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "9090", cfg.AppPort)
 	assert.Equal(t, 30*time.Minute, cfg.JWTTTL)
-	assert.InDelta(t, 2.0, cfg.TicketLookupRateLimit, 0.001)
-	assert.Equal(t, 7, cfg.TicketLookupBurst)
+	// Set here under the LEGACY names, so this also pins that a deployment
+	// already using them keeps working (spec 018 FR-006a).
+	assert.InDelta(t, 2.0, cfg.Throttle.TicketLookup.Rate, 0.001)
+	assert.Equal(t, 7, cfg.Throttle.TicketLookup.Burst)
 	assert.Equal(t, 2525, cfg.SMTPPort)
 	assert.Equal(t, 10*time.Second, cfg.PaymentSweepInterval)
 	assert.Equal(t, "server-key", cfg.PGServerKey)

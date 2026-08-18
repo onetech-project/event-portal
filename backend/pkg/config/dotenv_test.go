@@ -83,5 +83,5 @@ func TestLoadDotEnvFeedsLoad(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://u:p@localhost:5433/db", cfg.DatabaseURL)
-	assert.InDelta(t, 3.0, cfg.TicketLookupRateLimit, 0.001)
+	assert.InDelta(t, 3.0, cfg.Throttle.TicketLookup.Rate, 0.001)
 }

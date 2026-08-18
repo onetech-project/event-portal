@@ -85,6 +85,8 @@ Microservices (deployment), Kafka/RabbitMQ, Kubernetes, CQRS, Event Sourcing, Lo
 
 Redis is in scope **only** as the single-node read cache described in §1.2 (Constitution Principle VII). Redis as a primary or sole store, and Redis-backed queues, sessions, distributed locks, and pub/sub, remain out of scope.
 
+Request throttling does **not** extend that scope. Throttle state stays in each instance's process memory and is discarded on restart, so every instance limits independently (Constitution Principle IX). Shared or distributed rate limiting is out of scope for the MVP; the thresholds themselves are deployment configuration and can be retuned without a rebuild.
+
 **Packages (bundles) are in scope and are not "Promotions".** A promotion is a rule that alters the price of a purchase; a package is a sellable product with its own identity, price, and sales window that draws down the quota of the ticket types it contains. The out-of-scope ban on promotions still stands: there are no discount codes, percentage-off rules, or price-modifying engines.
 
 ---

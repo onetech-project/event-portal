@@ -1,5 +1,63 @@
 <!--
 Sync Impact Report
+Version change: 4.1.0 -> 4.2.0 (MINOR - a new principle is added. No existing principle
+is removed or redefined, matching the 3.1.0 -> 3.2.0 precedent for adding a principle.
+Note honestly that current code does NOT yet satisfy the new principle's client-identity
+rule - see Follow-up TODOs. The amendment states the standard; spec 018 brings the code
+to it.)
+
+Trigger: spec 018 (Configurable Rate Limits). Six throttles were compiled into the API as
+constants, so retuning any of them required a rebuild and a redeploy. A 9-agent review of
+that spec also established that no governance document bound throttling at all: the spec
+had claimed this project "already demands" of throttling what Principle VII demands of the
+cache, and that claim was not granted by any binding text. This amendment makes it true
+rather than deleting the claim.
+
+Added principles:
+  - IX. Request Throttling as Configurable, Killable Protection (NON-NEGOTIABLE) -
+    deliberately mirrors Principle VII's shape, because a throttle and a cache are the
+    same kind of thing constitutionally: an operator-controlled subsystem that must be
+    removable without changing what the system computes. Eight MUST rules covering
+    configurability, the two-granularity kill switch, substitution-not-skipping, the
+    unforgeable-client-identity floor, startup validation, disposable per-instance state,
+    never being authoritative for correctness, and documenting the blast radius.
+
+Modified sections:
+  - Principle VIII, acceptance-gate bullets - a "Both throttling modes" bullet added
+    alongside "Both cache modes", naming E2E_RATE_LIMIT_ENABLED. It also carries an
+    isolation requirement the cache bullet needs no analogue of: throttle state is keyed
+    per client and process-local, so one scenario draining an allowance would otherwise
+    refuse an unrelated one.
+
+Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - ARCHITECTURE.md - UPDATED WITH THIS CHANGE: a Controls entry for throttling mirroring
+    the cache's, and SS3.7's flat assertion that the ticket lookup "is rate limited per IP"
+    corrected - it is now configurable and disableable, and the per-IP keying itself is
+    only true once Principle IX's client-identity rule is satisfied.
+  - PRD.md - UPDATED WITH THIS CHANGE: SS1.6 records that throttle state stays in process
+    memory and does not extend Redis's admitted scope.
+  - SCHEMA.md - no impact, verified rather than assumed: spec 018 adds no column, table,
+    or migration. Throttle state is process memory and is never persisted, which is itself
+    one of Principle IX's rules.
+
+Templates requiring follow-up: none. The plan template's Constitution Check reads the
+constitution at runtime and already carries the Principle VIII rows this exercises.
+
+Follow-up TODOs:
+  - Principle IX's client-identity rule is NOT satisfied by current code, and this is
+    stated rather than glossed: no first-party file sets echo's IPExtractor, so RealIP()
+    returns a caller-supplied X-Forwarded-For and five throttled surfaces are bypassable
+    with one header. ARCHITECTURE.md and api/openapi.yml have both described that lookup
+    limit as enforced. Spec 018 (FR-002a, FR-002b, SC-009) closes it, and its task T003
+    requires the regression be seen failing first. Until that lands, the repository is
+    knowingly non-compliant with one bullet of a NON-NEGOTIABLE principle - which is the
+    correct place to record it, rather than softening the principle to fit the code.
+-->
+
+<!--
+Sync Impact Report
 Version change: 4.0.0 -> 4.1.0 (MINOR - materially expanded guidance. No principle is
 removed or redefined and nothing compliant under 4.0.0 becomes non-compliant: the email
 is still exactly one, to exactly the same address, still carrying every ticket in the
@@ -647,6 +705,12 @@ arrives as a correctly signed webhook. Every rule below is a MUST.
 * **Both cache modes.** The suite MUST pass with the Principle VII cache enabled and
   disabled (`E2E_CACHE_ENABLED`), which is how that principle's kill-switch requirement
   is actually verified rather than merely asserted.
+* **Both throttling modes.** The suite MUST pass with Principle IX's request throttling
+  enabled and disabled (`E2E_RATE_LIMIT_ENABLED`), for the same reason. Scenarios whose
+  entire subject is a throttle refusal are expected to skip themselves in the disabled
+  run; every other scenario MUST run in both. Because throttle state is per-client and
+  process-local, the suite MUST also isolate throttle scenarios so that draining one
+  scenario's allowance cannot refuse an unrelated one.
 * **Not a substitute for the lower tiers.** Go unit and database-backed tests and the
   frontend Vitest suite remain required where they already apply; `e2e/` proves the
   assembled system, not each part. Correspondingly, a defect reachable only through the
@@ -659,6 +723,59 @@ parts. This suite is the only artifact that watches money move through the whole
 so its authority has to be structural: a test suite that is optional in practice
 degrades to red and then to deleted, and the day it does, nothing is checking the
 purchase flow at all.
+
+### IX. Request Throttling as Configurable, Killable Protection (NON-NEGOTIABLE)
+Every request throttle the API enforces — request-rate limiters, per-key cooldowns, and
+concurrency caps alike — is subject to all of the following. Every rule is a MUST.
+
+* **Thresholds are deployment configuration, never a build artifact.** No throttle
+  threshold may exist only as a compiled-in constant. Every threshold MUST be settable
+  from the deployment's environment, and every setting MUST default to the value the
+  system shipped with, so a deployment that configures nothing behaves exactly as it did
+  before the setting existed. Configuration is read at startup; changing it requires a
+  restart, never a rebuild.
+* **Killable by configuration, at two granularities.** A single master switch MUST
+  disable all throttling. Each throttled surface MUST additionally carry its own switch,
+  so one can be relieved without stripping the rest. The precedence between them MUST be
+  defined in exactly one place: master off disables everything regardless of a surface's
+  own switch; master on defers to it; unset means enabled.
+* **Disabled means substituted, not skipped.** A disabled throttle MUST be replaced by a
+  pass-through that allocates no throttle state — the same discharge Principle VII
+  requires of the cache, where `CACHE_ENABLED=false` substitutes `cache.NoOp{}`. Routing
+  MUST be otherwise unchanged: an unmatched path MUST answer identically in both modes.
+* **A per-client throttle MUST key on an identity the client cannot forge.** The client
+  address MUST be derived from the connection by default. A caller-supplied forwarding
+  header MAY be honoured only from proxy addresses named in configuration. A throttle
+  keyed on a value any caller can set is not a throttle, and MUST NOT be described as one
+  in any specification, contract, or architecture document.
+* **Invalid configuration refuses startup.** A malformed, negative, or lockout-producing
+  value MUST be rejected at startup, naming the offending setting, alongside every other
+  configuration problem in one pass rather than one per restart. A rejection MUST name
+  the value that would make the configuration valid where one exists, so an operator is
+  told what to set rather than only that they are wrong.
+* **Throttle state is disposable and per-instance.** It MUST live in process memory,
+  MUST NOT be persisted, and MUST NOT be moved to a shared store — PRD.md §1.6 keeps
+  Redis to the Principle VII read cache alone. Each instance limiting independently is
+  the accepted trade-off, and a restart discarding every allowance is correct behaviour,
+  not a defect.
+* **Never authoritative for correctness.** A throttle decides only whether a request is
+  *admitted*. It MUST NOT gate, authorize, or short-circuit a sale, and MUST NOT be
+  relied on as the enforcement of any inventory, payment, or authorization rule —
+  Principle IV owns those. Disabling every throttle MUST leave the system correct, and
+  cost nothing but exposure to load.
+* **The blast radius of disabling MUST be documented where the switch is.** Several
+  throttled surfaces are unauthenticated and expensive: booking holds quota, checkout
+  opens a paid gateway session, the guest resend sends real mail, and the live-status cap
+  is the only bound on held-open connections and their periodic database reads. The
+  configuration documentation MUST state what each switch leaves exposed.
+
+Rationale: throttles are the only protection standing in front of unauthenticated
+surfaces that cost money, quota, and mail, and they are the protection most likely to be
+wrong in production — too tight refuses real buyers during exactly the launch spike the
+product exists for, too loose invites abuse. A threshold that can only be changed by
+rebuilding is a threshold nobody will change in time. The constraints above exist so that
+tuning is fast and safe, so that "off" is a real state rather than a claim, and so that a
+limit which cannot actually be enforced is never documented as though it can.
 
 ## Technology Stack Requirements
 
@@ -793,4 +910,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 4.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-12
+**Version**: 4.2.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-18
