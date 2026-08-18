@@ -6,9 +6,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,40 +37,74 @@ import (
 const (
 	startupTimeout  = 15 * time.Second
 	shutdownTimeout = 30 * time.Second
-	// rateLimitWindow is how long an idle per-IP bucket is retained.
-	rateLimitWindow = 3 * time.Minute
-
-	// Checkout costs an outbound gateway call per press, so it is limited far more
-	// tightly than a read: roughly one every five seconds, with a small burst for
-	// an impatient double-tap.
-	gatewayCallRate  = 0.2
-	gatewayCallBurst = 3
-
-	// The guest resend sends real mail without any authentication, so it is
-	// limited per order — one a minute, no burst. Keying on the order rather than
-	// the caller is the point: the inbox being protected is the buyer's, and a
-	// per-IP limit would let a few hosts flood one buyer between them. The window
-	// is also what the confirmation screen counts down from, so changing it
-	// changes what a guest is told, not only what they are allowed.
-	guestResendRate  = 1.0 / 60.0
-	guestResendBurst = 1
-
-	// Booking creates rows and holds quota for an hour without payment, so it is
-	// limited per IP: roughly one booking every three seconds with a small burst
-	// for a genuine group organizing itself, while a scripted hoarder starves.
-	bookRate  = 0.33
-	bookBurst = 5
-
-	// The availability check reads and creates nothing, so it is limited far
-	// more loosely than booking. It deliberately does NOT share bookRate: the
-	// intended flow is check-then-book, plus another check every time a refused
-	// guest adjusts their selection and tries again, so charging those to the
-	// booking budget would throttle a guest out of the recovery path the check
-	// exists to offer. Still limited, because it is unauthenticated and hits the
-	// database on every call.
-	availabilityRate  = 1.0
-	availabilityBurst = 10
 )
+
+// rateLimit returns the per-IP limiter for a surface, or a pass-through when it
+// is switched off.
+//
+// The group is constructed either way by the caller — see httpx.PassThrough for
+// why a disabled surface must not simply lose its group.
+func rateLimit(active bool, requestsPerSecond float64, burst int, idleFor time.Duration) echo.MiddlewareFunc {
+	if !active {
+		return httpx.PassThrough()
+	}
+	return httpx.RateLimitPerIP(requestsPerSecond, burst, idleFor)
+}
+
+// reportThrottleConfig writes the throttle configuration actually in force to
+// the log at startup, so a deployment that believes it changed a limit can
+// confirm that it did (spec 018 FR-017).
+//
+// Deliberately NOT exposed on /healthz or any other endpoint: that route is
+// public and unauthenticated, and publishing exact thresholds converts a limit
+// into a documented allowance for anyone who asks.
+func reportThrottleConfig(log *logger.Logger, cfg *config.Config) {
+	t := cfg.Throttle
+
+	if !t.Enabled {
+		log.Warn("request throttling is DISABLED for every surface; " +
+			"booking holds quota, checkout opens paid gateway sessions, the guest resend " +
+			"sends real mail, and held-open status connections are unbounded — all unauthenticated")
+		return
+	}
+
+	surface := func(p config.ThrottlePolicy) string {
+		if !p.Active(t.Enabled) {
+			return "off"
+		}
+		return fmt.Sprintf("%g/s burst %d", p.Rate, p.Burst)
+	}
+	resend := "off"
+	if t.Resend.Active(t.Enabled) {
+		resend = fmt.Sprintf("1 per %s burst %d", t.Resend.Window, t.Resend.Burst)
+	}
+	stream := "off"
+	if t.StatusStream.Active(t.Enabled) {
+		stream = fmt.Sprintf("%d concurrent", t.StatusStream.MaxConns)
+	}
+
+	log.Info("request throttling configured",
+		"idle_retention", t.IdleTTL.String(),
+		"book", surface(t.Book),
+		"availability", surface(t.Availability),
+		"ticket_lookup", surface(t.TicketLookup),
+		"checkout", surface(t.Checkout),
+		"resend", resend,
+		"status_stream", stream,
+		"client_ip", clientIPSource(cfg))
+
+	for _, a := range cfg.DeprecatedAliases {
+		log.Warn("deprecated configuration name in use; it still works but will not forever",
+			"using", a.Old, "prefer", a.New)
+	}
+}
+
+func clientIPSource(cfg *config.Config) string {
+	if len(cfg.TrustedProxyCIDRs) == 0 {
+		return "connection (X-Forwarded-For ignored)"
+	}
+	return "X-Forwarded-For from " + strings.Join(cfg.TrustedProxyCIDRs, ",")
+}
 
 func main() {
 	log := logger.New(logger.ParseLevel(os.Getenv("LOG_LEVEL")))
@@ -284,6 +321,30 @@ func run(log *logger.Logger) error {
 	e.HidePort = true
 	e.HTTPErrorHandler = httpx.ErrorHandler(log)
 
+	// Where the client address comes from, and therefore what every per-client
+	// throttle is keyed on (Constitution Principle IX).
+	//
+	// Echo's default, with no extractor installed, returns the first
+	// caller-supplied X-Forwarded-For value — so a client rotating that header
+	// buys a fresh bucket per request and every per-IP limit below is
+	// decorative. Taking the address from the connection is the only safe
+	// default; a deployment genuinely behind a proxy names it in
+	// TRUSTED_PROXY_CIDRS and gets header-based identification back.
+	if len(cfg.TrustedProxyCIDRs) == 0 {
+		e.IPExtractor = echo.ExtractIPDirect()
+	} else {
+		trust := make([]echo.TrustOption, 0, len(cfg.TrustedProxyCIDRs))
+		for _, cidr := range cfg.TrustedProxyCIDRs {
+			_, netw, err := net.ParseCIDR(cidr)
+			if err != nil {
+				return err // config validation already rejected this; belt and braces
+			}
+			trust = append(trust, echo.TrustIPRange(netw))
+		}
+		e.IPExtractor = echo.ExtractIPFromXFFHeader(trust...)
+		log.Info("trusting X-Forwarded-For from configured proxies", "cidrs", cfg.TrustedProxyCIDRs)
+	}
+
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
 
@@ -311,7 +372,9 @@ func run(log *logger.Logger) error {
 	event.NewHandler(eventSvc).RegisterPublicRoutes(api)
 	orderHandler := order.NewHandler(orderSvc, publicOrderSvc, log)
 	orderHandler.RegisterPublicRoutes(api)
-	paymentHandler := payment.NewHandler(paymentSvc, log)
+	paymentHandler := payment.NewHandler(paymentSvc, log).WithStreamCap(
+		cfg.Throttle.StatusStream.Active(cfg.Throttle.Enabled),
+		cfg.Throttle.StatusStream.MaxConns)
 	// The gateway notification endpoint. Mounted on the Echo instance rather than
 	// on `api` because its path is fixed by the gateway's dispatch code
 	// (/v1.0/callback/exec) — versioning it under /api/v1 would simply put it
@@ -324,19 +387,22 @@ func run(log *logger.Logger) error {
 	// Booking creates rows and holds quota for an hour, so it sits behind its
 	// own per-IP limiter rather than sharing the unthrottled guest group.
 	bookGroup := e.Group("/api/v1",
-		httpx.RateLimitPerIP(bookRate, bookBurst, rateLimitWindow))
+		rateLimit(cfg.Throttle.Book.Active(cfg.Throttle.Enabled),
+			cfg.Throttle.Book.Rate, cfg.Throttle.Book.Burst, cfg.Throttle.IdleTTL))
 	orderHandler.RegisterBookRoute(bookGroup)
 
 	// The availability check in front of the Terms & Conditions gate (spec 013).
 	// Its own group and its own budget — see availabilityRate.
 	availabilityGroup := e.Group("/api/v1",
-		httpx.RateLimitPerIP(availabilityRate, availabilityBurst, rateLimitWindow))
+		rateLimit(cfg.Throttle.Availability.Active(cfg.Throttle.Enabled),
+			cfg.Throttle.Availability.Rate, cfg.Throttle.Availability.Burst, cfg.Throttle.IdleTTL))
 	orderHandler.RegisterAvailabilityRoute(availabilityGroup)
 
 	// The public ticket lookup is rate limited per IP so ticket-code enumeration
 	// is impractical (spec FR-020).
 	ticketLookup := e.Group("/api/v1",
-		httpx.RateLimitPerIP(cfg.TicketLookupRateLimit, cfg.TicketLookupBurst, rateLimitWindow))
+		rateLimit(cfg.Throttle.TicketLookup.Active(cfg.Throttle.Enabled),
+			cfg.Throttle.TicketLookup.Rate, cfg.Throttle.TicketLookup.Burst, cfg.Throttle.IdleTTL))
 	ticket.NewHandler(ticketSvc).RegisterPublicRoutes(ticketLookup)
 
 	// Checkout opens a gateway session per call, so it sits behind a per-IP limit
@@ -346,7 +412,8 @@ func run(log *logger.Logger) error {
 	// routes because checkout still belongs in it — it was never empty of
 	// outbound-cost endpoints.
 	gatewayCalls := e.Group("/api/v1",
-		httpx.RateLimitPerIP(gatewayCallRate, gatewayCallBurst, rateLimitWindow))
+		rateLimit(cfg.Throttle.Checkout.Active(cfg.Throttle.Enabled),
+			cfg.Throttle.Checkout.Rate, cfg.Throttle.Checkout.Burst, cfg.Throttle.IdleTTL))
 	orderHandler.RegisterCheckoutRoutes(gatewayCalls)
 
 	// The guest resend on the confirmation screen. Limited per order number, which
@@ -357,8 +424,12 @@ func run(log *logger.Logger) error {
 	// rateLimitWindow doubles as the cooldown's idle-eviction period here, and it
 	// must stay longer than the window itself: evicting a key mid-cooldown would
 	// forgive it silently. Three minutes against sixty seconds.
-	notification.NewHandler(notificationSvc).RegisterPublicRoutes(api,
-		httpx.NewCooldown(guestResendRate, guestResendBurst, rateLimitWindow))
+	resendCooldown := httpx.NewDisabledCooldown()
+	if cfg.Throttle.Resend.Active(cfg.Throttle.Enabled) {
+		resendCooldown = httpx.NewCooldown(
+			cfg.Throttle.Resend.Rate(), cfg.Throttle.Resend.Burst, cfg.Throttle.IdleTTL)
+	}
+	notification.NewHandler(notificationSvc).RegisterPublicRoutes(api, resendCooldown)
 
 	// Abandoned orders release their seats without anyone opening the page.
 	sweeper := payment.NewSweeper(paymentSvc, cfg.PaymentSweepInterval)
@@ -387,6 +458,8 @@ func run(log *logger.Logger) error {
 	paymentHandler.RegisterAdminRoutes(adminAPI)
 
 	adminAPI.POST("/admin/cache/refresh", cacheRefreshHandler(listCache, log))
+
+	reportThrottleConfig(log, cfg)
 
 	// --- Serve, then drain ------------------------------------------------
 

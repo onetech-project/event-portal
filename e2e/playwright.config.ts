@@ -125,6 +125,11 @@ export default defineConfig({
 
             REDIS_URL: env.cacheEnabled ? env.redisURL : "",
             CACHE_ENABLED: String(env.cacheEnabled),
+
+            // Principle IX. The main API keeps the shipped thresholds so the
+            // guest journey is exercised against what actually ships; only the
+            // master switch follows the run's mode.
+            RATE_LIMIT_ENABLED: String(env.rateLimitEnabled),
             CACHE_TTL: "10m",
             METRICS_ENABLED: "true",
 
@@ -136,6 +141,68 @@ export default defineConfig({
             SMTP_HOST: process.env.E2E_SMTP_HOST ?? "localhost",
             SMTP_PORT: process.env.E2E_SMTP_PORT ?? "1025",
             SMTP_FROM: "uat@example.com",
+          },
+        },
+        {
+          // The throttle rig: a second API on its own port, with thresholds
+          // small enough that a scenario can trip a limit in a second or two.
+          //
+          // It is a separate PROCESS on purpose. Throttle state is keyed per
+          // client and lives in one process's memory, and every request in a
+          // local run arrives from the same address — so draining a bucket on
+          // the main API would refuse an unrelated scenario until it refilled.
+          // Isolating it here is what Principle VIII's "Both throttling modes"
+          // bullet asks for.
+          name: "api-throttle",
+          command: "go run ./cmd/api",
+          cwd: backendDir,
+          url: `${env.throttleApiURL}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 120_000,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            APP_PORT: "8102",
+            APP_BASE_URL: env.throttleApiURL,
+            FRONTEND_URL: env.frontendURL,
+            DATABASE_URL: env.databaseURL,
+            JWT_SECRET: env.jwtSecret,
+            LOG_LEVEL: "warn",
+            PG_BASE_URL: env.gatewayStubURL,
+            PG_SERVER_KEY: env.pgServerKey,
+            PG_CLIENT_KEY: env.pgClientKey,
+            PG_CALLBACK_TOKEN: env.pgCallbackToken,
+            PAYMENT_EXPIRY: "15m",
+            PAYMENT_WINDOW: "14m",
+            BOOKING_HOLD: `${Math.round(scaled(30_000) / 1000)}s`,
+            PAYMENT_SWEEP_INTERVAL: "3s",
+            TZ: "UTC",
+            REDIS_URL: "",
+            CACHE_ENABLED: "false",
+            METRICS_ENABLED: "false",
+            SMTP_HOST: process.env.E2E_SMTP_HOST ?? "localhost",
+            SMTP_PORT: process.env.E2E_SMTP_PORT ?? "1025",
+            SMTP_FROM: "uat@example.com",
+
+            // The whole point of this instance. Follows the run's mode so the
+            // throttling-off run exercises the disabled path on the same rig.
+            RATE_LIMIT_ENABLED: String(env.rateLimitEnabled),
+            // Two lookups then refuse: small enough to trip quickly, and a
+            // retention comfortably above the 2/1 = 2s refill window.
+            RATE_LIMIT_TICKET_LOOKUP_RATE: "1",
+            RATE_LIMIT_TICKET_LOOKUP_BURST: "2",
+            RATE_LIMIT_IDLE_TTL: "30s",
+            // The retention above must clear the LONGEST window it retains, and
+            // the resend's default 60s would exceed it — startup refuses, which
+            // is how this rig first proved the rule works. Shortened here rather
+            // than raising retention, so the rig stays quick.
+            RATE_LIMIT_RESEND_WINDOW: "5s",
+            // Left ON at shipped values so the per-surface switch has something
+            // to contrast against (FR-022).
+            RATE_LIMIT_AVAILABILITY_ENABLED: "true",
+            // Switched OFF individually, to prove one surface can be relieved
+            // while another stays in force.
+            RATE_LIMIT_BOOK_ENABLED: "false",
           },
         },
         {

@@ -32,6 +32,19 @@ func RateLimitPerIP(requestsPerSecond float64, burst int, expiresIn time.Duratio
 // httpx.Cooldown, which also reports the remaining time the middleware shape
 // could not.
 
+// PassThrough is the middleware a disabled throttle is replaced by.
+//
+// Constitution Principle IX requires substitution rather than skipping: no
+// token-bucket store is allocated, so a disabled surface costs no memory and has
+// no code path to a refusal. The middleware still EXISTS, because the group it
+// belongs to must still be constructed — echo registers catch-all NotFound
+// routes per group carrying middleware, and several groups share the /api/v1
+// prefix, so dropping a group would change how unmatched paths are answered
+// between throttling modes.
+func PassThrough() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc { return next }
+}
+
 // RateLimitBy is the shared token-bucket construction behind the helpers above.
 // key decides what a bucket belongs to.
 func RateLimitBy(key func(echo.Context) string, requestsPerSecond float64, burst int, expiresIn time.Duration) echo.MiddlewareFunc {

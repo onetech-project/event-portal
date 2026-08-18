@@ -21,6 +21,10 @@ import (
 // The store is in-memory for the same reason every other limiter here is: PRD.md
 // §1.6 puts Redis out of scope, so each instance limits independently.
 type Cooldown struct {
+	// disabled short-circuits Take. A disabled cooldown keeps no visitor state
+	// at all, so nothing accumulates while it is off and nothing is charged
+	// against a caller when it is switched back on.
+	disabled bool
 	limit    rate.Limit
 	burst    int
 	idleFor  time.Duration
@@ -40,6 +44,10 @@ type visitor struct {
 // window itself (burst/requestsPerSecond) — evicting a key mid-cooldown forgives
 // it silently, which is the one failure this type cannot report. The caller owns
 // that invariant; cooldown_test.go asserts it for the values main.go wires.
+// NewDisabledCooldown builds a cooldown that allows everything and remembers
+// nothing, for when the resend throttle is switched off.
+func NewDisabledCooldown() *Cooldown { return &Cooldown{disabled: true} }
+
 func NewCooldown(requestsPerSecond float64, burst int, idleFor time.Duration) *Cooldown {
 	return &Cooldown{
 		limit:    rate.Limit(requestsPerSecond),
@@ -57,6 +65,13 @@ func NewCooldown(requestsPerSecond float64, burst int, idleFor time.Duration) *C
 // wait already running. It is zero only when another take would succeed
 // immediately, which cannot happen right after an allowed take with burst 1.
 func (c *Cooldown) Take(key string) (bool, time.Duration) {
+	// A disabled cooldown reports no wait. The confirmation screen still applies
+	// its own short client-side debounce to a zero — that is a send-guard against
+	// a held key, not this limit (spec 018 FR-012).
+	if c.disabled {
+		return true, 0
+	}
+
 	now := time.Now()
 
 	c.mu.Lock()

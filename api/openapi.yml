@@ -622,8 +622,11 @@ paths:
       parameters:
         - $ref: '#/components/parameters/TicketCode'
       description: |
-        Public ticket lookup. Rate limited per IP (`TICKET_LOOKUP_RATE_LIMIT` /
-        `TICKET_LOOKUP_BURST`) so enumerating codes is impractical.
+        Public ticket lookup. Rate limited per client
+        (`RATE_LIMIT_TICKET_LOOKUP_RATE` / `RATE_LIMIT_TICKET_LOOKUP_BURST`, or the
+        deprecated `TICKET_LOOKUP_RATE_LIMIT` / `TICKET_LOOKUP_BURST`, which are still
+        honoured) so enumerating codes is impractical. The limit is configurable and can
+        be switched off per surface — see Constitution Principle IX.
       responses:
         '200':
           description: The ticket.

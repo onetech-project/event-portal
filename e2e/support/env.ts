@@ -159,6 +159,26 @@ export const config = {
   cacheEnabled: env("E2E_CACHE_ENABLED", "true") === "true",
 
   /**
+   * Whether this run expects request throttling to be on (Constitution
+   * Principle IX). The suite MUST pass either way; scenarios whose entire
+   * subject is a throttle refusal skip themselves when this is false, exactly
+   * as the cache-refresh specs skip when the cache is off.
+   */
+  rateLimitEnabled: env("E2E_RATE_LIMIT_ENABLED", "true") === "true",
+
+  /**
+   * Port of the second API instance, which runs with deliberately tiny
+   * thresholds so throttle scenarios can trip a limit in a second or two.
+   *
+   * It exists because throttle state is keyed per client and lives in one
+   * process's memory, and every request in a local run arrives from the same
+   * address. Draining a bucket on the main API would refuse unrelated
+   * scenarios for as long as it took to refill — flakiness injected straight
+   * into the acceptance gate.
+   */
+  throttleApiURL: env("E2E_THROTTLE_API_URL", "http://127.0.0.1:8102"),
+
+  /**
    * Milliseconds to pause before every browser operation, so a headed run is
    * watchable at human speed. 0 (the default) is full speed; the timeouts in
    * playwright.config.ts scale with this so a slow run does not time out.

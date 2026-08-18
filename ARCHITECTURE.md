@@ -148,6 +148,18 @@ no other behavioural difference. `POST /api/v1/admin/cache/refresh` flushes
 everything for an operator. Counters are exported on `/metrics` with labels
 bounded to family, scope, and operation — never an event or order id.
 
+*Throttle controls* — every throttle threshold is deployment configuration with the
+shipped value as its default (Constitution Principle IX). `RATE_LIMIT_ENABLED=false`
+substitutes a pass-through on every throttled surface and returns the system to
+unthrottled serving with no other behavioural difference; each surface also carries its
+own switch, with the master switch taking precedence. Six surfaces are covered: booking,
+the availability check, the public ticket lookup, checkout, the guest ticket-email resend
+cooldown, and the live payment-status connection cap. Throttle state is process-local and
+discarded on restart — it is never persisted and never shared between instances.
+`TRUSTED_PROXY_CIDRS` is empty by default, which means the client address comes from the
+connection and `X-Forwarded-For` is ignored; a deployment genuinely behind a proxy names
+that proxy there rather than trusting the header from everyone.
+
 *Quota is never cached authoritatively.* A cached availability figure is a display
 value. Every sale is decided by the row-locked `UPDATE` in the booking
 transaction, so a stale figure can mislead a guest's screen for one request but can
@@ -157,7 +169,10 @@ never oversell.
 
 The guest never authenticates. Everything below is reachable with an order number
 or a ticket code alone, which is why the public reads are deliberately narrower
-than the admin ones and the ticket lookup is rate limited per IP.
+than the admin ones and the ticket lookup is rate limited per client (Constitution
+Principle IX — configurable, individually disableable, and only genuinely per-client
+once the client identity is derived from the connection rather than a caller-supplied
+header).
 
 *Journey and decision points*
 

@@ -47,6 +47,18 @@ func NewHandler(svc *Service, log *logger.Logger) *Handler {
 	}
 }
 
+// WithStreamCap sets the per-client concurrent-connection ceiling, or removes it
+// entirely. The composition root owns this decision; the domain does not choose
+// its own limits (Constitution Principle II).
+func (h *Handler) WithStreamCap(enabled bool, maxConns int) *Handler {
+	if !enabled {
+		h.streams = newDisabledStreamLimiter()
+		return h
+	}
+	h.streams = newStreamLimiter(maxConns)
+	return h
+}
+
 // WithStreamIntervals overrides the SSE keep-alive and drift re-read timers —
 // tests run the loop in milliseconds instead of tens of seconds.
 func (h *Handler) WithStreamIntervals(keepAlive, driftRead time.Duration) *Handler {

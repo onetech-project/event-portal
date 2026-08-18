@@ -90,18 +90,31 @@ func (h *StreamHub) Publish(orderNumber string, ev StatusEvent) {
 // streamLimiter caps concurrent SSE connections per IP, so one client cannot
 // hold every server connection open (contracts/api.md, Rate limiting).
 type streamLimiter struct {
-	mu    sync.Mutex
-	open  map[string]int
-	limit int
+	mu sync.Mutex
+	// disabled short-circuits acquire. Note what this leaves exposed: this cap
+	// is the ONLY bound on held-open connections per client, and every held
+	// stream also issues a periodic database re-read, so with it off both are
+	// unbounded (Constitution Principle IX, blast-radius rule).
+	disabled bool
+	open     map[string]int
+	limit    int
 }
 
 func newStreamLimiter(limit int) *streamLimiter {
 	return &streamLimiter{open: map[string]int{}, limit: limit}
 }
 
+func newDisabledStreamLimiter() *streamLimiter {
+	return &streamLimiter{disabled: true, open: map[string]int{}}
+}
+
 // acquire reserves a slot for ip, reporting false at the cap. release must be
 // called once per successful acquire.
 func (l *streamLimiter) acquire(ip string) (release func(), ok bool) {
+	if l.disabled {
+		return func() {}, true
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.open[ip] >= l.limit {
