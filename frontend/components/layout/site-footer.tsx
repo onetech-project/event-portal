@@ -1,9 +1,9 @@
 import type { IconType } from "react-icons";
 import {
-  FaFacebookF,
+  // FaFacebookF,
   FaInstagram,
-  FaTiktok,
-  FaTwitter,
+  // FaTiktok,
+  // FaTwitter,
   FaYoutube,
 } from "react-icons/fa6";
 
@@ -15,11 +15,11 @@ import {
  * approximated. The design uses the classic bird (), not the X mark.
  */
 const SOCIALS: { label: string; href: string; Icon: IconType }[] = [
-  { label: "Instagram", href: "https://instagram.com/", Icon: FaInstagram },
-  { label: "Twitter", href: "https://twitter.com/", Icon: FaTwitter },
-  { label: "YouTube", href: "https://youtube.com/", Icon: FaYoutube },
-  { label: "TikTok", href: "https://tiktok.com/", Icon: FaTiktok },
-  { label: "Facebook", href: "https://facebook.com/", Icon: FaFacebookF },
+  { label: "Instagram", href: "https://www.instagram.com/jive.expo?igsh=YzVzY3VndmhjanRz", Icon: FaInstagram },
+  // { label: "Twitter", href: "https://twitter.com/", Icon: FaTwitter },
+  { label: "YouTube", href: "https://youtube.com/@jivepromotionsofficial?si=gNewdGT4OCB9VFV3", Icon: FaYoutube },
+  // { label: "TikTok", href: "https://tiktok.com/", Icon: FaTiktok },
+  // { label: "Facebook", href: "https://facebook.com/", Icon: FaFacebookF },
 ];
 
 /**
