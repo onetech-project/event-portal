@@ -11,7 +11,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { API_CODES, ApiError } from "@/lib/api-client";
-import { failureMessage } from "@/lib/availability";
+import {
+  GENERAL_REFUSAL,
+  THROTTLED,
+  type RefusalMessage,
+  isAvailabilityRefusal,
+} from "@/lib/availability";
 import { useBookOrder, useEventTerms, useRecordAgreement } from "@/lib/queries";
 import { checkoutItems } from "@/lib/selection";
 import type { SelectionLine } from "@/lib/types";
@@ -47,6 +52,7 @@ export function TermsDialog({
   lines,
   open,
   onOpenChange,
+  onAvailabilityRefusal,
 }: {
   /** The event's UUID — what POST /ticket/book identifies the event by. */
   eventId: string;
@@ -57,6 +63,17 @@ export function TermsDialog({
   /** Owned by the caller, which opens this only on a clean availability check. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Called when booking refuses for an availability reason (spec 013 FR-013a).
+   *
+   * This dialog closes ITSELF first and then reports upward, so the caller can
+   * render the refusal in the same region the pre-check uses. The caller must
+   * not close this by flipping `open`: base-ui fires `onOpenChange` only from
+   * its own `setOpen`, so a controlled-prop flip would skip `handleOpenChange`
+   * and leave `agreed`, the booked order id and the mutations' error state
+   * behind for the next opening.
+   */
+  onAvailabilityRefusal: (message: RefusalMessage) => void;
 }) {
   const router = useRouter();
   const [agreed, setAgreed] = useState(false);
@@ -118,6 +135,18 @@ export function TermsDialog({
       if (error instanceof ApiError && error.code === API_CODES.termsChanged) {
         setAgreed(false);
         void terms.refetch();
+        return;
+      }
+      // The seat went between the passing check and this press (FR-013a). The
+      // guest is told to reload and adjust, which they cannot do while this
+      // dialog covers the page — so it gets out of the way first, through its
+      // own handleOpenChange so the reset actually runs, and hands the refusal
+      // to the selection page. bookedOrderId is still null here: an availability
+      // refusal throws from `book` itself, before there is an order to abandon.
+      if (isAvailabilityRefusal(error)) {
+        handleOpenChange(false);
+        onAvailabilityRefusal(GENERAL_REFUSAL);
+        return;
       }
       // Other failures stay visible through the mutations' error state.
     }
@@ -214,16 +243,16 @@ export function TermsDialog({
 /**
  * Words a booking failure for the dialog; null when there is none.
  *
- * Everything the availability check can ALSO report — a quota shortfall, absent
- * terms — deliberately falls through to `failureMessage`, which echoes the
- * server's own sentence. Those used to be re-worded here, which meant a guest
- * refused at Buy Ticket and refused again at Agree read two different
- * descriptions of one problem (spec 013 FR-013).
+ * Availability refusals never reach here: `handleAgree` intercepts them, closes
+ * the dialog and hands them to the selection page (spec 013 FR-013a). So none of
+ * the codes below carries an inventory figure, and the server's own sentence is
+ * safe to show for the ones the client has nothing better to say about.
  *
- * The two kept below are the ones the check cannot produce, and where the
- * client knows something the server's sentence does not say: that the document
- * on screen has been replaced and must be re-read, and that the thing to do
- * about a throttle is wait.
+ * The two worded here are the ones where the client knows something the server's
+ * sentence does not: that the document on screen has been replaced and must be
+ * re-read, and that the thing to do about a throttle is wait. The throttle
+ * sentence is shared with the availability check, so one condition reads one way
+ * at both points (FR-012a).
  */
 function agreementErrorMessage(error: unknown): string | null {
   if (error === null || error === undefined) return null;
@@ -232,8 +261,10 @@ function agreementErrorMessage(error: unknown): string | null {
       return "The Terms & Conditions were updated. Please review the new version and agree again.";
     }
     if (error.code === API_CODES.rateLimited) {
-      return "Too many booking attempts. Please wait a moment and try again.";
+      return THROTTLED.body;
     }
+    const message = error.message?.trim();
+    if (message) return message;
   }
-  return failureMessage(error);
+  return "Something went wrong. Please try again.";
 }

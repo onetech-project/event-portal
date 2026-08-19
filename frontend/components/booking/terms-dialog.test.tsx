@@ -5,6 +5,8 @@ import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TermsDialog } from "./terms-dialog";
+import { API_CODES } from "@/lib/api-client";
+import { GENERAL_REFUSAL, THROTTLED, type RefusalMessage } from "@/lib/availability";
 import type { SelectionLine } from "@/lib/types";
 
 const push = vi.fn();
@@ -91,7 +93,11 @@ function wrapper() {
  * itself is SelectionSummary's job and is covered there; what is under test
  * here is everything the dialog does once open.
  */
-function Harness() {
+function Harness({
+  onAvailabilityRefusal = () => {},
+}: {
+  onAvailabilityRefusal?: (message: RefusalMessage) => void;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -105,13 +111,27 @@ function Harness() {
         lines={LINES}
         open={open}
         onOpenChange={setOpen}
+        onAvailabilityRefusal={onAvailabilityRefusal}
       />
     </>
   );
 }
 
-function setup() {
-  return render(<Harness />, { wrapper: wrapper() });
+function setup(props: { onAvailabilityRefusal?: (message: RefusalMessage) => void } = {}) {
+  return render(<Harness {...props} />, { wrapper: wrapper() });
+}
+
+/** An error envelope as the API emits it: {code, message, data}, never a string code. */
+function apiError(status: number, code: number, message: string) {
+  return jsonResponse({ code, message, data: null }, status);
+}
+
+/** Opens the dialog, ticks the box and presses Agree. */
+async function agree(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /buy ticket/i }));
+  await screen.findByText(/all ticket sales are final/i);
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: /^agree$/i }));
 }
 
 beforeEach(() => {
@@ -234,3 +254,101 @@ function stubApiSecondAttempt(spy: ReturnType<typeof vi.fn>) {
     return Promise.resolve(envelope(TERMS));
   });
 }
+
+/**
+ * Spec 013 FR-013a, added by the 2026-08-19 amendment.
+ *
+ * Until then this file never failed the `book` leg at all — the only failure it
+ * injected was the agreement call — so nothing anywhere observed what a guest
+ * sees when booking refuses at Agree.
+ */
+describe("TermsDialog — booking refuses at Agree", () => {
+  const AVAILABILITY: Array<[string, number, string]> = [
+    ["a quota shortfall", API_CODES.insufficientQuota, "Only fewer than 2 ticket(s) remain."],
+    ["a closed sale window", API_CODES.validation, 'Ticket type "Day 1" is not currently on sale.'],
+    ["a ticket type that is gone", API_CODES.notFound, "Ticket type 33333 does not exist."],
+  ];
+
+  it.each(AVAILABILITY)(
+    "closes and reports the general message upward for %s",
+    async (_label, code, serverSentence) => {
+      stubApi({ book: apiError(400, code, serverSentence) });
+      const onAvailabilityRefusal = vi.fn();
+      const user = userEvent.setup();
+      setup({ onAvailabilityRefusal });
+
+      await agree(user);
+
+      await waitFor(() => expect(onAvailabilityRefusal).toHaveBeenCalledWith(GENERAL_REFUSAL));
+      // FR-013a: out of the way, so the message lands on a page the guest can act on.
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      // FR-013: the server's sentence is a record, not copy.
+      expect(document.body.textContent).not.toContain(serverSentence);
+    },
+  );
+
+  it("leaves no ticked box, no Retry and no stale sentence for the next opening", async () => {
+    // research.md D9: the reset only runs if the dialog closes through its OWN
+    // handleOpenChange. A parent flipping `open` would skip it and leave all
+    // three behind.
+    stubApi({ book: apiError(400, API_CODES.insufficientQuota, "Only fewer than 2 ticket(s) remain.") });
+    const user = userEvent.setup();
+    setup();
+
+    await agree(user);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    stubApi();
+    await user.click(screen.getByRole("button", { name: /buy ticket/i }));
+    await screen.findByText(/all ticket sales are final/i);
+
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // The server sentence matters here: these codes carry no inventory figure, so
+  // the dialog is free to show the server's own words, and does for anything it
+  // has nothing better to say about.
+  const NON_AVAILABILITY: Array<[string, number, number, string, RegExp]> = [
+    [
+      "absent terms",
+      409,
+      API_CODES.termsMissing,
+      "This event has no Terms & Conditions to agree to yet.",
+      /terms & conditions/i,
+    ],
+    ["a throttled booking", 429, API_CODES.rateLimited, "rate limit exceeded", /too many attempts/i],
+    ["an internal fault", 500, API_CODES.internal, "", /went wrong/i],
+  ];
+
+  it.each(NON_AVAILABILITY)(
+    "keeps its own in-dialog alert for %s",
+    async (_label, status, code, serverSentence, expected) => {
+      stubApi({ book: apiError(status, code, serverSentence) });
+      const onAvailabilityRefusal = vi.fn();
+      const user = userEvent.setup();
+      setup({ onAvailabilityRefusal });
+
+      await agree(user);
+
+      // FR-013a's converse: these are not an availability race, so the dialog
+      // stays and words them where it always did.
+      await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(expected));
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(onAvailabilityRefusal).not.toHaveBeenCalled();
+    },
+  );
+
+  it("words a throttled booking with the sentence the check also uses", async () => {
+    // One condition, one story at both points (FR-012a).
+    stubApi({ book: apiError(429, API_CODES.rateLimited, "rate limit exceeded") });
+    const user = userEvent.setup();
+    setup();
+
+    await agree(user);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(THROTTLED.body));
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/rate limit exceeded/i);
+  });
+});

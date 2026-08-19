@@ -29,6 +29,40 @@ the only operation that takes quota and the only authority on whether a purchase
 succeeds. This narrows the window in which a guest can waste their effort; it does not
 eliminate the race, and the existing booking-time refusals stay exactly where they are.
 
+## Clarifications
+
+### Session 2026-08-19
+
+- Q: Should the new general message replace every refusal the Buy Ticket check can
+  produce, or only the ones about tickets running out? (FR-012) → A: Only the
+  availability refusals — insufficient quota, item no longer on sale, item no longer
+  exists — collapse into one general message. "No Terms & Conditions authored yet" and
+  "the check could not be completed" keep their own distinct wording, because the general
+  message would be false for both and refreshing would not help.
+
+- Q: When the guest follows the message's instruction to "refresh the page", should
+  their chosen quantities survive? (FR-007, SC-004) → A: No. "Refresh" means a plain
+  browser reload and the selection is discarded by design. FR-007 narrows to "the refusal
+  itself clears nothing and does not navigate"; the promise that a refused guest never
+  rebuilds their choice is retired, and SC-004 is restated accordingly.
+
+- Q: When the guest gets all the way to Agree and booking then refuses because a ticket
+  ran out, should they see this same general message? (FR-013) → A: Yes. Booking's
+  availability refusals show the identical general message of FR-012, so the guest is
+  told one story at both points and never sees a remaining-quota number.
+
+- Q: Should the server still report which lines failed and why, even though the guest
+  will never see that detail? (FR-006) → A: Yes. The server keeps reporting every
+  offending line and its reason and the UI collapses them into the one message. FR-006
+  becomes a diagnostic guarantee rather than a guest-facing one; the response contract is
+  unchanged, so this is a wording change and not an API change.
+
+- Q: When booking refuses at Agree, where should the general message appear — inside the
+  open Terms dialog, or on the selection page behind it? (FR-013) → A: The Terms dialog
+  closes and the message appears on the selection page, in the same region the pre-check's
+  refusal uses. One message, one location, and the "reload and adjust" instruction is
+  actionable where the guest lands.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Availability is confirmed before the Terms are shown (Priority: P1)
@@ -36,9 +70,10 @@ eliminate the race, and the existing booking-time refusals stay exactly where th
 A guest has chosen their tickets and presses Buy Ticket. Before any terms appear, the
 system asks the server whether that exact selection can still be bought right now. If it
 can, the Terms & Conditions dialog opens exactly as it does today and the rest of the
-journey is unchanged. If it cannot — a ticket sold out, a sale window closed while they
-were choosing, or the event has no terms to agree to — the guest is told immediately, in
-a message that names what is wrong, and the Terms dialog never opens.
+journey is unchanged. If it cannot, the guest is told
+immediately and the Terms dialog never opens: one general message for anything that means
+the selection is no longer available at these quantities, and its own message for the two
+cases that are not that — no terms authored yet, and a check that could not be completed.
 
 **Why this priority**: This is the whole feature. It converts a late, confusing failure
 into an early, actionable one, and it is the only slice that changes what a guest
@@ -56,11 +91,12 @@ Terms dialog opens as before.
    agree-and-book behaviour is unchanged.
 2. **Given** a selection containing a ticket type whose remaining quota is now lower than
    the quantity chosen, **When** the guest presses Buy Ticket, **Then** the Terms dialog
-   does not open, the guest is told which line is short and how many remain, and their
-   selection is left intact.
+   does not open and the guest is shown the one general availability message of FR-012 —
+   not the offending line, not the reason, not the remaining count.
 3. **Given** a selection containing an item whose sale window closed while the guest was
    choosing, **When** the guest presses Buy Ticket, **Then** the Terms dialog does not
-   open and the guest is told that item is no longer on sale.
+   open and the guest is shown the same general availability message of FR-012 — a closed
+   sale window and an exhausted quota are one message to the guest.
 4. **Given** a selection combining a bundle and a standalone ticket that both draw on the
    same ticket type, and remaining quota sufficient for either alone but not both, **When**
    the guest presses Buy Ticket, **Then** the check refuses the selection — the lines are
@@ -70,36 +106,43 @@ Terms dialog opens as before.
    empty dialog is never shown.
 6. **Given** the availability check passes, **When** the last matching ticket is taken by
    another buyer before the guest presses Agree, **Then** booking still refuses the order
-   — the check reserves nothing — and the guest sees the same clear sold-out message.
+   — the check reserves nothing — the Terms dialog closes, and the guest sees the
+   identical general message of FR-012 on the selection page, in the same place the
+   pre-check's refusal appears, not a second and more specific one inside the dialog.
 7. **Given** the availability check is in flight, **When** the guest presses Buy Ticket
    again, **Then** no second check is issued and the control shows that work is under way.
 
 ---
 
-### User Story 2 - A refused purchase is recoverable (Priority: P2)
+### User Story 2 - A refused guest is told what to do next (Priority: P2)
 
-A guest whose purchase is refused — at the availability check or at booking — keeps their
-selection, sees a message that names the specific problem rather than a generic failure,
-and can adjust quantities and try again without reloading or rebuilding their choice.
+A guest whose purchase is refused for availability at the check is told plainly that one
+of their tickets is no longer available in the quantity they chose, and what to do about
+it: reload the page and adjust the order against the counts they then see. The refusal
+itself does not move them or empty their basket — they read the message on the page they
+were already on.
 
 **Why this priority**: The early refusal in User Story 1 is worth little if the guest is
 left staring at a dead end. This story is the difference between a failure the guest can
 act on and a failure that just ends the journey sooner.
 
-**Independent Test**: Trigger each refusal reason in turn (sold out, sale window closed,
-terms unavailable, server unreachable) and confirm each produces its own message, the
-selection survives, and a retry after adjusting the quantity succeeds.
+**Independent Test**: Trigger each availability refusal in turn (sold out, sale window
+closed, item deleted) and confirm every one produces the identical general message; then
+trigger the two non-availability refusals (terms unauthored, server unreachable) and
+confirm each produces its own distinct message.
 
 **Acceptance Scenarios**:
 
-1. **Given** a refused availability check, **When** the guest lowers the quantity of the
-   offending line to one that is available, **Then** pressing Buy Ticket again succeeds
-   and the Terms dialog opens.
+1. **Given** a refused availability check, **When** the guest reloads the page and
+   chooses quantities that the reloaded counts show as available, **Then** pressing Buy
+   Ticket succeeds and the Terms dialog opens.
 2. **Given** the availability check cannot reach the server at all, **When** the guest
    presses Buy Ticket, **Then** they are told the check could not be completed and invited
    to try again — the Terms dialog does not open, and no order is created.
-3. **Given** any refusal, **When** the message is shown, **Then** the guest's chosen
-   quantities are still on screen and unchanged.
+3. **Given** any refusal, **When** the message is shown, **Then** the guest is still on
+   the selection page with the quantities they entered — the refusal itself has cleared,
+   trimmed and navigated nothing. Whether they then reload is their choice, and a reload
+   starts the selection over.
 
 ---
 
@@ -107,8 +150,10 @@ selection survives, and a retry after adjusting the quantity succeeds.
 
 - **The selection is empty.** Buy Ticket is already inert; no availability check is
   issued.
-- **Every item in the selection is unavailable.** The guest is told about every offending
-  line, not just the first one found.
+- **Every item in the selection is unavailable.** The answer still records every
+  offending line rather than stopping at the first, but the guest reads exactly the same
+  single message they would read for one bad line — the count of faults is never
+  guest-visible.
 - **A ticket type or bundle is deleted, or the event unpublished, between the page load
   and the press.** The check refuses rather than reporting a stale success.
 - **The check passes and the guest then edits their selection before opening the terms.**
@@ -117,8 +162,10 @@ selection survives, and a retry after adjusting the quantity succeeds.
 - **The guest closes the Terms dialog and presses Buy Ticket again.** A fresh check runs.
   A decision is never reused across presses.
 - **The check succeeds but booking fails anyway.** Expected, not a defect: the check is
-  advisory and quota moves between the two. The booking-time message must read as the
-  same problem, not a new one.
+  advisory and quota moves between the two. The Terms dialog closes and the same general
+  message appears on the selection page, character for character — not a new problem, not
+  a more detailed one, and not stranded behind a modal telling the guest to reload the
+  page it is covering.
 - **Repeated availability checks from one visitor.** The check is an unauthenticated call
   any visitor can issue; it must be throttled per client so it cannot be used to hammer
   the database.
@@ -143,10 +190,18 @@ selection survives, and a retry after adjusting the quantity succeeds.
   is judged, so that a bundle and a standalone ticket drawing on the same ticket type are
   assessed against their combined demand — the same rule the booking transaction already
   applies.
-- **FR-006**: A refused check MUST identify every offending line and the reason for each,
-  so the guest can be told which part of their selection to change.
-- **FR-007**: A refused check MUST leave the guest's selection untouched and MUST NOT
-  navigate away from the selection page.
+- **FR-006**: A refused check MUST still identify every offending line and the reason for
+  each in its answer — evaluating the whole selection rather than stopping at the first
+  fault — so a refusal can be explained after the fact from server-side records. A refused
+  check MUST therefore be recorded in the server's logs with its stable reason codes, on
+  the same footing as a refused booking, since a payload nobody can read afterwards is not
+  a record. This detail is **diagnostic only**: it is never rendered to the guest, who sees
+  the single general message of FR-012 no matter how many lines are at fault.
+- **FR-007**: A refused check MUST NOT itself alter the guest's selection and MUST NOT
+  navigate away from the selection page — the guest stays where they are, with their
+  quantities still on screen, and reads the message there. The message directs them to
+  reload the page; a reload discards the selection, and that is accepted. Carrying the
+  selection across a reload is explicitly **not** a goal of this feature.
 - **FR-008**: While a check is in flight, the Buy Ticket control MUST indicate that work is
   under way and MUST NOT issue a second concurrent check.
 - **FR-009**: Each press of Buy Ticket MUST produce a fresh decision. A previous passing
@@ -159,22 +214,46 @@ selection survives, and a retry after adjusting the quantity succeeds.
 
 #### Messaging
 
-- **FR-012**: Each refusal reason — insufficient quota, item not on sale, item no longer
-  available, terms not authored, check could not be completed — MUST produce its own
-  guest-facing message. A single generic failure message for all of them is not
-  acceptable.
-- **FR-013**: The message shown when booking is refused for a reason the availability
-  check also reports MUST match the check's wording for that reason, so a guest who hits
-  the same problem at two points in the journey is not told two different stories.
+- **FR-012**: Every **availability** refusal — insufficient quota, item no longer on
+  sale, item no longer available — MUST produce one single general message, regardless of
+  how many lines are at fault or which of those reasons applies:
+
+  > **Someone was a bit faster!**
+  > One of your selected tickets is no longer available in this quantity. Please refresh
+  > the page and adjust your order.
+
+  The guest is not told which line is at fault, which reason applied, or how many remain.
+- **FR-012a**: The **three** refusals that are not an availability race MUST each keep
+  their own distinct guest-facing message, because the general message would be untrue for
+  them and refreshing would resolve none of them:
+  - the event has no Terms & Conditions authored yet;
+  - the check could not be completed at all (the server was never reached);
+  - the request was throttled. Being asked to slow down is not someone else having been
+    faster, and the guest's remedy is to wait rather than to reload. Its message MUST be:
+
+    > Too many attempts. Please wait a moment and try again.
+
+    the same sentence a throttled booking shows, so one condition reads one way at both
+    points rather than leaking the rate limiter's own prose at one of them.
+- **FR-013**: Booking MUST show the **same** general message of FR-012 when it refuses
+  for any availability reason — the guest who loses the race between the check and Agree
+  reads one story, not a second and more detailed one at the later moment. In particular,
+  no remaining-quota count reaches the guest at either point.
+- **FR-013a**: When booking refuses for an availability reason the Terms & Conditions
+  dialog MUST close, and the general message MUST be shown on the selection page in the
+  same region the pre-check's refusal uses — so the guest reads the same sentence in the
+  same place whichever point refused them, on a page they can act on. Booking refusals
+  that are **not** availability reasons keep their present in-dialog behaviour.
 
 ### Key Entities *(include if data involved)*
 
 - **Selection**: The guest's chosen lines — each a ticket type or a bundle with a
   quantity — on one event. Already exists; unchanged by this feature.
 - **Availability Decision**: The server's answer about one selection at one moment:
-  purchasable or not, and if not, the offending lines with a reason each. It is advisory
-  and transient — it reserves nothing, is not stored, and does not bind the booking that
-  may follow.
+  purchasable or not, and if not, the offending lines with a reason each. The per-line
+  reasons are diagnostic — they are what the answer is made of, not what the guest is
+  shown. It is advisory and transient: it reserves nothing, is not stored, and does not
+  bind the booking that may follow.
 
 ## Success Criteria *(mandatory)*
 
@@ -186,10 +265,15 @@ selection survives, and a retry after adjusting the quantity succeeds.
   availability reasons — down from every stale selection reaching that point today.
 - **SC-003**: 95% of guests reach the Terms & Conditions within 2 seconds of pressing Buy
   Ticket, so the added confirmation step is not perceived as a delay.
-- **SC-004**: A refused selection is preserved 100% of the time, and a guest who adjusts
-  the offending quantity can complete the purchase without rebuilding their selection.
-- **SC-005**: Every refusal reason enumerated in FR-012 is reachable in the acceptance
-  suite and produces its own distinct message.
+- **SC-004**: A refusal never clears, trims, or navigates on its own — in 100% of
+  refusals the guest is left on the selection page with the quantities they entered.
+  Recovery is the guest's own reload, after which they choose again against the live
+  remaining counts.
+- **SC-005**: Every availability refusal reachable in the acceptance suite — insufficient
+  quota, item no longer on sale, item no longer available, one offending line or several —
+  produces the one general message of FR-012, character for character, and so does an
+  availability refusal raised by booking at Agree. The three non-availability refusals of
+  FR-012a each produce their own distinct message and never the general one.
 - **SC-006**: The purchase journey's existing end-to-end coverage passes unchanged — the
   guest whose selection is available notices no difference beyond the moment the terms
   appear.
@@ -213,6 +297,13 @@ selection survives, and a retry after adjusting the quantity succeeds.
 - **Whole-selection decision.** A refused check refuses the whole selection rather than
   partially proceeding or silently adjusting quantities down to what is available. The
   guest decides what to change.
+- **An item belonging to another event is not an availability refusal.** FR-012's general
+  message covers the three race conditions it names; a selection line pointing at an item
+  from a different event is a malformed request, not a ticket someone else got first, and
+  is unreachable through the selection page, which only offers that event's items. It is
+  therefore treated like FR-012a's cases and keeps its own wording. Flagged rather than
+  asked: the clarification quota was spent on guest-visible decisions, and this path is
+  defensive.
 - **Terms availability is part of the decision.** An event with no authored terms is
   refused at the check rather than opening a dialog with nothing in it — the guest cannot
   agree to a document that does not exist, and booking already refuses for this reason.

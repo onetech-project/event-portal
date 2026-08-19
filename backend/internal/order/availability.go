@@ -26,10 +26,11 @@ import (
 //
 // Two properties matter more than the answer itself:
 //
-//   - It reuses expandItem, the same function booking uses. That is what makes
-//     the reason wording here identical to the wording the guest would meet at
-//     Agree (FR-013) — guaranteed by calling one implementation rather than by
-//     keeping two strings in step by hand.
+//   - It reuses expandItem, the same function booking uses, so the check refuses
+//     exactly what booking would refuse. Before the 2026-08-19 amendment that
+//     reuse was defended as wording parity; the guest now reads neither
+//     sentence, so what it buys is VERDICT parity — which is what FR-005 and
+//     FR-011 actually rest on, and no less load-bearing for the change.
 //   - It takes NO row locks. Principle IV's rationale is that the quota
 //     -deducting UPDATE holds a lock until commit, so anything inside such a
 //     transaction serializes every concurrent buyer of that ticket type. An
@@ -85,17 +86,47 @@ func (s *Service) EvaluateAvailability(ctx context.Context, req AvailabilityRequ
 		})
 	}
 
-	return AvailabilityDecision{Available: len(reasons) == 0, Reasons: reasons}, nil
+	decision := AvailabilityDecision{Available: len(reasons) == 0, Reasons: reasons}
+
+	// FR-006, as amended 2026-08-19: the per-line detail is no longer shown to
+	// the guest, who reads one general sentence however many lines are at fault.
+	// It is kept so a refusal can be explained afterwards — which requires a
+	// record, and a 200 never reaches the error handler where booking's refusals
+	// are logged. Outside the transaction: it holds no locks, but there is no
+	// reason to keep one open across a write to the log.
+	if !decision.Available {
+		s.log.WarnContext(ctx, "availability check refused",
+			"event_id", req.EventID,
+			"item_count", len(req.Items),
+			"reason_codes", reasonCodes(reasons),
+		)
+	}
+
+	return decision, nil
+}
+
+// reasonCodes lists the stable codes of a refusal, in the order they were found.
+//
+// Codes only: the messages are formatted for a reader and the identifiers are
+// already on the reasons themselves, so a log line built from them stays
+// greppable and cannot grow to the size of the selection.
+func reasonCodes(reasons []AvailabilityReason) []string {
+	codes := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		codes = append(codes, reason.Code)
+	}
+	return codes
 }
 
 // expandForCheck resolves every line, collecting failures instead of returning
 // on the first one.
 //
 // This is the single behavioural difference from booking, and it is deliberate:
-// bookOnce holds row locks and should abort the moment it knows the answer,
-// while this holds none and exists to tell the guest everything that is wrong at
-// once. A guest peeling off one rejected line per attempt is the experience the
-// gate was built to remove (FR-006).
+// bookOnce holds row locks and should abort the moment it knows the answer, while
+// this holds none and can afford to evaluate the whole selection. Since the
+// 2026-08-19 amendment the guest is told none of it — they read one general
+// sentence (FR-012) — so the collection survives as the diagnostic record FR-006
+// requires, not as copy.
 //
 // A line that fails contributes no demand — its quantity is unknowable against a
 // ticket type that may not exist.
@@ -140,9 +171,9 @@ func (s *Service) expandForCheck(
 // quota, read WITHOUT a lock.
 //
 // A shortfall is reported against every line that contributed demand to that
-// ticket type, not against the ticket type alone: the guest is looking at their
-// selection, and a bundle whose constituent ran out has to be named as the
-// bundle they chose.
+// ticket type, not against the ticket type alone: a bundle whose constituent ran
+// out has to be recorded as the bundle that was chosen, or the record cannot be
+// read back against the selection that produced it.
 func (s *Service) quotaShortfalls(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -175,8 +206,10 @@ func (s *Service) quotaShortfalls(
 			continue
 		}
 
-		// Worded exactly as bookOnce words it, so a guest who meets the same
-		// shortfall again at Agree is not told a different story (FR-013).
+		// Worded exactly as bookOnce words it. Since the 2026-08-19 amendment this
+		// sentence is a record rather than copy: FR-013 forbids it reaching the
+		// guest at either point, and the client collapses it to the general
+		// message. Kept identical to booking's so the two records match.
 		message := fmt.Sprintf("Only fewer than %d ticket(s) remain.", wanted)
 		for _, index := range linesDemanding(expanded, ttID) {
 			line := index

@@ -9,6 +9,7 @@ import {
   createPackage,
   createSellableEvent,
   createTicketType,
+  deleteTicketType,
   isoDaysFromNow,
   isoHoursFromNow,
   publicOrder,
@@ -852,8 +853,17 @@ test.describe("Guest purchase, end to end", () => {
     // Assert the refusal is SHOWN before asserting the dialog is not: a bare
     // toBeHidden() would pass on the first poll if it happened to run before the
     // dialog rendered, which is a false green on precisely the bug under test.
-    await expect(guest.refusals()).toContainText(/remain/i);
+    await expect(guest.refusals()).toContainText(/someone was a bit faster/i);
+    // FR-013: the shortfall figure the server still reports never reaches them.
+    await expect(guest.refusals()).not.toContainText(/fewer than/i);
     await expect(page.getByRole("dialog")).toBeHidden();
+
+    // SC-004 as restated by the amendment: the refusal itself moves nobody and
+    // empties nothing. The guest is left on the selection page, with the two
+    // tickets they picked, reading a message that asks THEM to reload — which is
+    // a different thing from being reloaded.
+    expect(page.url()).toContain(`/events/${event.slug}/tickets`);
+    await expect(page.getByText("Total 2 Tickets")).toBeVisible();
 
     // Nothing was held: the check reserves nothing, and the guest never reached
     // the call that would have.
@@ -896,7 +906,10 @@ test.describe("Guest purchase, end to end", () => {
 
     await guest.buyTicket();
 
-    await expect(guest.refusals()).toContainText(/not currently on sale/i);
+    // The same sentence as the sold-out case: to a guest, a closed window and an
+    // exhausted quota are one problem — their selection can no longer be bought.
+    await expect(guest.refusals()).toContainText(/someone was a bit faster/i);
+    await expect(guest.refusals()).not.toContainText(/not currently on sale/i);
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 
@@ -926,6 +939,10 @@ test.describe("Guest purchase, end to end", () => {
     await guest.buyTicket();
 
     await expect(guest.refusals()).toContainText(/terms & conditions/i);
+    // SC-005's negative half: a carve-out keeps its own sentence and must never
+    // borrow the general one, which would send the guest off to reload a page
+    // that will refuse them again for exactly the same reason.
+    await expect(guest.refusals()).not.toContainText(/someone was a bit faster/i);
     await expect(page.getByRole("dialog")).toBeHidden();
   });
 
@@ -951,9 +968,12 @@ test.describe("Guest purchase, end to end", () => {
     expect(await quotaOf(ticketType.id)).toBe(1);
 
     await guest.buyTicket();
-    await expect(guest.refusals()).toContainText(/remain/i);
+    await expect(guest.refusals()).toContainText(/someone was a bit faster/i);
 
-    // The selection survived the refusal — this is the recovery, not a restart.
+    // The refusal itself cleared nothing (FR-007 as amended): the guest is still
+    // on the selection page with the quantities they entered, so they can adjust
+    // in place. What the amendment gave up is the selection surviving a RELOAD,
+    // which this scenario deliberately does not perform.
     await guest.setQuantity(ticketType.name, 1);
 
     const orderNumber = await guest.agreeToTermsAndBook();
@@ -978,6 +998,145 @@ test.describe("Guest purchase, end to end", () => {
       { what: "the recovered purchase's ticket to be issued" },
     );
     expect(codes).toHaveLength(1);
+  });
+
+  /**
+   * Spec 013 FR-013 and FR-013a, added by the 2026-08-19 amendment.
+   *
+   * The check is advisory — it reserves nothing — so the last seat can go
+   * between a passing answer and the Agree press. When it does, booking refuses,
+   * and the guest must read the SAME general message they would have read at the
+   * button, on a page they can act on. Not a second, more detailed sentence, and
+   * not one stranded inside a dialog still covering the page it tells them to
+   * reload.
+   */
+  test("a seat taken between the check and Agree refuses with the same general message", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-race-at-agree",
+      quota: 2,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 2);
+
+    // The check genuinely passes: the seats are there when Buy Ticket is pressed.
+    await guest.buyTicket();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    // And they are gone before Agree — through the real booking path, so quota
+    // moves as it does in production and the same write invalidates the cache.
+    await bookAsAnotherGuest(event.id, ticketType.id, 2);
+    expect(await quotaOf(ticketType.id)).toBe(0);
+
+    await guest.agreeExpectingRefusal();
+
+    // Assert the message BEFORE the dialog's absence. A bare toBeHidden() can
+    // pass on the first poll and hand back a false green on exactly the bug
+    // under test — the same trap the sold-out scenario above guards against.
+    await expect(guest.refusals()).toContainText(/someone was a bit faster/i);
+    await expect(guest.refusals()).toContainText(
+      /no longer available in this quantity/i,
+    );
+
+    // FR-013: no remaining-quota figure reaches the guest at either point.
+    await expect(guest.refusals()).not.toContainText(/fewer than/i);
+
+    // FR-013a: the dialog got out of the way, so the message sits on the page
+    // the guest is told to reload and adjust.
+    await expect(page.getByRole("dialog")).toBeHidden();
+
+    // The refused attempt held nothing.
+    expect(await quotaOf(ticketType.id)).toBe(0);
+  });
+
+  /**
+   * Spec 013 SC-005, added by the 2026-08-19 amendment.
+   *
+   * Two independently-broken lines still produce two reasons on the wire —
+   * FR-006 keeps that — but the guest reads one sentence. The count of faults is
+   * not something they can act on differently, and naming lines was what the
+   * amendment set out to stop.
+   */
+  test("several offending lines collapse to a single message", async ({ page }) => {
+    const event = await createEvent(token, {
+      slug: "uat-collapse-many",
+      name: "UAT Collapse Many",
+    });
+    await putTerms(token, event.id, "<p>terms</p>");
+    const first = await createTicketType(token, {
+      eventId: event.id,
+      name: "Day 1",
+      price: "100000.00",
+      quota: 1,
+    });
+    const second = await createTicketType(token, {
+      eventId: event.id,
+      name: "Day 2",
+      price: "100000.00",
+      quota: 1,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(first.name, 1);
+    await guest.selectQuantity(second.name, 1);
+
+    // Two lines broken two different ways, and deliberately WITHOUT booking:
+    // booking is throttled per client at 0.33/s burst 5, and this scenario needs
+    // no quota to move — only two refusals in one decision. Spending the shared
+    // booking allowance here refuses whatever runs next, which is the hazard
+    // Principle IX names and Principle VIII asks the suite to avoid.
+    await deleteTicketType(token, first.id);
+    await updateTicketTypeWindow(token, second.id, {
+      eventId: event.id,
+      name: second.name,
+      price: "100000.00",
+      quota: 1,
+      salesStart: isoDaysFromNow(-3),
+      salesEnd: isoDaysFromNow(-1),
+    });
+
+    await guest.buyTicket();
+
+    const alert = guest.refusals();
+    await expect(alert).toContainText(/someone was a bit faster/i);
+
+    // Once, not once per broken line.
+    const text = (await alert.textContent()) ?? "";
+    expect(text.split("Someone was a bit faster!").length - 1).toBe(1);
+    expect(text).not.toMatch(/fewer than/i);
+
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  /**
+   * Spec 013 SC-005 names "item no longer available" as reachable in the suite.
+   * Deleting the ticket type is the only way to reach it: an inactive package is
+   * not refused today, and PACKAGE_UNAVAILABLE is produced by no code path.
+   */
+  test("a ticket type deleted while choosing is refused with the same message", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-deleted-type",
+      quota: 5,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+
+    // No order references it yet, so the delete guard allows this.
+    await deleteTicketType(token, ticketType.id);
+
+    await guest.buyTicket();
+
+    await expect(guest.refusals()).toContainText(/someone was a bit faster/i);
+    await expect(guest.refusals()).not.toContainText(/does not exist/i);
+    await expect(page.getByRole("dialog")).toBeHidden();
   });
 
   test("a replayed settlement is idempotent", async ({ page }) => {

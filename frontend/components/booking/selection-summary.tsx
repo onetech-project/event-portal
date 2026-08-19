@@ -4,14 +4,19 @@ import { useState } from "react";
 
 import { TermsDialog } from "@/components/booking/terms-dialog";
 import { TicketNotch } from "@/components/booking/ticket-notch";
-import { failureMessage, reasonMessages } from "@/lib/availability";
+import {
+  type RefusalMessage,
+  failureMessage,
+  refusalMessages,
+} from "@/lib/availability";
 import { formatCurrency } from "@/lib/format";
 import { useCheckAvailability } from "@/lib/queries";
 import { checkoutItems, selectionTotal, totalUnits } from "@/lib/selection";
 import type { SelectionLine } from "@/lib/types";
 import TicketIcon from "../icons/ticket";
-import { Alert } from "../ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
+import { AlertCircle } from "lucide-react";
 
 /** Shared by the live trigger and its inert stand-in, so the two cannot drift. */
 const BUY_TICKET_CLASS =
@@ -50,7 +55,7 @@ export function SelectionSummary({
   // component that awaits the server's answer, and the answer is what decides
   // whether the dialog opens at all (spec 013 FR-001/FR-002).
   const [termsOpen, setTermsOpen] = useState(false);
-  const [refusals, setRefusals] = useState<string[]>([]);
+  const [refusals, setRefusals] = useState<RefusalMessage[]>([]);
   const check = useCheckAvailability();
 
   // A refusal describes ONE selection at one moment. The moment the guest
@@ -91,9 +96,11 @@ export function SelectionSummary({
         setTermsOpen(true);
         return;
       }
-      // FR-006: every offending line, not the first. FR-007 is satisfied by
-      // omission — nothing here touches the guest's quantities.
-      setRefusals(reasonMessages(decision.reasons));
+      // FR-012: however many lines the server reports, the guest reads one
+      // general message. The per-line detail is diagnostic and stays server-side
+      // (FR-006). FR-007 is satisfied by omission — nothing here touches the
+      // guest's quantities.
+      setRefusals(refusalMessages(decision.reasons));
     } catch (error) {
       // Not a refusal: the check never got an answer, so the gate stays shut
       // rather than guessing in either direction (FR-002, FR-012).
@@ -195,22 +202,32 @@ export function SelectionSummary({
                 otherwise be left waiting on silence. */}
             {refusals.length > 0 ? (
               // The name goes on Alert, which already carries role="alert" — a
-              // second one on the list nested a live region inside a live
-              // region and left two unnamed-vs-named alerts in the tree. The
-              // <li>s matter too: AlertTitle renders a <div>, and a <ul> whose
-              // children are <div>s is invalid markup that costs the list its
-              // semantics, so a screen reader stops announcing "3 items".
+              // second one nested a live region inside a live region and left
+              // two unnamed-vs-named alerts in the tree. The name itself is
+              // load-bearing: the App Router keeps its own always-present
+              // role="alert" route announcer in the DOM, and the page mounts an
+              // unnamed StatusAlert for a failed event load, so this is the only
+              // way to address this region unambiguously.
+              //
+              // A title-and-body pair rather than a list of peers: since the
+              // 2026-08-19 amendment a refusal is one message whose two lines are
+              // a heading and its explanation, not N sibling sentences. That also
+              // retires a duplicate-key bug — the server emits the same shortfall
+              // sentence once per contributing line.
               <Alert
                 variant="destructive"
                 aria-label="Why this selection cannot be bought"
               >
-                <ul className="space-y-1 text-sm leading-5">
-                  {refusals.map((message) => (
-                    <li key={message} className="font-medium">
-                      {message}
-                    </li>
-                  ))}
-                </ul>
+                {refusals.map((message, index) => (
+                  <div key={`${message.title ?? ""}:${message.body}:${index}`}>
+                    {message.title ? (
+                      <AlertTitle className="inline-flex items-center gap-2 font-bold"><AlertCircle className="size-4" /> {message.title}</AlertTitle>
+                    ) : null}
+                    <AlertDescription className="text-destructive text-sm leading-5">
+                      {message.body}
+                    </AlertDescription>
+                  </div>
+                ))}
               </Alert>
             ) : null}
 
@@ -233,6 +250,10 @@ export function SelectionSummary({
               lines={lines}
               open={termsOpen}
               onOpenChange={setTermsOpen}
+              // FR-013a: the dialog closes itself and hands the refusal here, so
+              // an Agree-time race reads the same sentence in the same place as
+              // one caught at the button.
+              onAvailabilityRefusal={(message) => setRefusals([message])}
             />
           </>
         )}

@@ -84,10 +84,13 @@ HTTP status is 200 and the envelope code is 200000.
 **Every** refusal is reported, not the first (FR-006). `reasons` is empty if and only if
 `available` is true.
 
-`code` is the **stable string** code, not the numeric envelope code. This is load-bearing:
-`apperr.Numeric()` renders `TICKET_TYPE_NOT_ON_SALE`, `PACKAGE_NOT_ON_SALE` and
-`VALIDATION_ERROR` all as `400001`, so a client branching on numbers could not satisfy
-FR-012's requirement that those produce distinct messages.
+`code` is the **stable string** code, not the numeric envelope code. This is load-bearing,
+and remains so after the 2026-08-19 amendment: `apperr.Numeric()` renders
+`TICKET_TYPE_NOT_ON_SALE`, `PACKAGE_NOT_ON_SALE` and `VALIDATION_ERROR` all as `400001`,
+so a client branching on numbers cannot tell an FR-012 availability race from the
+`VALIDATION_ERROR` the spec's Assumptions carve out. The reason the string is needed
+changed — from "one distinct sentence per code" to "which of the three message buckets
+this refusal falls in" — but the need did not.
 
 | `code` | Meaning | `item_index` |
 |--------|---------|--------------|
@@ -96,10 +99,27 @@ FR-012's requirement that those produce distinct messages.
 | `PACKAGE_NOT_ON_SALE` | Outside the bundle's window, or any constituent's | set |
 | `TICKET_TYPE_NOT_FOUND` | Ticket type no longer exists | set |
 | `PACKAGE_NOT_FOUND` | Bundle no longer exists | set |
-| `VALIDATION_ERROR` | Line belongs to a different event than `event_id` | set |
+| `VALIDATION_ERROR` | Line belongs to a different event than `event_id`, **or** a bundle has no components | set |
 | `TERMS_MISSING` | Event has no authored Terms & Conditions | **null** — order-level |
+| `INTERNAL_ERROR` | `expandItem` failed with a non-`apperr` fault — defensive, not expected | set |
 
 No new `apperr` code is introduced by this feature.
+
+`TICKET_TYPE_NOT_FOUND` has a second, order-level source with `item_index` **null**: a
+bundle constituent that vanished between the package read and the aggregate read
+(`availability.go:157-171`). `TERMS_MISSING` is therefore not the only null-index reason.
+
+**Message buckets (2026-08-19 amendment).** The client renders by bucket, never by
+sentence:
+
+| Bucket | Codes | Guest sees |
+|--------|-------|------------|
+| Availability (FR-012) | `INSUFFICIENT_QUOTA`, `TICKET_TYPE_NOT_ON_SALE`, `PACKAGE_NOT_ON_SALE`, `TICKET_TYPE_NOT_FOUND`, `PACKAGE_NOT_FOUND` | the one fixed general message, once, however many reasons arrived |
+| Terms (FR-012a) | `TERMS_MISSING` | its own sentence |
+| Not a race | `VALIDATION_ERROR`, `INTERNAL_ERROR` | its own sentence |
+
+An unrecognised code MUST fall into the availability bucket: a decision the client cannot
+classify is still a refusal, and the general message is the safe thing to say about one.
 
 ### Response — 4xx, the request itself is wrong
 
@@ -111,13 +131,16 @@ Malformed input is not a decision; it goes through the normal error envelope.
 | 429 | 429001 | Per-IP limit exceeded (§4) |
 | 500 | 500000 | Database unreachable |
 
-### `message` parity (FR-013)
+### `message` is diagnostic (FR-006, as amended 2026-08-19)
 
 The `message` on a reason is produced by the same code that produces booking's message for
 that condition — `expandTicket`, `expandPackage`, and the `INSUFFICIENT_QUOTA` formatter in
-`bookOnce`. A guest who meets the same problem at the check and again at Agree is told the
-same sentence. This is guaranteed by construction (the evaluator calls `expandItem`), not
-by two strings kept in step by hand.
+`bookOnce`. It is **never rendered to a guest**. FR-006 keeps it as the record of why a
+selection was refused; FR-012 replaces it on screen with one fixed general message.
+
+FR-013's "one story at both points" is now satisfied by both points showing that same
+fixed message — not, as originally, by both echoing this sentence. In particular
+`"Only fewer than %d ticket(s) remain."` MUST NOT reach the guest at either point.
 
 ---
 
@@ -218,11 +241,36 @@ data only through `EventProvider`, and `internal/event` is still never imported.
 
 - `retry: false` — same reasoning as `useBookOrder`. A retry on an ambiguous transport
   failure would double the load on an endpoint whose answer is advisory anyway.
-- Branches on the **string** `code` in each reason, not on `API_CODES`' numeric values.
+- Branches on the **string** `code` in each reason, not on `API_CODES`' numeric values —
+  on **this** endpoint, where the string is available and exact.
 - A transport failure (`ApiError` with `status: 0`) is **not** a refusal: it is "we could
-  not check". FR-012 requires it to have its own message, and FR-002 requires the terms
+  not check". FR-012a requires it to have its own message, and FR-002 requires the terms
   dialog to stay shut (a failed check is not a passing one).
+- A throttled check (HTTP 429 / `429001`) is likewise **not** an availability refusal and
+  MUST be worded by the client. Echo's default deny handler answers with the raw
+  middleware string `"rate limit exceeded"`, which must never reach the alert. Use the
+  same sentence `TermsDialog` already shows for a throttled booking, so one condition
+  reads one way at both points. See [research.md](../research.md) D10.
 
 `TermsDialog` becomes controlled — `open` / `onOpenChange` props, `DialogTrigger` removed.
-Its internal behavior (terms fetch, agree, book, retry latch, `TERMS_CHANGED` refetch) is
-unchanged.
+
+### `TermsDialog` after the 2026-08-19 amendment
+
+Its internals are **no longer unchanged** — FR-013a requires the book leg to classify its
+own failure and close.
+
+- The `book` catch classifies on the **numeric** `ApiError.code`, because the booking
+  error envelope is `{code int, message, data}` and never carries the stable string
+  (`apperr.go:180-201`, pinned by `handler_test.go:83-108`). Availability =
+  `400002`, `404001`, `400001`; everything else keeps today's in-dialog alert. The
+  `400001` call and its residual risk are argued in [research.md](../research.md) D8.
+- On an availability refusal the dialog MUST close by calling **its own**
+  `onOpenChange(false)`, then report upward through a separate callback so
+  `SelectionSummary` can render the general message in the region the pre-check uses.
+  A parent that merely flips `open` does **not** run `handleOpenChange`, because base-ui
+  fires `onOpenChange` only from `setOpen` — leaving `agreed`, `book.error` and the
+  "Retry" button live for the next open. [research.md](../research.md) D9.
+- Nothing is abandoned by that close: an availability refusal throws from the `book` leg
+  before `setBookedOrderId`, so no held order exists yet.
+- The terms fetch, the agree leg, the retry latch and the `TERMS_CHANGED` refetch are
+  genuinely unchanged.

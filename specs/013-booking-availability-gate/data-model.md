@@ -53,16 +53,22 @@ One refusal, addressed to the line that caused it where a line caused it.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `item_index` | `*int` | 0-based index into the request's `items`. **Null** for an order-level reason — today only `TERMS_MISSING`. |
+| `item_index` | `*int` | 0-based index into the request's `items`. **Null** for an order-level reason — `TERMS_MISSING`, and `TICKET_TYPE_NOT_FOUND` when a bundle constituent vanished between the package read and the aggregate read. |
 | `ticket_type_id` | `*UUID` | Set when the reason is attributable to a ticket type. For a quota shortfall reached through a bundle this names the *constituent*, which is what the guest needs to understand why. |
 | `package_id` | `*UUID` | Set when the offending line was a bundle. |
 | `code` | string | A **stable string** code, not the numeric envelope code — see below. |
-| `message` | string | The guest-facing sentence, produced by the same code that produces booking's. |
+| `message` | string | **Diagnostic** since the 2026-08-19 amendment: the sentence describing this refusal, produced by the same code that produces booking's, and never rendered to a guest (FR-006). |
 
 **Why the string code and not the numeric one.** `apperr.Numeric()` renders
 `TICKET_TYPE_NOT_ON_SALE`, `PACKAGE_NOT_ON_SALE` and `VALIDATION_ERROR` all as `400001`.
-FR-012 requires those to be distinguishable by the client. The string codes do not
-collide, and they are already the vocabulary the backend uses internally.
+The client must tell them apart — before the 2026-08-19 amendment because each needed its
+own sentence, and after it because the first two fall in FR-012's general-message bucket
+while `VALIDATION_ERROR` keeps its own wording. The string codes do not collide, and they
+are already the vocabulary the backend uses internally.
+
+**Where the amendment landed.** Nothing in this struct changes shape. `reasons` still
+carries every offending line; `code` is still the client's discriminator. Only the
+*audience* of `message` changed, from the guest to the record.
 
 Codes a reason may carry, all drawn from the existing `apperr` registry — this feature
 introduces no new code:
@@ -105,8 +111,13 @@ selects.
 ### ExpandedItem, demand map *(existing — unchanged)*
 
 `expandItem` and `aggregateDemand` in [demand.go](../../backend/internal/order/demand.go)
-are reused verbatim. The evaluator does not fork, copy, or modify them; that is the whole
-mechanism by which FR-013's wording parity holds.
+are reused verbatim. The evaluator does not fork, copy, or modify them.
+
+Originally that reuse was the mechanism by which FR-013's *wording* parity held. After the
+2026-08-19 amendment the guest reads neither sentence, so what the reuse now buys is
+**verdict** parity — the check refuses exactly what booking would refuse — which is what
+FR-005 and FR-011 actually depend on. The reuse is no less load-bearing; its justification
+moved.
 
 ## Client-side types
 
@@ -119,8 +130,14 @@ every other DTO in this file does.
 
 `Quantities`, `SelectionLine`, and `checkoutItems()` in
 [selection.ts](../../frontend/lib/selection.ts) are untouched. FR-007 requires a refused
-check to leave the selection intact, which is satisfied by the check never writing to that
+check to alter nothing itself, which is satisfied by the check never writing to that
 state — no code change is the correct implementation of that requirement.
+
+Note what FR-007 no longer promises after the 2026-08-19 amendment: the selection does
+**not** survive the page reload the general message asks the guest to perform. These
+quantities are plain React state on the tickets page, so a reload discards them, and the
+amended spec accepts that explicitly. Persisting the selection across a reload is not a
+goal and must not be added under cover of this change.
 
 ## State transitions
 
