@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Info } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Controller,
   useForm,
@@ -25,11 +25,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { groupOrderSlots, type SlotGroup } from "@/components/order/slot-groups";
 import { API_CODES, ApiError } from "@/lib/api-client";
 import { useGenders, useStartCheckout } from "@/lib/queries";
@@ -214,12 +209,12 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
 
           {groups.map((group, index) => (
             <Card key={group.key}>
-              <CardHeader className="flex items-center justify-between gap-2 min-w-0">
+              <CardHeader className="flex flex-wrap-reverse items-center justify-between gap-2 min-w-0">
                 <GroupTitle group={group} />
                 {/* FR-011 (clarified 2026-08-06): the delivery notice rides the
                   FIRST card only, top right of its header (Figma 206-1804). */}
                 {index === 0 ? (
-                  <Badge className="h-fit bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700">
+                  <Badge className="ml-auto h-fit bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700">
                     <Info aria-hidden className="size-3.5" />
                     The invoice and e-ticket will be sent via email
                   </Badge>
@@ -382,12 +377,23 @@ function OrderSummary({
 }
 
 /**
- * The card's heading, kept to a single ellipsized line (Figma 206-1804). A long
- * bundle or ticket-type name therefore loses its tail — and with it the unit
- * label and the badge that trail behind it, which is exactly what tells two
- * cards apart — so whenever the line is actually clipped the whole heading is
- * offered as a tooltip. When it fits there is nothing hidden to reveal, and the
- * tooltip stays disabled rather than shadowing text already on screen.
+ * The card's heading: the group's name, and a badge for what the card covers.
+ *
+ * The heading WRAPS rather than ellipsizing. It used to be pinned to a single
+ * line, and because `truncate` leaves no trace in the DOM that line dragged a
+ * whole measuring apparatus behind it — a ResizeObserver, a font-loading
+ * callback, and a tooltip — whose only job was to hand back the text the
+ * ellipsis had taken away. Letting the line wrap shows the name outright, and
+ * all of that goes with it.
+ *
+ * The badge keeps `ml-auto`, so it sits against the right edge whether it
+ * shares the first line with the name or drops onto its own.
+ *
+ * Spec 019 FR-011 removed the per-unit "Visitor <n>" label that used to sit
+ * between the name and the badge. Two units of one bundle therefore now carry
+ * identical headings; that is accepted, not overlooked — nothing binds a
+ * particular holder to a particular unit, so the guest fills the cards in the
+ * order shown and either order submits correctly.
  */
 function GroupTitle({ group }: { group: SlotGroup }) {
   // A bundle card badges its ticket count; a pre-010 bundle slot renders solo
@@ -396,92 +402,31 @@ function GroupTitle({ group }: { group: SlotGroup }) {
   const badge = group.isBundle
     ? `${group.ticketCount} ${group.ticketCount === 1 ? "ticket" : "tickets"}`
     : group.packageBadge;
-  const fullTitle = [group.title, group.unitLabel, badge]
-    .filter((part) => part !== null)
-    .join(" · ");
-
-  const [titleRef, truncated] = useIsTruncated<HTMLDivElement>(fullTitle);
 
   return (
-    <Tooltip disabled={!truncated}>
-      <TooltipTrigger
-        delay={300}
-        // Focusable only while something is hidden: keyboard users can reach
-        // the tooltip when it has something to say, without every card heading
-        // becoming a tab stop on the way to the fields.
-        tabIndex={truncated ? 0 : undefined}
-        render={
-          <CardTitle
-            ref={titleRef}
-            // The trigger spreads its own data-slot onto whatever it renders,
-            // so the card's slot name has to be put back — it is what
-            // [data-slot="card-title"] styling and queries key off.
-            data-slot="card-title"
-            className="text-lg font-bold truncate min-w-0"
-          />
-        }
-      >
-        {group.title}
-        {group.unitLabel !== null ? (
-          <span className="ml-2 text-sm font-medium text-muted-foreground">
-            {group.unitLabel}
-          </span>
-        ) : null}
-        {badge !== null ? (
-          <span className="ml-2 rounded bg-brand-surface px-2 py-0.5 text-xs font-medium text-brand">
-            {badge}
-          </span>
-        ) : null}
-      </TooltipTrigger>
-      <TooltipContent>{fullTitle}</TooltipContent>
-    </Tooltip>
+    <CardTitle
+      // data-slot is what [data-slot="card-title"] styling and queries key off.
+      data-slot="card-title"
+      // flex-1 so the heading fills the width its header leaves it. Without it
+      // the CardTitle is only as wide as its text, so `ml-auto` would pin the
+      // badge to the end of the NAME rather than to the edge of the card — a
+      // different place on every card, which is the opposite of what a
+      // right-aligned badge is for.
+      className="flex flex-wrap gap-1 items-center gap-y-1 text-lg font-bold lg:w-full"
+    >
+      {/* min-w-0 with wrap-break-word so a bundle named as one unbroken token wraps
+          inside the card rather than pushing past its edge — a flex item will
+          not otherwise shrink below its own content. */}
+      <span className="min-w-0 wrap-break-word">{group.title}</span>
+      {badge !== null ? (
+        <Badge className="ml-auto shrink-0 rounded bg-brand-surface px-2 py-0.5 text-xs font-medium text-brand">
+          {badge}
+        </Badge>
+      ) : null}
+    </CardTitle>
   );
 }
 
-/**
- * Whether the returned ref's element is currently clipping its own content
- * horizontally — the only way to know, since `truncate` leaves no trace in the
- * DOM. Returns a callback ref so the measurement starts the moment the element
- * mounts. `content` is what the element renders: it re-measures when the text
- * changes, which a resize alone would not catch.
- */
-function useIsTruncated<T extends HTMLElement>(
-  content: string,
-): [(node: T | null) => void, boolean] {
-  const [node, setNode] = useState<T | null>(null);
-  const [truncated, setTruncated] = useState(false);
-
-  useEffect(() => {
-    if (node === null) return;
-
-    // A pixel of slack: scrollWidth rounds up while clientWidth rounds down, so
-    // a fractional layout reads as one pixel of overflow with nothing hidden.
-    const measure = () =>
-      setTruncated(node.scrollWidth - node.clientWidth > 1);
-
-    measure();
-
-    // The card is fluid, so the same heading clips at one width and fits at the
-    // next. Observing the element itself covers both the viewport resizing and
-    // the sidebar column reflowing beside it.
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-
-    // The first paint measures the fallback face; the webfont it swaps in is a
-    // different width, which can flip the answer either way.
-    let live = true;
-    void document.fonts?.ready.then(() => {
-      if (live) measure();
-    });
-
-    return () => {
-      live = false;
-      observer.disconnect();
-    };
-  }, [node, content]);
-
-  return [setNode, truncated];
-}
 
 /**
  * A gender select fed by the master list (GET /ticket/genders). The design

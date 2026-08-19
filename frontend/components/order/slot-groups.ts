@@ -25,8 +25,6 @@ export type SlotGroup = {
    * solo with its package name as a badge (exactly the old card).
    */
   packageBadge: string | null;
-  /** "Visitor <n>" when the same package appears with more than one unit. */
-  unitLabel: string | null;
 };
 
 /**
@@ -38,7 +36,6 @@ export type SlotGroup = {
 export function groupOrderSlots(slots: TicketOrderSlot[]): SlotGroup[] {
   const groups: SlotGroup[] = [];
   const bundleGroups = new Map<string, SlotGroup>();
-  const unitsPerPackage = new Map<string, Set<number>>();
 
   for (const slot of slots) {
     if (slot.package_id !== null && slot.package_unit !== null) {
@@ -58,16 +55,9 @@ export function groupOrderSlots(slots: TicketOrderSlot[]): SlotGroup[] {
         packageId: slot.package_id,
         packageUnit: slot.package_unit,
         packageBadge: null,
-        unitLabel: null,
       };
       bundleGroups.set(key, group);
       groups.push(group);
-      let units = unitsPerPackage.get(slot.package_id);
-      if (!units) {
-        units = new Set();
-        unitsPerPackage.set(slot.package_id, units);
-      }
-      units.add(slot.package_unit);
       continue;
     }
 
@@ -80,18 +70,7 @@ export function groupOrderSlots(slots: TicketOrderSlot[]): SlotGroup[] {
       packageId: slot.package_id,
       packageUnit: null,
       packageBadge: slot.package_name,
-      unitLabel: null,
     });
-  }
-
-  // Multiple purchased units of one package need distinguishable forms (US3).
-  for (const group of groups) {
-    if (!group.isBundle || group.packageId === null || group.packageUnit === null) {
-      continue;
-    }
-    if ((unitsPerPackage.get(group.packageId)?.size ?? 0) > 1) {
-      group.unitLabel = `Visitor ${group.packageUnit}`;
-    }
   }
 
   return groups;

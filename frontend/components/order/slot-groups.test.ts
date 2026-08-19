@@ -35,7 +35,6 @@ describe("groupOrderSlots", () => {
       ticketCount: 1,
       isBundle: false,
       packageBadge: null,
-      unitLabel: null,
     });
     expect(groups[1].title).toBe("VIP");
   });
@@ -66,7 +65,6 @@ describe("groupOrderSlots", () => {
       title: "2-Day Bundle",
       ticketCount: 2,
       isBundle: true,
-      unitLabel: null,
     });
   });
 
@@ -99,7 +97,7 @@ describe("groupOrderSlots", () => {
     expect(groups[1].title).toBe("Day 2 Pass");
   });
 
-  it("labels each unit's form when the same bundle was purchased more than once", () => {
+  it("keeps one form per unit when the same bundle was purchased more than once", () => {
     const unitSlot = (id: string, unit: number, day: string) =>
       slot({
         id,
@@ -115,34 +113,21 @@ describe("groupOrderSlots", () => {
       unitSlot("u2-d2", 2, "Day 2 Pass"),
     ]);
 
-    // One form per purchased unit (spec 010 US3), distinguishable by label.
+    // One form per purchased unit (spec 010 US3). Spec 019 FR-011 removed the
+    // "Visitor <n>" label that used to tell the two apart, so what is pinned here
+    // is the grouping itself — which FR-014 requires to be untouched. The two
+    // cards are now identical to look at, and that is accepted rather than
+    // accidental: card order is stable and any holder may go on any card.
     expect(groups).toHaveLength(2);
     expect(groups.map((g) => g.slotIds)).toEqual([
       ["u1-d1", "u1-d2"],
       ["u2-d1", "u2-d2"],
     ]);
     expect(groups.map((g) => g.title)).toEqual(["2-Day Bundle", "2-Day Bundle"]);
-    expect(groups.map((g) => g.unitLabel)).toEqual(["Visitor 1", "Visitor 2"]);
-  });
-
-  it("leaves the unit label off when a bundle has only one purchased unit", () => {
-    const groups = groupOrderSlots([
-      slot({
-        id: "b1",
-        package_name: "2-Day Bundle",
-        package_id: PKG,
-        package_unit: 1,
-      }),
-      slot({
-        id: "b2",
-        package_name: "2-Day Bundle",
-        package_id: PKG,
-        package_unit: 1,
-      }),
-    ]);
-
-    expect(groups).toHaveLength(1);
-    expect(groups[0].unitLabel).toBeNull();
+    // packageUnit survives the label's removal — it is what actually separates
+    // unit 1's slots from unit 2's, and the label was only ever derived from it.
+    expect(groups.map((g) => g.packageUnit)).toEqual([1, 2]);
+    expect(groups.map((g) => g.ticketCount)).toEqual([2, 2]);
   });
 
   it("keeps a mixed order in slot order: bundle group plus standalone groups", () => {

@@ -10,7 +10,7 @@ import { WrongEvent } from "@/components/order/wrong-event";
 import { Loading, StatusAlert } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
 import { useCheckoutStatus } from "@/lib/checkout-status";
-import { orderCheckoutPath, orderDonePath } from "@/lib/order-routes";
+import { eventDetailPath, orderCheckoutPath, orderDonePath } from "@/lib/order-routes";
 import { isFinalOrderStatus, useOrderDetail } from "@/lib/queries";
 
 /**
@@ -79,7 +79,7 @@ export function OrderView({
             : "We could not load this order right now. Please try again in a moment."}
         </StatusAlert>
         <p className="mt-4 text-sm">
-          <Link href={`/events/${eventSlug}`} className="underline">
+          <Link href={eventDetailPath(eventSlug)} className="underline">
             Back to the event
           </Link>
         </p>
@@ -121,7 +121,7 @@ export function OrderView({
   return (
     <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
       <OrderForms order={data} />
-      {endedStatus && <EndOfJourneyDialog status={endedStatus} />}
+      {endedStatus && <EndOfJourneyDialog status={endedStatus} eventSlug={eventSlug} />}
     </main>
   );
 }

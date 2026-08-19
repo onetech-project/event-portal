@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrderView } from "./page";
 import type { TicketOrderDetail } from "@/lib/types";
@@ -188,7 +188,10 @@ describe("order page — settled and started", () => {
   });
 
   // FR-023/FR-024: one way out, and no way to dismiss it into a page the guest
-  // can no longer submit.
+  // can no longer submit. Spec 019 FR-003/FR-004 moved where that one way out
+  // LEADS — the event's own page, not the site home — and the label with it: a
+  // control still reading "home page" while going somewhere else is the defect
+  // FR-004 exists to prevent. It is still exactly one action (FR-009).
   it("offers exactly one action and no way to dismiss itself", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(envelope(EXPIRED)));
 
@@ -197,8 +200,8 @@ describe("order page — settled and started", () => {
 
     const actions = within(dialog).getAllByRole("link");
     expect(actions).toHaveLength(1);
-    expect(actions[0]).toHaveAccessibleName(/return to home page/i);
-    expect(actions[0]).toHaveAttribute("href", "/");
+    expect(actions[0]).toHaveAccessibleName(/return to event page/i);
+    expect(actions[0]).toHaveAttribute("href", "/events/jazz-night-2026");
 
     // The Repeat Order link is gone (FR-024) — and with it the copy that told
     // the guest to repeat an order nothing offers to repeat.
@@ -220,10 +223,12 @@ describe("order page — settled and started", () => {
       await screen.findByRole("heading", { name: /order cancelled/i }),
     ).toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
-    // Same single action as the expiry variant.
-    expect(screen.getByRole("link", { name: /return to home page/i })).toHaveAttribute(
+    // Same single action, and the same destination, as the expiry variant: spec
+    // 019 FR-006 makes the event page where BOTH endings lead, so a cancelled
+    // order is not quietly sent somewhere else.
+    expect(screen.getByRole("link", { name: /return to event page/i })).toHaveAttribute(
       "href",
-      "/",
+      "/events/jazz-night-2026",
     );
     expect(screen.queryByRole("link", { name: /repeat order/i })).not.toBeInTheDocument();
   });
@@ -908,7 +913,7 @@ describe("order page — registration phase with a bundle", () => {
     });
   });
 
-  it("shows one labeled form per unit when the same bundle is purchased twice", async () => {
+  it("shows one unnumbered form per unit when the same bundle is purchased twice", async () => {
     const unitSlot = (id: string, unit: number, day: string) => ({
       id,
       ticket_type_name: day,
@@ -937,11 +942,30 @@ describe("order page — registration phase with a bundle", () => {
     renderOrder();
     const button = await findContinueButton();
 
-    // One form per purchased unit (4 slots → 2 forms), told apart by their
-    // visitor labels.
+    // One form per purchased unit (4 slots → 2 forms). Spec 019 FR-011: the
+    // "Visitor 1" / "Visitor 2" numbering that used to trail each heading is
+    // gone — it read as an instruction the order does not impose, since any
+    // holder may go on any card.
     expect(screen.getAllByPlaceholderText(/as written on id card/i)).toHaveLength(2);
-    expect(screen.getByText("Visitor 1")).toBeInTheDocument();
-    expect(screen.getByText("Visitor 2")).toBeInTheDocument();
+    // queryAll rather than query: the singular form THROWS on multiple matches,
+    // so before the change this assertion would have died with a lookup error
+    // instead of reporting the two labels it found.
+    expect(screen.queryAllByText(/^Visitor \d+$/)).toHaveLength(0);
+
+    // FR-012 and FR-014, and the reason this test is not just the assertion
+    // above: "no visitor number" would also be satisfied by the cards vanishing
+    // altogether. Both are still here, still titled with the bundle, still
+    // badged with what they cover.
+    // Counted as card TITLES rather than as every mention of the name: the
+    // bundle is also named in each card's body and again in the Order Summary
+    // beside the form, so a bare text count answers a different question.
+    const form = screen.getByRole("form", { name: /visitor registration/i });
+    const titles = Array.from(form.querySelectorAll('[data-slot="card-title"]'));
+    expect(titles).toHaveLength(2);
+    for (const title of titles) {
+      expect(title).toHaveTextContent("2-Day Bundle");
+      expect(title).toHaveTextContent("2 tickets");
+    }
 
     const user = userEvent.setup();
     await fillCard(user, 0, {
@@ -1017,38 +1041,22 @@ describe("order page — registration phase with a bundle", () => {
   });
 });
 
-// --- A card title that does not fit hands its text to a tooltip --------------
+// --- The card heading wraps instead of clipping to one line ------------------
 
 /**
- * happy-dom lays nothing out — every element measures zero — so the ellipsis a
- * real browser draws has to be simulated. Reports the given widths for card
- * titles only, which is what the overflow check compares.
+ * What replaced the measure-and-tooltip arrangement this block used to cover.
+ *
+ * The heading was pinned to one line, so a long bundle name lost its tail to an
+ * ellipsis and a tooltip existed to read it back. It now wraps: the name is on
+ * screen in full, nothing is hidden, and the tooltip has nothing left to say.
+ *
+ * The layout itself is asserted through the classes that encode it rather than
+ * through geometry, and that is deliberate — happy-dom lays nothing out, every
+ * element measures zero, so a position-based assertion would pass for any markup
+ * at all. That was exactly why the old behaviour needed its widths stubbed.
  */
-function stubCardTitleWidths(scrollWidth: number, clientWidth: number) {
-  for (const [prop, value] of [
-    ["scrollWidth", scrollWidth],
-    ["clientWidth", clientWidth],
-  ] as const) {
-    Object.defineProperty(HTMLElement.prototype, prop, {
-      configurable: true,
-      get(this: HTMLElement) {
-        return this.getAttribute("data-slot") === "card-title" ? value : 0;
-      },
-    });
-  }
-}
-
-describe("order page — a card title too long for its card", () => {
-  afterEach(() => {
-    // The stubs are own properties of the prototype; deleting them uncovers
-    // happy-dom's own accessors again for the next file.
-    const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
-    delete proto.scrollWidth;
-    delete proto.clientWidth;
-  });
-
-  it("offers the whole heading as a tooltip once the line is clipped", async () => {
-    stubCardTitleWidths(400, 100);
+describe("order page — the card heading", () => {
+  it("shows the whole heading rather than clipping it", async () => {
     vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
 
     renderOrder();
@@ -1057,17 +1065,16 @@ describe("order page — a card title too long for its card", () => {
     const title = document.querySelector('[data-slot="card-title"]');
     expect(title).not.toBeNull();
 
-    await userEvent.setup().hover(title as HTMLElement);
-
-    // Title, unit label and badge — everything the ellipsis swallowed — read
-    // back in one line.
-    expect(
-      await screen.findByText("2-Day Bundle · 2 tickets"),
-    ).toBeInTheDocument();
+    expect(title).toHaveTextContent("2-Day Bundle");
+    // `truncate` is what used to hide the tail; the wrap is what replaced it.
+    expect(title).not.toHaveClass("truncate");
+    // flex-1 is load-bearing, not decoration: it is what makes the heading fill
+    // the width its header leaves it, and therefore what gives the badge's
+    // ml-auto a card edge to sit against rather than the end of the name.
+    expect(title).toHaveClass("flex", "flex-1", "flex-wrap");
   });
 
-  it("stays quiet when the heading fits", async () => {
-    stubCardTitleWidths(100, 100);
+  it("offers no tooltip, because nothing is hidden to reveal", async () => {
     vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
 
     renderOrder();
@@ -1076,9 +1083,21 @@ describe("order page — a card title too long for its card", () => {
     const title = document.querySelector('[data-slot="card-title"]');
     await userEvent.setup().hover(title as HTMLElement);
 
-    // Nothing is hidden, so a tooltip would only shadow text already on screen.
     await waitFor(() =>
       expect(screen.queryByText("2-Day Bundle · 2 tickets")).toBeNull(),
     );
+  });
+
+  it("keeps the badge against the right edge, wrapped or not", async () => {
+    vi.stubGlobal("fetch", registrationFetch(BUNDLE_HELD));
+
+    renderOrder();
+    await findContinueButton();
+
+    const title = document.querySelector('[data-slot="card-title"]');
+    // ml-auto is what holds the badge right whether it shares the name's line
+    // or drops onto its own; shrink-0 stops it being squeezed on the way.
+    const badge = within(title as HTMLElement).getByText("2 tickets");
+    expect(badge).toHaveClass("ml-auto", "shrink-0");
   });
 });

@@ -1,5 +1,6 @@
 /**
- * The three addresses an order occupies inside its event's journey.
+ * The addresses an event's purchase journey occupies: the three an order moves
+ * between, plus the event's own page they all fall back to.
  *
  * Spec 011 FR-020 gave the QR payment screen an address of its own so each
  * progress stage maps to exactly one address — while the forms and the QR
@@ -12,8 +13,22 @@
  * the stage drifts from the address again.
  */
 
+/**
+ * The event's own page.
+ *
+ * Not an order address, but it belongs beside them rather than interpolated at
+ * each use, for the same reason the rest of this module exists: it already has
+ * more readers than writers. `bookingStageFromPathname` matches this shape to
+ * decide a path is the Booking stage, and `EventFrame` keys its "no progress
+ * rail here" case off it. Spec 019 FR-003 added a third reader — where the
+ * end-of-journey dialog sends a guest whose order ended without a purchase.
+ */
+export function eventDetailPath(eventSlug: string): string {
+  return `/events/${encodeURIComponent(eventSlug)}`;
+}
+
 const eventBase = (eventSlug: string, orderNumber: string) =>
-  `/events/${encodeURIComponent(eventSlug)}/orders/${encodeURIComponent(orderNumber)}`;
+  `${eventDetailPath(eventSlug)}/orders/${encodeURIComponent(orderNumber)}`;
 
 /** Ticket holder forms — the Registration stage. */
 export function orderFormsPath(eventSlug: string, orderNumber: string): string {

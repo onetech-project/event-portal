@@ -12,7 +12,7 @@ verifies. Nothing in this suite writes an order status directly.
 
 | Spec | Scenarios |
 |---|---|
-| [`guest-purchase.spec.ts`](specs/guest-purchase.spec.ts) | Browse → select → agree to terms → book → holder forms → QRIS → settlement → confirmation → issued tickets. Plus ticket lookup, hold expiry returning quota, a callback presenting a bad bearer token, and a replayed settlement. |
+| [`guest-purchase.spec.ts`](specs/guest-purchase.spec.ts) | Browse → select → agree to terms → book → holder forms → QRIS → settlement → confirmation → issued tickets. Plus ticket lookup, hold expiry returning quota, a callback presenting a bad bearer token, and a replayed settlement. Also the end-of-journey dialog on both order screens — that it opens without moving the guest, and that its one action leads back to the event — and a bundle bought twice, whose two holder cards carry no visitor numbering. |
 | [`admin-console.spec.ts`](specs/admin-console.spec.ts) | Sign in, wrong password, unauthenticated redirect, a paid order reaching the order list, ticket validation including the irreversible "Mark used" transition, unknown code, and the delete guard on an event with orders. |
 | [`cache-refresh.spec.ts`](specs/cache-refresh.spec.ts) | The read cache (spec 014) staying invisible: newly published events appearing immediately, unpublish removing them, quota moving on booking, per-event scoping, hit counting, operator flush, and health reporting. |
 
