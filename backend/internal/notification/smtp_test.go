@@ -105,19 +105,19 @@ func TestComposeEmbedsInlineImagesAsRelatedParts(t *testing.T) {
 	wire := composed(t, notification.Message{
 		To:       "budi@example.com",
 		Subject:  "Your tickets",
-		HTMLBody: `<img src="cid:jive-logo.png">`,
+		HTMLBody: `<img src="cid:jive-logo-white.png">`,
 		Attachments: []notification.Attachment{
 			{Filename: "receipt-ORD-1.pdf", ContentType: "application/pdf", Content: []byte("%PDF-1.4 a")},
 			{Filename: "tickets-ORD-1.pdf", ContentType: "application/pdf", Content: []byte("%PDF-1.4 b")},
 		},
 		Inline: []notification.Attachment{
-			{Filename: "jive-logo.png", ContentType: "image/png", Content: []byte("\x89PNG\r\n\x1a\n")},
+			{Filename: "jive-logo-white.png", ContentType: "image/png", Content: []byte("\x89PNG\r\n\x1a\n")},
 		},
 	})
 
 	// The image is inline and addressable by the body.
-	assert.Contains(t, wire, `Content-Disposition: inline; filename="jive-logo.png"`)
-	assert.Contains(t, wire, "Content-ID: <jive-logo.png>")
+	assert.Contains(t, wire, `Content-Disposition: inline; filename="jive-logo-white.png"`)
+	assert.Contains(t, wire, "Content-ID: <jive-logo-white.png>")
 	assert.Contains(t, wire, "image/png")
 
 	// The HTML and the image live in a multipart/related, which is what makes a
@@ -128,7 +128,7 @@ func TestComposeEmbedsInlineImagesAsRelatedParts(t *testing.T) {
 	// files (FR-001) — the image is not one of them.
 	assert.Contains(t, wire, `Content-Disposition: attachment; filename="receipt-ORD-1.pdf"`)
 	assert.Contains(t, wire, `Content-Disposition: attachment; filename="tickets-ORD-1.pdf"`)
-	assert.NotContains(t, wire, `Content-Disposition: attachment; filename="jive-logo.png"`)
+	assert.NotContains(t, wire, `Content-Disposition: attachment; filename="jive-logo-white.png"`)
 }
 
 // A message with no inline parts must compose exactly as before — no stray
@@ -152,7 +152,7 @@ func TestComposeOmitsTheRelatedWrapperWithNoInlineParts(t *testing.T) {
 // application/octet-stream, which Outlook declines to render. Nothing in the
 // type system prevents that, so it is pinned here.
 func TestComposeInlineFilenamesCarryAnImageExtension(t *testing.T) {
-	for _, name := range []string{"jive-logo.png", "location-pin.png"} {
+	for _, name := range []string{notification.CidLogo, notification.CidPin} {
 		assert.True(t, strings.HasSuffix(name, ".png"),
 			"%s must keep an image extension or its part becomes application/octet-stream", name)
 	}

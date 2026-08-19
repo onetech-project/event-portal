@@ -383,7 +383,7 @@ func TestSendTicketEmailBodyHasEverySectionOfTheDesign(t *testing.T) {
 	body := f.mailer.sent[0].HTMLBody
 
 	sections := []string{
-		"cid:jive-logo.png",               // FR-023a real logo, referenced by content ID
+		"cid:jive-logo-white.png",         // FR-023a real logo, referenced by content ID
 		"Hooray, you've got your ticket!", // FR-023 headline
 		"Budi Santoso",                    // FR-023 greeting
 		"Order Status",                    // FR-024
@@ -818,4 +818,37 @@ func TestSendTicketEmailBodyMobileRulesAreEnhancementOnly(t *testing.T) {
 	assert.Contains(t, body, `class="sec" style="padding:`)
 	assert.Contains(t, body, `class="amt" align="right"`)
 	assert.Contains(t, body, "width:130px")
+}
+
+// --- Spec 016 Revision 3: the brand refresh -------------------------------
+
+// FR-023b. The header mark stays at its drawn size; the band does not grow to
+// suit the asset. Enlarging it to 280px was tried on 2026-08-19 and reversed.
+//
+// The HTML ATTRIBUTES are the load-bearing half. Outlook on Windows renders
+// through the Word engine, which ignores CSS dimensions on an <img> and draws the
+// part's natural pixel size — so a change made only in the inline style would
+// render the mark at its full asset width for every Outlook recipient while
+// looking perfect everywhere the developer checked. The two must agree, and this
+// asserts both.
+func TestEmailHeaderKeepsTheMarkAtItsFixedSize(t *testing.T) {
+	body, _ := notification.BuildEmailBody(sampleOrder(), sampleTickets(1), sampleBrand())
+
+	assert.Contains(t, body, `width="108" height="61"`,
+		"the attributes are what Outlook's Word engine obeys")
+	assert.Contains(t, body, "width:108px",
+		"the inline style must agree with the attributes")
+	assert.NotContains(t, body, `width="280"`,
+		"the reversed 280px enlargement must not return")
+}
+
+// SC-018 / FR-031b. The mark must always be allowed to scale down rather than
+// force the body wider. At 108px nothing overflows a 320px viewport today, so
+// this guards the next size or asset change rather than a present defect — which
+// is the cheapest moment to pin it.
+func TestEmailHeaderMarkScalesDownOnNarrowViewports(t *testing.T) {
+	body, _ := notification.BuildEmailBody(sampleOrder(), sampleTickets(1), sampleBrand())
+
+	assert.Contains(t, body, "max-width:100%")
+	assert.Contains(t, body, "height:auto")
 }

@@ -403,3 +403,177 @@ stored data (FR-036 concerns per-event branding in the database) nor a domain.
 
 The one open item is the **pin asset decision**, which blocks FR-025 only. Every other
 correction can proceed without it.
+
+---
+
+# Revision 3 — Brand Refresh Re-plan (2026-08-19)
+
+**Branch**: `fix/receipt` (spec dir `016-receipt-ticket-email`) | **Spec**: [spec.md](./spec.md)
+§Clarifications, Session 2026-08-19
+
+Triggered by a report that the ticket email arrives with **four** attachments, and by a new
+brand asset supplied in two variants plus a footer change on the e-ticket (Figma `683-148`).
+
+Everything in Revisions 1 and 2 still holds unless contradicted below. Research is in
+[research.md](./research.md) **R-018 … R-024**.
+
+> **`setup-plan.sh` cannot resolve this feature.** It derives `FEATURE_DIR` from the branch
+> name, and `fix/receipt` is not a numbered feature branch, so it falls back to
+> `018-configurable-rate-limits`. It copied nothing (both plans already exist) and no file
+> was touched, but `/speckit-tasks` and `/speckit-implement` will target the wrong feature
+> unless they are pointed at `016-receipt-ticket-email` explicitly.
+
+## What changed in the problem
+
+**The reported defect is not a defect.** R-018 settles it against the running service:
+Mailpit's API returns the two PDFs in `Attachments` and the two images in `Inline`, and its
+own badges say so; the four-file strip is `allAttachments()`, which concatenates every part
+because Mailpit is a MIME debugger. Gmail and Yopmail list two. **No code changes for this,
+and Principle VIII owes no red-first scenario** — there is no bug to see red.
+
+What is left is a brand refresh with real work in it:
+
+- the mark is replaced everywhere by a **sponsor lockup** whose secondary line is unreadable
+  at today's size, so three header bands grow (FR-023b, R-021);
+- the new asset has **alpha**, retiring the opaque-background constraint two comments and one
+  fitting strategy are built on (R-020);
+- the e-ticket footer gains an **envelope icon** and changes alignment (FR-022a, FR-022d);
+- `BRAND_SITE_URL` and `BRAND_SUPPORT_EMAIL` adopt the design's values (FR-035a);
+- **the frontend is in scope for the first time** — Revision 1's "no frontend change" no
+  longer holds (R-024).
+
+> **Superseded 2026-08-19, after implementation.** The enlargement below was built, seen
+> and reversed the same day: the mark is now capped by each container's existing height and
+> no band grows. See spec.md §Clarifications and research.md R-021a. The section is kept
+> because the reversal only makes sense against what it replaced.
+
+## The one thing that needs a nod before implementation
+
+**The site header bar grows, and how far is a judgment call I made rather than one the
+clarification settled.**
+
+The user chose "enlarge the mark, grow the bands". Applied literally — the same 2.6× factor
+the email needs — the site header mark becomes 254×145 px inside a bar that must grow from
+**97 px to ~190 px**, which would dominate the public chrome on every page. R-021 proposes
+**200 px wide in a ~130 px bar** instead, on the grounds that the web has a different
+legibility budget (DPR ≥ 2, and the reader can zoom) and reaches the same perceived result.
+
+This is a deviation from the strictest reading of the answer, so it is flagged rather than
+assumed. **If the intent was a uniformly scaled mark, the header numbers change and the
+e-ticket ones do not.** Nothing else in this plan depends on which way it goes.
+
+## Constitution Check — Revision 3
+
+| Principle | Verdict |
+|---|---|
+| I — Modular Monolith | **PASS**. Backend work stays in `internal/notification` + `pkg/config`. The frontend change is one component and two static files in a separate app; no monolith boundary is involved. |
+| II — Domain Isolation | **PASS**. No new cross-domain import. Nothing here reads data at all. |
+| III — DTO Isolation | **PASS**. No `sqlc` struct goes near this. `Branding` is notification-owned and gains no field. |
+| IV — Transactional Integrity | **PASS**. No transaction is touched; both documents are still built before `Send`. |
+| V — Gateway Abstraction | **PASS**. Untouched. |
+| VI — Guest-First MVP Scope | **PASS**. An asset swap, a layout change and two config defaults. No feature from the out-of-scope list. |
+| VII — Cache | **PASS**. No Redis interaction on this path. |
+| VIII — E2E Acceptance | **ACTION REQUIRED**, satisfied below. |
+
+**Principle VIII, restated for this revision:**
+
+- [x] **Covered flow touched?** Yes — the guest journey's delivery step and the e-ticket
+      document it produces. `e2e/specs/guest-purchase.spec.ts` changes.
+- [x] **Bugfix in a covered flow?** **No.** R-018 shows the reported defect was a
+      misreading of Mailpit's debug view. No red-first scenario is owed, and claiming one
+      would mean writing a test that cannot fail against the unfixed code — precisely the
+      "never seen red" anti-pattern the principle exists to prevent.
+- [x] **New user-visible surface?** Yes — the e-ticket footer's envelope and site address.
+      **It cannot be covered in `e2e/`, and this was nearly planned wrong.** `renderTicketsPDF`
+      takes a `compress` flag and *production always compresses*, so what a page says is not
+      findable in the shipped bytes; every content assertion goes through the test-only
+      `RenderTicketsPDFPlain` seam in `export_test.go`. Playwright downloads the production
+      document, so it can assert the attachment count, filename, PDF magic and page count —
+      never the footer's text. **The footer's coverage therefore lands at the Go tier**, which
+      is the same split the day-boundary defect already took (see tasks.md §Known limits).
+      The e2e tier gains only what it can genuinely observe: the email body's HTML.
+- [x] **Frontend tier now relevant?** Yes, first time for this feature (R-024). Run
+      `frontend` Vitest as well as the Go and Playwright tiers.
+- [x] **Cache modes?** No behavioural difference; still run both.
+
+## Assets — status
+
+| Asset | Status |
+|---|---|
+| `…/brand/LOGO JIVE MINUS TWO_WHITE.png` | **Supplied.** 6400×4290, ~276 KB, alpha. Source of truth; not shipped as-is. |
+| `…/brand/LOGO JIVE MINUS TWO_BLACK.png` | **Supplied.** Identical geometry. No current placement — every surface is a dark band (FR-023c). |
+| Shipped derivatives | **To generate**: trim to artwork, resize to 800 px wide, quantise to 64 colours → ~15 KB each (R-020). |
+| Retired `jive-logo.png` (frontend 349 KB + backend 18 KB) | **To delete**, both copies (FR-023c, SC-019). |
+| Location pin | Unchanged. Still the authored PNG from R-013 option A. |
+| Envelope | Unchanged as an asset — still vector primitives, now colour-parameterised (R-023). |
+
+## Work breakdown
+
+### Assets
+
+| # | Change | Where |
+|---|---|---|
+| 1 | Generate trimmed, 64-colour, 800 px derivatives of both variants. Trimming is not optional — untrimmed, each surface inherits a different amount of baked-in padding (R-020). | `frontend/public/brand/`, `backend/internal/notification/assets/brand/` |
+| 2 | Delete both copies of the retired mark. SC-019 is written to fail if either survives. | same |
+| 3 | Name derivatives canonically (`jive-logo-white.png` / `-black.png`). The supplied names contain spaces, which become `%20` in a public URL and read badly in a `//go:embed` directive. | same |
+
+### Backend — shared
+
+| # | Change | Where |
+|---|---|---|
+| 4 | Point `//go:embed` at the new white derivative. `logoPNG`/`pinPNG` and the operator-override path are unchanged. | `assets.go` |
+| 5 | `BRAND_SITE_URL` → `https://www.jive-promotion.com/`, `BRAND_SUPPORT_EMAIL` → `help@manjo.co.id` (FR-035a). Both stay env-overridable. Update `config_test.go`'s default assertions in the same commit. | `pkg/config/config.go` |
+
+### Backend — e-ticket PDF
+
+| # | Change | Where |
+|---|---|---|
+| 6 | `bandHeight` 21 → 38.3 mm; mark drawn at 55 mm wide (R-021, R-022). | `pdf.go` |
+| 7 | Re-express the page's absolute constants as offsets from `bandHeight` instead of literals, then shift by +17.3 mm. They must move together — a band moved without the accent rule puts a 72 mm rule through it (R-022). | `pdf.go` |
+| 8 | Rewrite the `pdfBand` and `drawBrandMark` comments. Both assert the logo has an opaque background; the new asset has alpha, so both are now false and actively misleading (R-020). | `pdf.go` |
+| 9 | Footer: customer-service block right-**positioned**, contents left-aligned — label, icon and address on one left edge (FR-022a). Must hold for any address length, not just the mock's (FR-022e). | `pdf.go` |
+| 10 | Draw the envelope before the address on its own line (FR-022d), using the band's foreground rather than slate. | `pdf.go` |
+| 11 | `drawEnvelope` gains explicit body and flap colours; single definition, two call sites (R-023). | `receipt_pdf.go` |
+
+### Backend — email body
+
+| # | Change | Where |
+|---|---|---|
+| 12 | `emailHeader`: 108×61 → 280×159, in both the HTML **attributes** and the inline CSS. The attributes are what Outlook's Word engine obeys, so they cannot be left behind (existing comment at `service.go:362`). | `service.go` |
+| 13 | Ship the CID part at 2× the display size, as today's asset already does for 108×61. | `assets.go`, `service.go` |
+
+### Frontend
+
+| # | Change | Where |
+|---|---|---|
+| 14 | Swap `src` to the new derivative; grow the mark to ~200 px and the bar from `h-24.25` to ~`h-32.5`, pending the nod above. Keep the plain `<img>` (R-024). | `components/layout/site-header.tsx` |
+
+## Tests that will break, and must be updated deliberately
+
+| Test | Why it breaks | Correct response |
+|---|---|---|
+| `notification/smtp_test.go:155` | Iterates `{"jive-logo.png", "location-pin.png"}` by filename. | Update the logo's name. The **inline-vs-attachment assertions at `:119`–`:131` must NOT be weakened** — they are what proves R-018's finding stays true. |
+| `notification/service_test.go:386` | Asserts `cid:jive-logo.png` in the body. | Update the name. Keep the assertion. |
+| `notification/eticket_test.go:150` | Asserts the text wordmark appears when the asset is missing. | Unchanged — it exercises the fallback path, which still exists. |
+| `notification/pdf_test.go`, `receipt_pdf_test.go` | Any assertion keyed to y-coordinates below the band. | Re-derive from `bandHeight` rather than re-hardcoding, or the next band change breaks them again. |
+| `pkg/config/config_test.go:275` | Asserts the old `BRAND_SITE_URL` / `BRAND_SUPPORT_EMAIL` defaults. | Update to the design's values. |
+| `e2e/specs/guest-purchase.spec.ts:159` | `toHaveLength(2)` on `Attachments`. | **No change.** R-018 confirms it already reads the document-only array. Do **not** add footer assertions here — the production PDF is compressed and its text is unreachable from Playwright (R-025). |
+
+## Complexity Tracking
+
+| Item | Why it is not gold-plating |
+|---|---|
+| Re-expressing page constants as offsets from `bandHeight` (#7) | Not required by any FR. Justified because the alternative is shifting six literals by hand and having the next band change silently reintroduce the same class of defect. |
+| Colour-parameterising `drawEnvelope` (#11) rather than copying it | A forked icon drifts the first time either is adjusted. One definition, two call sites, same package. |
+| Rewriting comments that are now false (#8) | The comments encode a constraint (`opaque background`) that the new asset removes. Left alone, they would make a future reader preserve a fitting strategy for a reason that no longer exists. |
+
+## Post-Design Constitution Re-check
+
+Re-checked after the work breakdown above. **All eight principles still PASS**, with
+Principle VIII's obligations discharged as listed: coverage extends to the e-ticket footer,
+no red-first scenario is owed because no bug exists, and all three test tiers run.
+
+No new domain, no new endpoint, no migration, and therefore **no `SCHEMA.md` change and no
+constitution amendment**. The delivery rule the constitution states — one email, two
+document attachments, inline images excluded from the count — is confirmed by R-018 rather
+than altered by it.

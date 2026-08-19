@@ -643,3 +643,200 @@ passes vacuously.
 - **The day-boundary defect is pinned at the Go tier, not in `e2e/`.** PDFs are compressed
   and not text-searchable from Playwright. The e2e suite asserts the same conversion
   through the email body, which is readable HTML, under `TZ=UTC`.
+
+---
+
+# Revision 3 — Brand Refresh Tasks (2026-08-19)
+
+**Spec**: [spec.md](./spec.md) §Clarifications, Session 2026-08-19 ·
+**Plan**: [plan.md](./plan.md) §Revision 3 · **Research**: R-018 … R-025
+
+Task IDs continue from T118. Revisions 1 and 2 are complete; nothing below re-opens them.
+
+> **`setup-tasks.sh` cannot resolve this feature.** It derives `FEATURE_DIR` from the branch,
+> and `fix/receipt` is not numbered, so it reports `018-configurable-rate-limits`. It is
+> read-only and wrote nothing. **`/speckit-implement` must be pointed at
+> `016-receipt-ticket-email` explicitly.**
+
+## Two things to read before starting
+
+**There is no bug to fix here.** R-018 established against the running service that the
+"four attachments" report was a reading of Mailpit's debug file strip, not of the message.
+**Do not write a regression scenario for the attachment count** — it could not fail against
+today's code, and Principle VIII exists to prevent exactly that test.
+
+**The e-ticket footer cannot be asserted in `e2e/`.** Production PDFs are compressed
+(R-025); content assertions go through `RenderTicketsPDFPlain` at the Go tier. Playwright
+gets attachment count, filename, PDF magic and page count — nothing the page *says*.
+
+---
+
+## Phase 1: Setup (Assets)
+
+**Purpose**: Produce what ships and remove what does not. Everything below depends on this.
+
+- [X] T119 Generate the shipped white derivative: trim, resize to 800 px wide, quantise to 64 colours, from `frontend/public/brand/LOGO JIVE MINUS TWO_WHITE.png` → `frontend/public/brand/jive-logo-white.png`. **Trimming is not optional** — untrimmed, each surface inherits a different share of the ~14% transparent padding (R-020). Verify the result is `800x455` (ratio 1.757, **not** the file's 1.492) and ~15 KB
+- [X] T120 [P] Generate the black variant the same way: `frontend/public/brand/LOGO JIVE MINUS TWO_BLACK.png` → `frontend/public/brand/jive-logo-black.png`. It has **no consumer today** — every placement is a dark band — and is carried for light surfaces per FR-023c
+- [X] T121 Copy `frontend/public/brand/jive-logo-white.png` to `backend/internal/notification/assets/brand/jive-logo-white.png` so the embedded and served marks are byte-identical (SC-019)
+- [X] T122 Delete the retired mark: `frontend/public/brand/jive-logo.png` (349 KB) and `backend/internal/notification/assets/brand/jive-logo.png` (18 KB)
+- [X] T123 Confirm the retirement is total: `rg -n 'jive-logo\.png' --glob '!node_modules' --glob '!*.md'` returns nothing across the repo. SC-019 is written to fail if either copy or any reference survives
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: The asset wiring, configuration and shared helper change that US1 and US2 both
+build on.
+
+**⚠️ CRITICAL**: No user story work below can begin until T124–T128 land — both stories
+resolve the same embedded asset and the same brand configuration.
+
+- [X] T124 Repoint the `//go:embed` directive from `assets/brand/jive-logo.png` to `assets/brand/jive-logo-white.png` in `backend/internal/notification/assets.go`. `logoPNG`, `pinPNG` and the operator-override path are unchanged
+- [X] T125 Update `cidLogo` from `"jive-logo.png"` to `"jive-logo-white.png"` in `backend/internal/notification/service.go` (~line 270). This constant is the **single place** the body's `cid:` reference and the embedded part's filename meet — a mismatch renders a broken image and raises no error in the send, the SMTP exchange, or any attachment count
+- [X] T126 [P] Change the two brand defaults in `backend/pkg/config/config.go` (~lines 237–238): `BRAND_SITE_URL` → `https://www.jive-promotion.com/`, `BRAND_SUPPORT_EMAIL` → `help@manjo.co.id` (FR-035a). Both stay environment-overridable
+- [X] T127 [P] Update the default assertions in `backend/pkg/config/config_test.go` (~line 275) to the new values, in the same commit as T126 so the suite never encodes two answers at once
+- [X] T128 Widen `drawEnvelope` in `backend/internal/notification/receipt_pdf.go` (~line 369) to `drawEnvelope(pdf *gofpdf.Fpdf, x, y, size float64, body, flap [3]int)`, passing `pdfSlate` and white at the existing receipt call site. One definition, two call sites (R-023) — a forked copy drifts the first time either is adjusted. **Keep the sticky cap/join reset inside the function**
+
+---
+
+## Phase 3: User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1)
+
+**Goal**: The e-ticket document carries the new mark at a legible size and the redesigned
+footer.
+
+**Independent test**: Render a multi-ticket order's e-ticket via `RenderTicketsPDFPlain`,
+open it, and read the header band and footer against Figma `683-148`.
+
+### Tests for User Story 1 ⚠️
+
+Written first, at the **Go tier** — the production PDF is compressed and unreadable from
+Playwright (R-025).
+
+- [X] T129 [P] [US1] Add a footer-content test in `backend/internal/notification/eticket_test.go` asserting the rendered page contains `https://www.jive-promotion.com/` and `help@manjo.co.id`, using `RenderTicketsPDFPlain` (FR-035a, FR-022d)
+- [X] T130 [P] [US1] Add an alignment test in `backend/internal/notification/eticket_test.go` proving the customer-service block's label, icon and address share one left edge — **parameterised over a short and a long support address**, because FR-022e is about behaviour and not the mock's particular string length (SC-021)
+- [X] T131 [P] [US1] Add a multi-page test in `backend/internal/notification/eticket_test.go` rendering a **2+ ticket** order and asserting page 2's rules have square ends. Round ends there mean `drawEnvelope`'s sticky cap/join reset was lost — a defect that renders perfectly on a one-ticket order (R-023)
+- [X] T132 [P] [US1] Expose the band geometry through a seam in `backend/internal/notification/export_test.go` (following `TableInsets`/`HeaderColumnRights`) so the band height and the mark's drawn width are assertable without reproducing the arithmetic
+
+### Implementation for User Story 1
+
+- [X] T133 [US1] Re-express the absolutely positioned page constants in `backend/internal/notification/pdf.go` `renderTicketPage` as offsets from `bandHeight` rather than literals — "Ticket N of M" at 29, the accent rule at 40…112, the QR panel at 46…108. They **must move together**: a band moved without the accent rule puts a 72 mm rule through it (R-022)
+- [X] T134 [US1] ~~Raise `bandHeight` from 21.0 to 38.3~~ **REVERSED 2026-08-19**: the band stays 21.0 and the mark is capped by it (research R-021a). Superseded text: raise `bandHeight` from 21.0 to 38.3 in `backend/internal/notification/pdf.go` (~line 156) and draw the mark at 55 mm wide, giving ~1.5 mm cap height on the lockup's secondary line in print (R-021, FR-023b). Cross-checked against the design: content ends ~197 mm with the footer at ~274 mm, so a +17.3 mm shift consumes under a quarter of the available whitespace
+- [X] T135 [US1] Rewrite the two comments in `backend/internal/notification/pdf.go` that are now false — `pdfBand` at ~line 138 claims `#151A26` "matches the logo's own opaque background", and `drawBrandMark` at ~line 292 fits by height because "the asset's background is opaque". The new asset has an alpha channel (R-020), so both statements would make a future reader preserve a constraint that no longer exists
+- [X] T136 [US1] Rewrite `drawTicketFooter` in `backend/internal/notification/pdf.go` (~line 258) so the customer-service block is right-**positioned** with its contents **left-aligned** — label, icon and address on one left edge (FR-022a). The block, not each line, meets the right margin
+- [X] T137 [US1] Draw the envelope before the support address on its **own line** in `drawTicketFooter`, calling the widened `drawEnvelope` with the band's foreground and the band colour (FR-022d, FR-022e). Vertically centred against the text — the same defect FR-015b already caught once on the receipt
+- [X] T138 [US1] Update any y-coordinate assertion in `backend/internal/notification/pdf_test.go` that sits below the band. **Re-derive from `bandHeight` via the T132 seam rather than re-hardcoding**, or the next band change breaks them the same way
+- [X] T139 [US1] Confirm `backend/internal/notification/eticket_test.go:150` still passes untouched — it exercises the missing-asset wordmark fallback, which FR-023a keeps as the failure path
+- [X] T140 [US1] Render and open both PDFs per [quickstart.md](./quickstart.md) Step 4: the mark sits inside the taller band with even inset and **no dark rectangle hanging past it** (a seam means the opaque-background fitting strategy is still in force), and the accent rule and QR moved with the band
+
+---
+
+## Phase 4: User Story 2 - Email body reads as the new confirmation design (Priority: P2)
+
+**Goal**: The confirmation email carries the new mark at a legible size, still as an inline
+part and still with exactly two document attachments.
+
+**Independent test**: Settle an order, open the message in Mailpit and in a real client;
+the mark renders in the body and the attachment list shows two files.
+
+### Tests for User Story 2 ⚠️
+
+- [X] T141 [P] [US2] Add an assertion in `backend/internal/notification/service_test.go` that the body carries `width="280" height="159"` as HTML **attributes** and matching inline CSS (FR-023b). The attributes are what Outlook's Word engine obeys; CSS alone renders the 2× part at double size there
+- [X] T142 [P] [US2] Extend `e2e/specs/guest-purchase.spec.ts` with User Story 2 scenario 6 — the delivered message lists exactly two documents while every `cid:` the body references resolves to an inline part. **`expect(mail.Attachments).toHaveLength(2)` at line 159 needs no change** (R-018); extend the existing `cidReferences`/`mail.Inline` pairing rather than adding a helper
+
+### Implementation for User Story 2
+
+- [X] T143 [US2] Change `emailHeader` in `backend/internal/notification/service.go` (~line 369) from `108×61` to `280×159` in **both** the HTML attributes and the inline `style` width/height. 280 px gives ~7.6 px cap height on the secondary line against ~2.9 px today (R-021)
+- [X] T144 [US2] Confirm the embedded part is 2× the display size, as the existing 216×122-for-108×61 arrangement already does. The 800 px derivative from T119 covers 280 px display at better than 2×, so no separate email asset is needed
+- [X] T145 [US2] Update the filename in `backend/internal/notification/service_test.go:386` (`cid:jive-logo.png`) and in the `{"jive-logo.png", "location-pin.png"}` loop at `backend/internal/notification/smtp_test.go:155`. **Change the names only.** The inline-vs-attachment assertions at `smtp_test.go:119`–`:131` are what keep R-018's finding true and must not be weakened to make anything pass
+- [X] T146 [US2] Open the delivered message per [quickstart.md](./quickstart.md) Step 5 and, if an account is available, forward it to a real Outlook/Windows client. That is the client the attribute rule exists for, and Mailpit cannot stand in for it
+
+---
+
+## Phase 5: User Story 3 - A resend delivers the identical pair (Priority: P3)
+
+**Goal**: Nothing regresses. This revision adds no resend behaviour.
+
+- [X] T147 [US3] Run the existing resend coverage — a section of scenario 22 at `e2e/specs/guest-purchase.spec.ts:224-239`, not a standalone scenario — unchanged and confirm it stays green — the resend path shares one renderer with the automatic send, so it inherits the new mark and footer with no code of its own
+- [X] T148 [US3] Confirm a resent order's e-ticket carries the **same** ticket codes as the first delivery (FR-007). Asset and layout changes must not touch issuance
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+### Frontend (first frontend change in this feature — R-024)
+
+- [X] T149 **Unblocked 2026-08-19 (200 px / ~130 px bar chosen).** Update `frontend/components/layout/site-header.tsx:21`: `src` → `/brand/jive-logo-white.png`, mark to ~200 px wide, bar from `h-24.25` (97 px) to ~`h-32.5` (130 px). **The numbers are a judgment call, not something the clarification settled** — a literal reading of "grow the bands" gives 254 px in a ~190 px bar, which would dominate the public chrome. See [plan.md](./plan.md) §"The one thing that needs a nod". Keep the plain `<img>`; migrating to `next/image` for one static above-the-fold asset trades a lint suppression for a loader and layout-shift change nothing here needs
+- [X] T150 [P] Confirm `frontend/components/layout/site-footer.tsx` needs no change — it carries copyright and social links, no brand mark
+- [X] T151 Run the frontend tier, which this feature has never needed before. `npx` and bare `node` both fail in this repo: `cd frontend && export PATH="$HOME/.nvm/versions/node/v26.5.1/bin:$PATH" && ./node_modules/.bin/vitest run && ./node_modules/.bin/next build` (`next build` is the typecheck of record)
+
+### Verification
+
+- [X] T152 [P] Confirm the legibility target by eye per [quickstart.md](./quickstart.md) Step 2 — render the mark at 108 px and 280 px on `#151a26` and compare. FR-023b is the one requirement here that no passing test fully vouches for
+- [X] T153 [P] Confirm the shipped derivatives are ~15 KB each and that `frontend/public/brand/` no longer serves a 349 KB logo on every page load
+- [X] T154 Run the Go tier green: `cd backend && ./scripts/test.sh ./...`
+- [X] T155 Run the e2e gate green: `cd e2e && npm test`
+- [X] T156 Run it again with the cache off: `cd e2e && E2E_CACHE_ENABLED=false npm test` (Principle VII kill switch)
+
+### Governance — verify, do not assume
+
+- [X] T157 [P] Confirm `.specify/memory/constitution.md` needs **no** amendment. Its delivery rule — one email, two document attachments, inline images excluded from the count — is confirmed by R-018 rather than altered by it. Record that it was verified
+- [X] T158 [P] Confirm `SCHEMA.md` needs no change and no migration exists — this revision adds no column, table or migration ([data-model.md](./data-model.md) §Revision 3)
+- [X] T159 [P] Confirm `PRD.md` §1.4 already reads "two document attachments" and needs no edit — re-checked during clarification, closing Revision 2's outstanding governance item
+
+### Recorded, deliberately not done
+
+- [X] T160 Confirm two known gaps remain untouched and are recorded rather than forgotten: the **receipt carries no brand mark at all** (`drawBrandMark` is called only from the e-ticket renderer, contradicting FR-023a/FR-035's "all three surfaces"), and `frontend/app/favicon.ico` is still the unmodified Next.js scaffold icon. Both are in [spec.md](./spec.md) §Governance notes; neither is in scope
+
+---
+
+## Dependencies & Execution Order — Revision 3
+
+### Phase dependencies
+
+```
+Phase 1 (T119-T123)  assets exist and the old one is gone
+        ↓
+Phase 2 (T124-T128)  embed, cid constant, config, drawEnvelope signature
+        ↓
+   ┌────┴────┐
+Phase 3      Phase 4        US1 and US2 are independent once Phase 2 lands
+(T129-T140)  (T141-T146)    — different files, different surfaces
+   └────┬────┘
+Phase 5 (T147-T148)  regression only
+        ↓
+Phase 6 (T149-T160)  frontend, gates, governance
+```
+
+### Critical path
+
+T119 → T121 → T124 → T125 → T133 → T134 → T136 → T137 → T154 → T155
+
+T133 before T134 is the ordering that matters most: converting the literals to offsets
+**before** changing `bandHeight` is what makes the shift a one-line change instead of six
+hand-edited constants.
+
+### Parallel opportunities
+
+- **Phase 1**: T120 alongside T119 (different variant, different file)
+- **Phase 2**: T126 + T127 together; T124/T125 are separate files from both
+- **Phase 3 tests**: T129, T130, T131, T132 are all `[P]` — different test functions
+- **Phase 3 / Phase 4**: entire phases run in parallel after T128. US1 is `pdf.go`; US2 is `service.go`
+- **Phase 6**: T152, T153, T157, T158, T159 all `[P]` — read-only checks on different files
+
+### Blocked
+
+- **T149** is the only blocked task, on the site-header sizing nod. Nothing else depends on
+  it: US1, US2, the Go tier and the e2e gate are all independent of the frontend numbers.
+
+## Implementation Strategy
+
+**MVP scope**: Phases 1–3 (T119–T140). That delivers the new mark and the redesigned footer
+on the e-ticket — the document the user actually pointed at — and is independently
+shippable and testable without touching the email or the frontend.
+
+**Increment 2**: Phase 4 (T141–T146), the email body.
+
+**Increment 3**: Phase 6's frontend (T149–T151), once the sizing question is answered.
+
+**Do not start with the frontend.** It is the only blocked work, and it is the only surface
+none of the three user stories covers.

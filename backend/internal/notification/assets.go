@@ -18,7 +18,7 @@ import (
 // The configured path remains as an override, for an operator who needs to
 // rebrand without a rebuild.
 //
-//go:embed assets/brand/jive-logo.png
+//go:embed assets/brand/jive-logo-white.png
 var embeddedLogo []byte
 
 // The location pin drawn before the venue in the email body (FR-025).

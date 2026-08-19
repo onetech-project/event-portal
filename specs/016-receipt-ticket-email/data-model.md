@@ -284,3 +284,18 @@ a wrong display zone would silently misstate a financial document.
 `SetLineCapStyle` / `SetLineJoinStyle` are sticky `Fpdf` state. Any function that sets them
 restores `"butt"` / `"miter"` before returning — otherwise every later rule on the page
 inherits round ends, which passes every assertion and still looks wrong.
+
+---
+
+# Revision 3 — Brand Refresh (2026-08-19)
+
+**No change to this document.** Recorded explicitly so the absence is a finding rather than
+an omission.
+
+Revision 3 replaces a brand asset, resizes three header bands, re-aligns the e-ticket
+footer and changes two configuration defaults. It adds no entity, widens no struct, alters
+no field type, and touches no database object — so `SCHEMA.md` is untouched and no migration
+exists.
+
+`Branding` (above) keeps its exact shape; only the **values** two of its fields default to
+change (FR-035a). See [contracts/notification.md](./contracts/notification.md) §Revision 3.

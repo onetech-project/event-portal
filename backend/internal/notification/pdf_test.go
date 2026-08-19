@@ -1,6 +1,8 @@
 package notification_test
 
 import (
+	"strings"
+	"regexp"
 	"bytes"
 	"image/png"
 	"testing"
@@ -179,4 +181,34 @@ func TestFormatTicketWindowUsesTheJakartaCalendarDay(t *testing.T) {
 	got := notification.FormatTicketWindow(start, end)
 
 	assert.Equal(t, "27 Apr 2026 @ 06:00 - 17:00 WIB", got)
+}
+
+// pdfTextOp matches one text-showing operator in an uncompressed content stream:
+// gofpdf emits drawn strings as `(text)Tj`. The inner alternation skips escaped
+// parentheses so a literal "\)" does not end the match early.
+var pdfTextOp = regexp.MustCompile(`\(((?:[^()\\]|\\.)*)\)Tj`)
+
+// pdfDrawnText returns only the text a document actually DRAWS, with the PDF
+// string escapes undone.
+//
+// Why this exists rather than asserting against string(doc): a rendered page's
+// bytes also carry embedded images — the QR codes and the brand mark — and any
+// short string can occur by chance inside that binary. A whole-file NotContains
+// therefore fails at random. It did: the mark shipped in Revision 3 contains the
+// bytes "Rp" at offset ~17125 inside its image stream, which broke FR-021's
+// no-money assertion while no page drew any money at all.
+//
+// Only meaningful on the *Plain renderers — production compresses its streams,
+// so there is no `(text)Tj` to find (research R-025).
+func pdfDrawnText(doc []byte) string {
+	var out strings.Builder
+	for _, m := range pdfTextOp.FindAllSubmatch(doc, -1) {
+		s := string(m[1])
+		s = strings.ReplaceAll(s, `\(`, "(")
+		s = strings.ReplaceAll(s, `\)`, ")")
+		s = strings.ReplaceAll(s, `\\`, `\`)
+		out.WriteString(s)
+		out.WriteString("\n")
+	}
+	return out.String()
 }

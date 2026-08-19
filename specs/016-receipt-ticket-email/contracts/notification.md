@@ -324,3 +324,138 @@ rather than merely referenced).
 **`e2e/playwright.config.ts` MUST set `TZ: "UTC"` on the api `webServer`.** Without it the
 API inherits the developer's zone, a WIB assertion passes on a Jakarta machine with the bug
 unfixed, and Principle VIII's "confirmed red first" is unachievable.
+
+---
+
+# Revision 3 — Brand Refresh Contracts (2026-08-19)
+
+Research: [research.md](../research.md) R-018 … R-024.
+
+## HTTP contract: still unchanged
+
+No endpoint, request, response or status code changes. This revision touches rendering,
+static assets and two configuration defaults.
+
+## `notification.Message` — unchanged, and deliberately so
+
+```go
+type Message struct {
+    To          string
+    Subject     string
+    HTMLBody    string
+    Attachments []Attachment  // documents only — the two PDFs
+    Inline      []Attachment  // cid: parts — the brand mark and the location pin
+}
+```
+
+The four-attachment report did not reach this type. R-018 verified against a running
+Mailpit that the split already works exactly as Revision 2 specified. **The `Attachments` /
+`Inline` separation is load-bearing and must not be collapsed**; the assertions that pin it
+are `smtp_test.go:119`–`:131`.
+
+## `notification.Branding` — unchanged shape, changed values
+
+No field is added or removed. What changes is what two of them default to (FR-035a):
+
+| Field | Was | Is |
+|---|---|---|
+| `SiteURL` | `https://www.jive.co.id` | `https://www.jive-promotion.com/` |
+| `SupportEmail` | `help@manjo.com` | `help@manjo.co.id` |
+
+Both remain environment-overridable via `BRAND_SITE_URL` and `BRAND_SUPPORT_EMAIL`.
+`SupportEmail` is a **single platform-wide value shared by every surface that prints it**
+(FR-035), so this changes the receipt footer as well as the e-ticket footer. That coupling
+is the intent of FR-035, not a side effect.
+
+`LogoPath` keeps its meaning and its fallback-to-embedded behaviour. Only the embedded
+asset behind it changes.
+
+## Static asset contract
+
+| Consumer | Path | Notes |
+|---|---|---|
+| Backend (embedded) | `internal/notification/assets/brand/jive-logo-white.png` | `//go:embed`; trimmed, 800 px wide, 64-colour, ~15 KB |
+| Frontend (public) | `/brand/jive-logo-white.png` | Same derivative; served statically |
+| Frontend (public) | `/brand/jive-logo-black.png` | Carried for light surfaces; **no consumer today** (FR-023c) |
+
+`/brand/jive-logo.png` is **removed**. It is referenced today only by `site-header.tsx:21`;
+SC-019 fails if any reference or either copy survives.
+
+The content ID the email body references changes with the filename, and the constant and the
+part name must stay in agreement — `service.go`'s `cidLogo` is the single place they meet:
+
+```go
+const cidLogo = "jive-logo-white.png"   // was "jive-logo.png"
+```
+
+A mismatch here renders a broken image and **raises no error anywhere** — not in the send,
+not in the SMTP exchange, not in any assertion that counts attachments. The e2e pairing of
+`cidReferences(mail.HTML)` against `mail.Inline` is what catches it.
+
+## Render function contracts
+
+Public signatures are unchanged:
+
+```go
+func RenderTicketsPDF(order OrderDelivery, tickets []TicketDetail, brand Branding) ([]byte, error)
+func RenderReceiptPDF(order OrderDelivery, brand Branding) ([]byte, error)
+func buildEmailBody(order OrderDelivery, tickets []TicketDetail, brand Branding) (html string, inline []Attachment)
+```
+
+One package-internal helper widens, so the icon has one definition rather than two (R-023):
+
+```go
+// was: func drawEnvelope(pdf *gofpdf.Fpdf, x, y, size float64)
+func drawEnvelope(pdf *gofpdf.Fpdf, x, y, size float64, body, flap [3]int)
+```
+
+Call sites: the receipt passes `pdfSlate` / white; the e-ticket footer passes the band's
+foreground / the band colour. The sticky cap-and-join reset stays inside the function.
+
+## Layout contract — the numbers this revision fixes
+
+These are contract-like because tests and three surfaces depend on them agreeing.
+
+| Surface | Quantity | Was | Is |
+|---|---|---|---|
+| Email header | `<img>` width × height (attribute **and** CSS) | 108 × 61 | 280 × 159 |
+| E-ticket page | `bandHeight` | 21 mm | 38.3 mm |
+| E-ticket page | mark width | ~24.6 mm | 55 mm |
+| E-ticket page | constants below the band | literals | offsets from `bandHeight`, +17.3 mm |
+| Site header | mark width | 98 px | ~200 px *(pending the nod in plan.md)* |
+| Site header | bar height | 97 px (`h-24.25`) | ~130 px *(pending)* |
+
+The email's width and height must be set as HTML **attributes** as well as CSS: Outlook's
+Word engine ignores CSS dimensions on an `<img>` and draws the natural pixel size, which is
+why the shipped part is 2× the display size.
+
+## e2e support contract — unchanged, and the footer does NOT belong here
+
+`MailMessage`, `MailAttachment`, `cidReferences` and `downloadAttachment` are unchanged, and
+no helper is added.
+
+**The e-ticket footer is not assertable from Playwright.** `renderTicketsPDF(…, compress bool)`
+is called with `true` in production, and gofpdf compresses content streams, so the text a page
+draws does not appear in the shipped bytes. `export_test.go` exists precisely for this:
+
+```go
+// Test seam. Same drawing calls, compression off, so a test can read the page.
+func RenderTicketsPDFPlain(order OrderDelivery, tickets []TicketDetail, brand Branding) ([]byte, error)
+```
+
+So the split is:
+
+| Tier | Can assert about the e-ticket | Cannot |
+|---|---|---|
+| Go (`RenderTicketsPDFPlain`) | Footer strings, alignment geometry, band offsets | — |
+| e2e (Playwright) | Attachment count, filename, PDF magic, **page count** | Anything the page *says* |
+
+The email body is the opposite case — it is readable HTML on the wire, so the mark's
+dimensions and the `cid:` pairing stay e2e-observable:
+
+```ts
+expect(mail.HTML).toContain('width="280" height="159"');     // FR-023b
+const referenced = cidReferences(mail.HTML);                  // FR-023a
+expect((mail.Inline ?? []).map(p => p.ContentID || p.FileName))
+  .toEqual(expect.arrayContaining(referenced));
+```

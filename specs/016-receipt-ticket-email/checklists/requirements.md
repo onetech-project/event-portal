@@ -107,5 +107,52 @@ truncates. On an order whose fees compute to cents, the printed rows would not s
 printed total — a reconciliation defect on a financial document, and a direct conflict with
 FR-014/SC-003 that existed before this iteration and was not previously noticed.
 
+**Iteration 5 (2026-08-19, brand refresh + reported attachment count)** — a report that the
+email carries four attachments, plus a new brand asset in two variants and a footer change
+on the e-ticket. Five questions were put to the user; a sixth clarification came from the
+user's own question about SVG. **14/16 → 14/16; no checklist item changed state.**
+
+- **The reported defect was not one.** Mailpit's API returns the two PDFs in `Attachments`
+  and the logo and pin in `Inline`, and its list endpoint reports `Attachments: 2`; its
+  message *view* merges both into one downloadable strip because it is a MIME debugger.
+  Gmail and Yopmail were checked by hand and list two. FR-001, FR-023a and SC-001 are
+  confirmed rather than amended, and iteration 3's governance follow-up is now closed —
+  `PRD.md` §1.4, the constitution bullet and the e2e assertion were all re-checked and
+  already agree.
+- **FR-025 was narrowed** from "inline SVG or an inline image part" to the image part alone.
+  Gmail strips `<svg>` and Outlook's Word engine cannot draw it, so the SVG allowance would
+  have failed the two largest client families. This is a real correction, not tidying: an
+  implementer following the old wording could have shipped something invisible to most
+  recipients.
+- **FR-022a was amended** — the customer-service block is right-positioned with its contents
+  left-aligned, not two lines flush right. FR-022d (envelope icon) and FR-022e (the rule must
+  hold for any address length, not just the mock's) are new.
+- **FR-023b and FR-023c are new**: the mark grows so the sponsor lockup's second line is
+  legible, and exactly one asset serves all surfaces.
+
+### Two items re-checked closely and kept passing
+
+**"Success criteria are technology-agnostic"** was heading for the same regression
+iteration 3 caught. SC-019's first draft asserted the retired mark "returns no matches in
+the frontend's public assets, the backend's embedded assets, or any source reference" —
+three implementation locations in one criterion. Rewritten to the outcome: every surface
+shows the same mark, and the retired mark appears on none.
+
+**"All acceptance scenarios are defined"** would have failed: FR-022a, FR-022d, FR-023b and
+FR-023c were amended or added with nothing in User Story 2 exercising them. Scenarios 6 and
+7 were added — the client lists two documents with the images rendering in the body, and
+the mark's secondary line is legible at 100% zoom.
+
+### Scope deliberately left out, recorded so it is not mistaken for an oversight
+
+- **The receipt carries no brand mark and never has.** `drawBrandMark` is called only from
+  the e-ticket renderer, yet FR-023a and FR-035 both describe the mark as being on "all
+  three surfaces". Either the receipt gains a header band or those two requirements narrow
+  to two surfaces. Settling it would redesign a document nobody asked to change, so it is a
+  governance note rather than part of this change.
+- **The frontend's `favicon.ico` is still the unmodified Next.js scaffold icon** and the
+  document title is still "Event Ticketing". Neither is a logo call, so the "update every
+  logo call" instruction does not reach them.
+
 Items marked incomplete remain the two accepted implementation-detail deviations described
 above. They do not block `/speckit-tasks`.

@@ -273,12 +273,14 @@ func TestLoadDefaultsEveryBrandingValue(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "JIVE", cfg.BrandSiteName)
-	assert.Equal(t, "https://www.jive.co.id", cfg.BrandSiteURL)
-	assert.Equal(t, "help@manjo.com", cfg.BrandSupportEmail)
+	assert.Equal(t, "https://www.jive-promotion.com/", cfg.BrandSiteURL)
+	assert.Equal(t, "help@manjo.co.id", cfg.BrandSupportEmail)
 	assert.Equal(t, "PT Manjo Teknologi Indonesia", cfg.BrandLegalEntity)
 	assert.Equal(t, "Powered By Manjo", cfg.BrandAttribution)
-	// No logo ships with the repository, so the default is empty and the
-	// renderers fall back to a text wordmark (research R-005).
+	// BrandLogoPath is an OVERRIDE, so its default is empty. That no longer
+	// means no logo: since spec 016 the mark is compiled into the binary
+	// (assets.go), and an empty path selects the embedded asset rather than the
+	// text wordmark. The wordmark is now only the unreadable-asset failure path.
 	assert.Empty(t, cfg.BrandLogoPath)
 }
 
