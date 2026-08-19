@@ -79,6 +79,56 @@ test.describe("A throttled surface refuses past its configured threshold", () =>
   });
 });
 
+/**
+ * Spec 013 FR-012a's third carve-out (2026-08-19 amendment).
+ *
+ * A throttled check is not an availability race: nobody was faster, the guest is
+ * simply being asked to slow down, and reloading will not help. The endpoint had
+ * no throttle coverage at any tier before this — the file's header described the
+ * rig as leaving availability on, but nothing drove it.
+ *
+ * Deliberately API-level rather than through the browser. The frontend points at
+ * the MAIN api instance, so driving this in the UI would drain the shared
+ * availability bucket and refuse unrelated scenarios; the guest-facing sentence
+ * is pinned in frontend/lib/availability.test.ts instead, where it costs nothing.
+ */
+test.describe("The availability check is throttled too", () => {
+  test.skip(!config.rateLimitEnabled, "run with E2E_RATE_LIMIT_ENABLED=true");
+
+  test("a hammered availability check starts refusing", async () => {
+    const url = `${throttled}/api/v1/ticket/availability`;
+    // A well-formed body for rows that do not exist. The limiter is middleware,
+    // so the request spends allowance either way — the same reason the lookup
+    // scenarios above never need a real ticket.
+    const body = JSON.stringify({
+      event_id: "11111111-1111-1111-1111-111111111111",
+      items: [{ ticket_type_id: "22222222-2222-2222-2222-222222222222", quantity: 1 }],
+    });
+
+    const codes: number[] = [];
+    for (let i = 0; i < 16; i++) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      codes.push(res.status);
+    }
+
+    expect(codes).toContain(429);
+    // And it is the throttle refusing, not the handler: a refusal carries the
+    // rate-limit envelope code rather than a decision.
+    const refused = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    if (refused.status === 429) {
+      expect((await refused.json()).code).toBe(429001);
+    }
+  });
+});
+
 test.describe("A surface switched off individually refuses nothing", () => {
   test.skip(!config.rateLimitEnabled, "run with E2E_RATE_LIMIT_ENABLED=true");
 

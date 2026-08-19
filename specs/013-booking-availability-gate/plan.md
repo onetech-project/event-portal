@@ -1,6 +1,7 @@
 # Implementation Plan: Booking Availability Gate
 
-**Branch**: `fix/ticket` | **Date**: 2026-08-11 | **Spec**: [spec.md](spec.md)
+**Branch**: `fix/ticket` | **Date**: 2026-08-11, amended 2026-08-19 | **Spec**:
+[spec.md](spec.md)
 
 **Input**: Feature specification from `/specs/013-booking-availability-gate/spec.md`
 
@@ -26,6 +27,170 @@ On the client, `SelectionSummary` gains a real `<button>` that runs the check, a
 `TermsDialog` becomes a controlled dialog opened only by a clean decision.
 
 The check reserves nothing and locks nothing. Booking remains the sole authority.
+
+---
+
+## Amendment — one general refusal message (2026-08-19)
+
+The clarification session of 2026-08-19 inverts this feature's messaging rule. What was
+delivered renders **one guest-facing sentence per offending line**, echoing the server's
+own words; the amended spec renders **one fixed general message** for every availability
+refusal, at both the check and at Agree.
+
+### What changes
+
+Everything below the wire. The server keeps producing exactly what it produces today —
+every offending line, its stable string code, its sentence — and FR-006 reclassifies that
+payload as **diagnostic**. The collapse happens in the client.
+
+> **Someone was a bit faster!**
+> One of your selected tickets is no longer available in this quantity. Please refresh
+> the page and adjust your order.
+
+Three refusals are **not** that message and keep their own wording: the event has no
+authored terms (FR-012a), the check never reached the server (FR-012a), and a request the
+selection page could not have produced (`VALIDATION_ERROR`, spec Assumptions). A fourth —
+a throttled check — is a gap in the spec and is resolved in [research.md](research.md) D10.
+
+### The one hard problem: the client cannot always tell which kind of refusal it has
+
+This is the finding that shapes the whole amendment, and it is not visible from the spec.
+
+The **check** answers `200` with `AvailabilityDecision.reasons[].code` — the *stable
+string* code (`backend/internal/order/dto.go:110`). The client can separate all seven
+codes exactly.
+
+**Booking** answers with an error envelope, and `apperr.Body` is `{code int, message,
+data}` (`backend/pkg/apperr/apperr.go:180-201`) — the stable string is **never
+serialized**, and `backend/internal/order/handler_test.go:83-108` actively pins the body
+to exactly those three fields. So the booking path sees only the numeric code, and
+`apperr.Numeric` is lossy (`apperr.go:99-101`):
+
+| Numeric | Booking-time meaning on this route | Classification |
+|---------|-----------------------------------|----------------|
+| `400002` | `INSUFFICIENT_QUOTA` — nothing else | availability (unambiguous) |
+| `404001` | `TICKET_TYPE_NOT_FOUND` / `PACKAGE_NOT_FOUND` — verified nothing else reaches it from `Book` | availability |
+| `409001` | `TERMS_MISSING` — nothing else | own wording, stays in-dialog |
+| `429001` / `500000` | throttle / internal | own wording, stays in-dialog |
+| **`400001`** | **both on-sale codes AND every `VALIDATION_ERROR`** | **ambiguous — decided in D8** |
+
+`400001` is where FR-013a bites. It carries `TICKET_TYPE_NOT_ON_SALE` and
+`PACKAGE_NOT_ON_SALE` — genuine FR-012 availability races the spec names explicitly — in
+the same number as the `VALIDATION_ERROR` family the spec carves out. Nothing on the wire
+separates them, and matching on the message prose is matching on the sentences this
+amendment exists to stop rendering. [research.md](research.md) D8 decides it and states
+the residual risk.
+
+### Constitution re-check (amendment)
+
+| Principle | Verdict | Notes |
+|-----------|---------|-------|
+| **I–III, V–VII** | PASS, untouched | No new domain, no DTO change, no gateway, no cache interaction. The wire contract is byte-identical. |
+| **IV. Transactional Integrity** | PASS | Nothing in this amendment enters a transaction. `bookOnce` keeps every refusal path it has (FR-011); the only backend edit is a log line **after** the refusal is already an error, plus comment corrections. |
+| **VIII. E2E Acceptance** | **ACTION REQUIRED** | See below — this is a behaviour change to a covered flow *and* a bugfix, so it needs both spec updates and a red-first scenario. |
+| **IX. Throttling** | PASS, with a gap closed | D10 gives the throttled check its own wording instead of leaking echo's raw `"rate limit exceeded"` into the guest-facing alert. No throttle is added, removed, or retuned. |
+
+**End-to-end acceptance (Principle VIII):**
+
+- [x] **Touches a covered flow?** Yes — browse → select → terms → book. Four existing
+      scenarios in `e2e/specs/guest-purchase.spec.ts` assert the *old* wording and go red
+      on the correct implementation. They are rewritten, not extended:
+      `:855`, `:899`, `:954` assert server sentences; `:928` (terms) is correct and gains
+      the negative half of SC-005.
+- [x] **Red-first bugfix scenario.** FR-013a has **zero coverage at any tier** — no e2e,
+      no vitest, and `terms-dialog.test.tsx` never fails the `book` leg at all. The new
+      scenario is US1 AS6: the check passes, another guest takes the last seat through the
+      real API (`e2e/support/api.ts:353-369 bookAsAnotherGuest`), the guest presses Agree.
+      Against current code it fails for **two** independent real reasons — the dialog stays
+      open, and the text is `"Only fewer than N ticket(s) remain."`. **Assert the message
+      before asserting the dialog is hidden**: a bare `toBeHidden()` can pass on the first
+      poll and hand back a false green on exactly the bug under test.
+- [x] **New coverage required.** FR-012's exact string (absent from the repo entirely
+      today), FR-012a's two negatives, FR-013, FR-013a, and SC-005's "several offending
+      lines collapse to one message". `deleteTicketType` already exists at
+      `e2e/support/api.ts:200-205` for the item-deleted case SC-005 names.
+- [x] **Both cache and throttle modes.** Unchanged — this amendment reads no cache and
+      adds no throttle. Both runs must still pass.
+
+**Governance sync: none required.** [PRD.md:58](../../PRD.md) and
+[ARCHITECTURE.md:237-244](../../ARCHITECTURE.md) document only the mechanism — advisory
+endpoint, `200 { available, reasons[] }`, refusals collected rather than failed-fast — and
+every word of that survives. `SCHEMA.md` is untouched: no migration.
+
+### Spec deltas this plan requires
+
+Two gaps found in planning that the spec does not currently cover. Both are recorded here
+rather than silently implemented:
+
+1. **FR-012a enumerates two carve-outs; there are three.** A throttled check (HTTP 429) is
+   neither an availability race nor either listed exception, and today it prints echo's
+   middleware string `"rate limit exceeded"` into the alert named *"Why this selection
+   cannot be bought"*. Meanwhile `terms-dialog.tsx:234-236` already words 429 properly —
+   so the two points already tell different stories for one condition, which is what
+   FR-013 forbids. D10 resolves it; FR-012a should gain the third bullet.
+2. **FR-006 promises server-side records that do not exist.** Amended FR-006 justifies the
+   per-line detail "so a refusal can be explained after the fact from server-side records",
+   but the availability endpoint logs nothing — `availability.go` and `handler.go:86-98`
+   contain no log call, and a `200` never reaches `pkg/httpx/error_handler.go:39-44` where
+   booking refusals *are* logged at WARN with their stable code. D13 adds that log.
+
+### Files this amendment touches
+
+```text
+frontend/
+├── lib/
+│   ├── availability.ts               # REWRITE: code-aware classifier replaces the
+│   │                                 #   pass-through. Owns GENERAL_REFUSAL, the
+│   │                                 #   FR-012 code set, and booking's numeric map.
+│   │                                 #   Module docstring states the retired rule and
+│   │                                 #   must be rewritten with it.
+│   └── availability.test.ts          # REWRITE: :23-31/:33-40/:42-45 assert pass-through
+│                                     #   wording; :60-63 asserts booking echoes the
+│                                     #   server sentence — the opposite of FR-013.
+├── components/booking/
+│   ├── selection-summary.tsx         # MODIFY: refusals state collapses; ul/li becomes
+│   │                                 #   AlertTitle+AlertDescription (:196-215); new
+│   │                                 #   callback wired to TermsDialog (:229-236).
+│   │                                 #   Keep aria-label "Why this selection cannot be
+│   │                                 #   bought" — 4 e2e callers key on it.
+│   ├── selection-summary.test.tsx    # MODIFY: refusal-rendering tests
+│   ├── terms-dialog.tsx              # MODIFY: the book catch classifies its own
+│   │                                 #   failure, closes THROUGH handleOpenChange, and
+│   │                                 #   reports upward (see D9 — a parent-driven close
+│   │                                 #   is not viable)
+│   └── terms-dialog.test.tsx         # MODIFY: gains book-leg failure coverage, which
+│                                     #   it has none of today
+└── (no change) lib/types.ts, lib/api-client.ts, lib/queries.ts, lib/selection.ts
+
+backend/
+├── internal/order/availability.go    # MODIFY: WARN log of refused decisions (D13);
+│                                     #   retired-rationale comments at :29-32, :96-98,
+│                                     #   :142-145, :178-179
+└── internal/order/dto.go             # MODIFY: comments only — :87-89 and :111-113 state
+                                      #   the retired guest-facing motive. NOTE :105-109
+                                      #   is CORRECT and must survive: the string-code
+                                      #   rationale is what the new classifier depends on.
+
+e2e/
+├── support/journey.ts                # MODIFY: refusal helper; a sibling of
+│                                     #   agreeToTermsAndBook (21 happy-path callers —
+│                                     #   extend, never modify). Note visibleQuotaText
+│                                     #   (:123-127) is unused AND broken — its locator
+│                                     #   returns the whole list, not one row.
+└── specs/guest-purchase.spec.ts      # MODIFY: 4 scenarios rewritten, 3+ added
+
+specs/013-booking-availability-gate/  # contracts/availability.md, research.md,
+                                      # data-model.md, quickstart.md, tasks.md all
+                                      # encode the retired premise — see D14
+```
+
+**Not touched, deliberately**: `bookOnce`, `expandItem`, `aggregateDemand`,
+`EvaluateAvailability`'s decision logic, `apperr`, every Go test asserting stable codes
+(`availability_test.go`, `booking_test.go`, `handler_test.go`). Those assert the server's
+diagnostic payload, which FR-006 preserves verbatim — weakening them would be the wrong
+reading of this amendment.
+
+---
 
 ## Technical Context
 

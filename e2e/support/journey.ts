@@ -120,12 +120,6 @@ export class GuestJourney {
     return this.page.getByRole("alert", { name: /why this selection cannot be bought/i });
   }
 
-  /** Reads the remaining-quota figure the row advertises, if it shows one. */
-  async visibleQuotaText(ticketName: string): Promise<string> {
-    const row = this.page.locator("section", { hasText: ticketName }).first();
-    return (await row.textContent()) ?? "";
-  }
-
   /**
    * Presses "Buy Ticket" and waits for the availability check it fires to
    * settle (spec 013).
@@ -167,6 +161,30 @@ export class GuestJourney {
     // the holder-forms step, whose URL carries the order number.
     await this.page.waitForURL(/\/orders\/[^/]+$/, { timeout: 30_000 });
     return this.orderNumberFromUrl();
+  }
+
+  /**
+   * Ticks the agreement box and presses Agree on an ALREADY-OPEN terms dialog,
+   * expecting booking to refuse rather than navigate (spec 013 FR-013a).
+   *
+   * A sibling of `agreeToTermsAndBook` rather than a flag on it: that one blocks
+   * on `waitForURL`, and a refused booking never produces the URL it waits for.
+   * It also has a long tail of happy-path callers that must not be disturbed.
+   *
+   * Deliberately does NOT press Buy Ticket. The caller owns the gap between the
+   * passing check and this press, because that gap is where the race under test
+   * happens. Pressing it here would also fail outright: an open dialog marks the
+   * page behind it `aria-hidden`, so the button is no longer there to find.
+   *
+   * Presses only. The assertion belongs to the caller — what a refusal looks
+   * like is exactly what the amendment changed.
+   */
+  async agreeExpectingRefusal(): Promise<void> {
+    const dialog = this.page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    await dialog.getByRole("checkbox").click();
+    await dialog.getByRole("button", { name: /^agree$/i }).click();
   }
 
   orderNumberFromUrl(): string {

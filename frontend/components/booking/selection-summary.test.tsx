@@ -5,6 +5,7 @@ import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SelectionSummary } from "./selection-summary";
+import { GENERAL_REFUSAL } from "@/lib/availability";
 import type { AvailabilityReason, SelectionLine } from "@/lib/types";
 
 // The nested TermsDialog reaches for the router and the query client; neither
@@ -183,22 +184,26 @@ describe("SelectionSummary availability gate", () => {
     expect(fetchMock.mock.calls[0][0]).toContain("/ticket/availability");
   });
 
-  it("refuses without opening the terms, and says why", async () => {
+  it("refuses without opening the terms, showing the one general message", async () => {
     stubAvailability({ available: false, reasons: [refusal()] });
     renderSelection();
 
     await pressBuyTicket();
 
-    await waitFor(() =>
-      expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i }).textContent).toContain(
-        "Only fewer than 2 ticket(s) remain.",
-      ),
-    );
+    await waitFor(() => {
+      const alert = screen.getByRole("alert", {
+        name: /why this selection cannot be bought/i,
+      }).textContent;
+      expect(alert).toContain(GENERAL_REFUSAL.title);
+      expect(alert).toContain(GENERAL_REFUSAL.body);
+    });
     // The whole point: the guest never reaches the document.
     expect(screen.queryByText(/i agree to terms/i)).toBeNull();
   });
 
-  it("reports every offending line, not just the first", async () => {
+  it("collapses every offending line into one message (FR-012)", async () => {
+    // The server still reports both — FR-006 keeps that payload — but the count
+    // of faults, and which line caused them, is not the guest's business.
     stubAvailability({
       available: false,
       reasons: [
@@ -217,8 +222,38 @@ describe("SelectionSummary availability gate", () => {
 
     await waitFor(() => expect(screen.getByRole("alert", { name: /why this selection cannot be bought/i })).toBeTruthy());
     const alert = screen.getByRole("alert", { name: /why this selection cannot be bought/i }).textContent ?? "";
-    expect(alert).toContain("Only fewer than 2 ticket(s) remain.");
-    expect(alert).toContain("is not currently on sale");
+
+    expect(alert).toContain(GENERAL_REFUSAL.body);
+    // Said once, not once per line.
+    expect(alert.split("Someone was a bit faster!").length - 1).toBe(1);
+    // FR-013: no server sentence, and above all no quota figure.
+    expect(alert).not.toContain("Only fewer than 2 ticket(s) remain.");
+    expect(alert).not.toMatch(/is not currently on sale/i);
+    expect(alert).not.toMatch(/fewer than/i);
+  });
+
+  it("keeps the terms carve-out worded separately (FR-012a)", async () => {
+    stubAvailability({
+      available: false,
+      reasons: [
+        refusal({
+          item_index: null,
+          code: "TERMS_MISSING",
+          message: "This event has no Terms & Conditions to agree to yet.",
+        }),
+      ],
+    });
+    renderSelection();
+
+    await pressBuyTicket();
+
+    await waitFor(() => {
+      const alert = screen.getByRole("alert", {
+        name: /why this selection cannot be bought/i,
+      }).textContent;
+      expect(alert).toContain("no Terms & Conditions to agree to yet");
+      expect(alert).not.toContain(GENERAL_REFUSAL.title);
+    });
   });
 
   it("leaves the selection untouched when refused", async () => {

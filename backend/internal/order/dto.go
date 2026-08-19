@@ -84,9 +84,10 @@ func (r AvailabilityRequest) Validate() error {
 type AvailabilityDecision struct {
 	// Available is true if and only if Reasons is empty.
 	Available bool `json:"available"`
-	// Reasons carries EVERY refusal found, not the first: a guest fixing their
-	// selection one rejected line per attempt is the experience this endpoint
-	// exists to remove.
+	// Reasons carries EVERY refusal found, not the first. Originally so a guest
+	// could be told everything at once; since the 2026-08-19 amendment they are
+	// told one general sentence instead (FR-012), and this survives as the
+	// diagnostic record FR-006 requires.
 	Reasons []AvailabilityReason `json:"reasons"`
 }
 
@@ -106,10 +107,15 @@ type AvailabilityReason struct {
 	// apperr.Numeric renders TICKET_TYPE_NOT_ON_SALE, PACKAGE_NOT_ON_SALE and
 	// VALIDATION_ERROR all as 400001, so a client branching on numbers could not
 	// tell "your ticket stopped selling" from "your request was malformed" —
-	// which spec 013 FR-012 requires it to do.
+	// which spec 013 still requires it to do. The reason changed with the
+	// 2026-08-19 amendment and the need did not: the first two now fall in
+	// FR-012's general-message bucket while VALIDATION_ERROR keeps its own
+	// wording, so the client still has to separate them.
 	Code string `json:"code"`
-	// Message is the guest-facing sentence, produced by the same code that
-	// produces booking's message for this condition (FR-013).
+	// Message describes this refusal, produced by the same code that produces
+	// booking's message for the condition. DIAGNOSTIC since the 2026-08-19
+	// amendment: it is never rendered to a guest, who reads the fixed general
+	// message of FR-012 (FR-006, FR-013).
 	Message string `json:"message"`
 }
 
