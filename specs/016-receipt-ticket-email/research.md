@@ -855,3 +855,445 @@ rather than against the product.
 | R-023 | `drawEnvelope` gains explicit colours; single definition | `receipt_pdf.go`, `pdf.go` |
 | R-024 | First frontend change; plain `<img>` retained | `site-header.tsx` |
 | R-025 | E-ticket footer covered at the Go tier; `e2e/` gets body assertions only | `*_test.go`, `guest-purchase.spec.ts` |
+
+## R-026 — The subject line was never specified, and the implementation picked one
+
+**Decision**: the subject becomes `[<order number>] E-receipt & E-Ticket for <event name>`,
+composed at the send site from `order.OrderNumber` and `tickets[0].EventName` (FR-005a).
+
+Three findings, in the order they matter:
+
+**1. No requirement governed the subject before now.** `service.go:215` sends
+`fmt.Sprintf("Your tickets for %s", tickets[0].EventName)`, and `grep -i subject spec.md`
+returned nothing across all three prior revisions. This was an implementation choice that
+nobody had recorded, which is why changing it needs a new FR rather than an amendment to an
+existing one.
+
+**2. `contracts/notification.md:113` documented that choice as though it were a contract.**
+
+```go
+Subject: "Your tickets for " + tickets[0].EventName,
+```
+
+The contract is downstream of the spec, so it is the file that moves — but it is worth
+naming, because a reader consulting the contract rather than the spec would have concluded
+the old subject was specified.
+
+**3. No new data plumbing is required.** `OrderDelivery` already carries `OrderNumber` (it
+is what both attachment filenames are built from at `service.go:225`/`229`), and
+`tickets[0].EventName` is already read on the line being replaced. Orders are event-scoped
+(spec 007), so every ticket in an order carries the same event name and index 0 is safe —
+the existing code already depends on that.
+
+**Assertable at the e2e tier.** `MailMessage.Subject` is already declared in
+`e2e/support/mail.ts` and is read back off Mailpit on every delivery; no spec asserts it
+today. This is the cheapest new coverage in the feature — one `expect` on a field the helper
+already parses.
+
+**Alternatives considered**: hardcoding "JIVE 2026" (rejected in clarification — the
+platform is multi-event and every other surface prints the order's own event); the order's
+UUID in the brackets (rejected — it matches nothing the buyer can see on the receipt or in
+the filenames).
+
+## R-027 — The phone mask direction, and the two tests that cannot catch it
+
+**Decision**: `MaskPhone` keeps every character except the last 4, which become asterisks.
+`phoneKeepLeading`/`phoneKeepTrailing` collapse to a single `phoneMaskTrailing = 4`.
+
+**What the reported output actually was.** `14239***6621` is not a bug in the code — it is
+`phoneKeepLeading=5` / `phoneKeepTrailing=4` applied faithfully to a stored value with no
+`+62` prefix. The defect is that FR-033 specified the wrong shape, so the fix is to the rule,
+not to its implementation.
+
+| Stored value | Old rule | New rule |
+|---|---|---|
+| `+6281234567890` | `+62812****7890` | `+628123456****` |
+| `+628123456789` | `+6281****6789` | `+62812345****` |
+| `081234567890` | `08123***7890` | `08123456****` |
+| `081234567` | `08123****` | `08123****` (coincides) |
+| `0812` | `0***` | `****` |
+| `0` | `*` | `*` |
+
+**The short-value fallback changes shape and must be restated, not inherited.** The old code
+routed anything at or under 9 characters through `maskFrom(phone, phoneKeepLeading)`. Under
+the new rule that branch is gone: any value longer than 4 keeps `len-4` characters, and a
+value of 4 or fewer is masked entirely (FR-033). `0812 → 0***` becoming `0812 → ****` is a
+deliberate consequence, not an oversight — with only 4 characters, "everything except the
+last 4" is nothing.
+
+**`TestMaskingNeverLengthensAValue` still holds** and should not be touched: one asterisk
+replaces one character, so output length equals input length exactly, as the receipt's
+column alignment requires.
+
+**The finding worth acting on: two existing tests assert against the function under test.**
+
+```go
+// receipt_pdf_test.go:113
+assert.Contains(t, text, notification.MaskPhone("+628123456789"))
+// service_test.go:507
+maskedPhone := notification.MaskPhone("081234567890")
+```
+
+Both pass whatever `MaskPhone` returns. They verify that the two *surfaces* agree with the
+helper — which is genuinely what SC-008 asks of them — but neither can fail if the helper's
+shape is wrong. The literal shapes exist in exactly one place, `mask_test.go`'s table. So
+the new e2e assertion MUST use a literal string (`08123456****`), never a call through the
+helper, or the acceptance gate inherits the same blind spot.
+
+**Privacy cost, recorded because it was chosen and not overlooked.** The mask now discloses
+`len-4` characters where it disclosed 9. For a 12-digit Indonesian mobile that is 8 visible
+characters instead of 5, and the whole prefix and network block are legible on a receipt the
+buyer may forward. The clarification accepted this in exchange for the buyer recognising
+their own number. FR-033 and the spec's Assumptions both say so, so a later reader does not
+"restore" the old rule as a privacy fix.
+
+## Summary of decisions — Revision 4
+
+| ID | Decision | Touches |
+|---|---|---|
+| R-026 | Subject `[<order number>] E-receipt & E-Ticket for <event name>`, event read from the order | `service.go`, `contracts/notification.md`, `guest-purchase.spec.ts` |
+| R-027 | `MaskPhone` masks the trailing 4 only; ≤4 chars masked entirely; e2e asserts a literal | `mask.go`, `mask_test.go`, `guest-purchase.spec.ts` |
+
+## R-028 — The event name's crimson, and the constant it retires
+
+**Decision**: `#475569` as its own constant (`pdfEventName`), and `pdfBrand` is deleted.
+
+`pdfBrand = [3]int{203, 28, 79}` has **exactly one consumer** in the whole package —
+`pdf.go:252`, immediately before the uppercased event name. Recolouring that call site leaves
+the constant with no reader, so the choice is not "recolour or not" but "recolour and delete,
+or recolour and leave dead code that encodes the retired decision". The same reasoning R-027
+applied to the short-phone branch applies here.
+
+**Consequence worth stating plainly**: after this, the e-ticket carries **no brand crimson at
+all** outside the logo image itself. That matches the design, and SC-024 is written to fail
+if any survives.
+
+**Why not reuse `pdfAccent` (`#334155`)**: FR-022b pins that value to the QR accent rule, and
+the spec's own wording is "`#334155`, not red" — it was chosen for structure, not for text.
+Two visibly distinct slates doing two different jobs is the design's intent, not an
+accident. The clarification confirmed this rather than assumed it.
+
+**`emailBrand = "#cb1c4f"` is untouched.** It is the email body's Total Payment accent, a
+different surface with its own design, and no clarification reached it.
+
+## R-029 — The footer's emphasis is inverted, not merely off-shade
+
+**Decision**: labels to `#d0d1d4`, values and the envelope to pure white.
+
+The report was "the colour is a bit different". It is not a shade — the two roles are
+swapped:
+
+| Role | Design (`683:247`) | Code | Direction |
+|---|---|---|---|
+| Label (`JIVE`, `CUSTOMER SERVICE`) | white @ 80% opacity | `pdfBandFg` `#eceef3` | code is **brighter** |
+| Value (site URL, support address) | pure `#ffffff` | `pdfBandDim` `#969cac` | code is **much dimmer** |
+| Envelope icon | white | `pdfBandDim`, flap in band colour | code is dimmer |
+
+The design makes the label recede so the value carries the eye. The code does the opposite,
+which leaves `help@manjo.co.id` — the only value on the document a buyer needs to *act* on —
+as the dimmest text in the band. It is worst in greyscale print, which is how a large share
+of e-tickets are consumed.
+
+**The composite, computed rather than eyeballed.** Figma expresses the label as white at 80%
+opacity over the band; a PDF has no alpha here, so the flattened value must be worked out:
+
+```
+band #151a26 = (21, 26, 38)
+label = 0.8 x 255 + 0.2 x band
+      = (208.2, 209.2, 211.6)  →  (208, 209, 212) = #d0d1d4
+```
+
+**`pdfBandFg` survives; `pdfBandDim` does not.** `pdfBandFg` has a third consumer at
+`pdf.go:430` (the text-wordmark fallback when the logo asset is missing) and a fourth at
+`receipt_pdf.go:183`, so it stays as-is. `pdfBandDim`'s only two consumers are the footer
+value and the envelope, both of which become white — so it is deleted, and a new
+`pdfBandLabel = #d0d1d4` takes the label role.
+
+## R-030 — The e-ticket's type scale and palette, measured node by node
+
+**Decision**: adopt the design's sizes and weights wholesale (FR-003b). The palette finding
+below is **flagged, not adopted** — no clarification covers it.
+
+The Figma frame is 595x842, which is A4 at 72 dpi, so its px values are points 1:1 and
+compare directly with gofpdf's `SetFont` sizes.
+
+| Element | Design size/weight | Code | Ratio | Design colour | Code colour |
+|---|---|---|---|---|---|
+| `Ticket N of M` | 18 Bold | 16 B | 0.89 | `#1e293b` | `pdfInk` `#18181b` |
+| Identity label | 11 SemiBold | 7.5 regular | 0.68 | `#64748b` | `pdfGray` `#6e6e6e` |
+| Identity value | 16 Bold | 12 B | 0.75 | `#0f172a` | `pdfInk` `#18181b` |
+| Event name | 14 Bold | 9.5 B | 0.68 | `#475569` | `pdfBrand` `#cb1c4f` |
+| Ticket-type heading | 22 Bold | 20 B | 0.91 | `#0f172a` | `pdfInk` `#18181b` |
+| `VALID FOR` label | 11 SemiBold | 7.5 regular | 0.68 | `#64748b` | `pdfGray` `#6e6e6e` |
+| Valid-for value | 14 Bold | 12 B | 0.86 | `#0f172a` | `pdfInk` `#18181b` |
+| Footer label | 10 SemiBold | 7.5 B | 0.75 | white @80% | `pdfBandFg` `#eceef3` |
+| Footer value | 12 Medium | 9 regular | 0.75 | `#ffffff` | `pdfBandDim` `#969cac` |
+| Divider rule | — | — | — | `#e2e8f0` | `pdfLine` `#e0e0e4` |
+| Accent bar | 8 wide (2.82mm), 260 tall (91.7mm) | 3.0mm, 72.0mm | — | `#334155` | `pdfAccent` `#334155` ✓ |
+| QR | 200 (70.6mm) | 62.0mm | 0.88 | — | — |
+
+**Two findings fall out of this table that the spot check could not have produced.**
+
+**1. The ratios are not a scale factor.** They range 0.68 to 0.91 with no pattern. This is
+accumulated drift from hand-tuning, not a deliberate "the print version is smaller"
+decision — which is exactly why FR-003b asks for the design to be re-read rather than for the
+three known mismatches to be nudged.
+
+**2. The palette is a different colour family, and nothing in the spec covers it.** The
+design is Tailwind **slate** throughout — `#0f172a`, `#1e293b`, `#334155`, `#475569`,
+`#64748b`, `#e2e8f0`. The code is **zinc/neutral** — `#18181b`, `#6e6e6e`, `#e0e0e4` — with
+the single exception of `pdfAccent`, which is already the design's slate because FR-022b
+pinned it there.
+
+FR-019b and FR-022f fix the event name and the footer, which is what was asked. They leave
+the identity block, the pagination heading, the valid-for row and the divider on the zinc
+family. **This is recorded as a question for the user, not resolved here** — see plan.md
+Revision 6 "The one thing that needs a nod".
+
+## R-031 — Inter in gofpdf: mechanism, and the one asset trap
+
+**Decision**: `AddUTF8FontFromBytes` with **static** Inter TTFs shipped through the existing
+`//go:embed` assets path.
+
+```go
+// fpdf.go:1812 — takes bytes, not a path
+func (f *Fpdf) AddUTF8FontFromBytes(familyStr, styleStr string, utf8Bytes []byte)
+```
+
+This matters because the alternative, `AddUTF8Font(family, style, fileStr)`, needs a real
+file at render time and would drag a `SetFontLocation` and a deploy-time asset directory into
+a service that currently ships everything embedded.
+
+**Subsetting is automatic.** gofpdf tracks `usedRunes` per font (`fpdf.go:2217`, `:2428`,
+`:4109`) and writes only the glyphs actually drawn. A document therefore grows by a few KB
+per weight, not by the ~300 KB of a full Inter face. No manual subsetting step is needed.
+
+**The trap: use the static TTFs, not `InterVariable.ttf`.** gofpdf's `utf8fontfile` parses
+the classic TrueType tables. A variable font carries `fvar`/`gvar` on top of those, and
+gofpdf neither reads nor applies them — the best case is that every weight renders as the
+font's default instance, so Bold and SemiBold come out identical and nothing errors. That
+failure is silent and looks like a styling bug, which is why it is recorded here rather than
+discovered during implementation. Ship `Inter-Regular.ttf`, `Inter-Medium.ttf`,
+`Inter-SemiBold.ttf`, `Inter-Bold.ttf`, `Inter-Italic.ttf` from the release's `static`
+directory.
+
+**Licensing is not a blocker**: Inter is SIL Open Font License, which permits embedding.
+
+## R-032 — Four design weights, four gofpdf style slots, and they do not line up
+
+**Decision**: register Inter Regular/Bold/Italic under family `"Inter"`, and Medium and
+SemiBold as **their own families**.
+
+gofpdf's style string understands only `""`, `"B"`, `"I"` and `"BI"` — there is no slot for
+Medium (500) or SemiBold (600). The design uses four weights:
+
+| Design weight | Used by | Registration |
+|---|---|---|
+| Bold (700) | headings, identity values, event name, valid-for value | `AddUTF8FontFromBytes("Inter", "B", …)` |
+| SemiBold (600) | every uppercase label, both surfaces | `AddUTF8FontFromBytes("InterSemiBold", "", …)` |
+| Medium (500) | footer values | `AddUTF8FontFromBytes("InterMedium", "", …)` |
+| Regular (400) | receipt body text | `AddUTF8FontFromBytes("Inter", "", …)` |
+
+Italic is not in the e-ticket design but the code uses one (`"Helvetica", "I", 8.5`), so
+`Inter-Italic` is registered too rather than silently falling back.
+
+**The `SetFont("Helvetica", style, size)` call at `pdf.go` with a *variable* style** is the
+one call site that cannot be mechanically rewritten — it takes `style` as a parameter, so the
+family it needs depends on the caller. It must be read, not sed-replaced.
+
+## R-033 — `latin1()` must be removed, and leaving it is not the safe option
+
+**Decision**: delete `latin1()` and its 22 call sites in the same change as the font.
+
+It exists because gofpdf's core fonts are single-byte cp1252. For non-ASCII it does
+`out.WriteByte(byte(r))` — which writes bytes in the `0x80`–`0xFF` range **raw**, producing a
+Go string that is not valid UTF-8. Under a core font that is correct. Under an embedded UTF-8
+font, gofpdf decodes the string as UTF-8 and those bytes are malformed, so the output is
+garbage rather than an approximation.
+
+So "leave it in, remove it later" is not the low-risk option it looks like: it is the option
+that ships broken glyphs for exactly the names the change was supposed to fix.
+
+| File | `latin1()` call sites |
+|---|---|
+| `pdf.go` | 12 |
+| `receipt_pdf.go` | 10 |
+
+**The upside, which arrived as a side effect**: today an Indonesian or European name carrying
+a diacritic is transliterated to its nearest plain letter on a document the holder presents
+at a gate. With Inter embedded it renders as stored. FR-003a states this so it is not
+mistaken for incidental.
+
+## R-034 — Letter-spacing cannot be reproduced, and no workaround is worth it
+
+**Decision**: accept no tracking. Record it rather than fake it.
+
+Every uppercase label in the design carries tracking — 0.55px on the identity and valid-for
+labels, 0.5px on the footer labels, 0.35px on the event name. gofpdf exposes
+`SetWordSpacing` (the PDF `Tw` operator) but **not** character spacing (`Tc`); there is no
+method for it in v1.16.2.
+
+The workarounds are worse than the gap:
+
+- **Draw character by character with manual advances** — breaks `MultiCell` wrapping, which
+  the event name depends on for long names (the spec's own edge case), and puts a per-glyph
+  loop in the hot path of every label on both documents.
+- **Insert thin spaces between letters** — corrupts the text layer, so the address is no
+  longer selectable or searchable in a PDF reader.
+
+At 10–11 pt the absent tracking is a sub-pixel difference per glyph. FR-003b's acceptance is
+therefore about **size and weight**, and this is named as a known limit so a later reader does
+not treat it as an unfinished item.
+
+## R-035 — What catches metric drift, and what does not
+
+Inter is wider than Helvetica at equal point size, so every hand-tuned coordinate moves.
+
+**Catches it:**
+
+- `receipt_pdf_test.go` table geometry — SC-016 (left inset) and SC-017 (`Price` centred,
+  `Qty`/`Total` right-aligned) are measured through the `TableInsets` / `HeaderColumnRights`
+  seams and will fail loudly on drift.
+- `customerServiceBlock` — computes its own width from `GetStringWidth`, so it **self-adjusts**
+  and FR-022e's short/long-address test keeps passing by construction.
+- `eticket_test.go` band-geometry seam (T132) — the band and mark are measured, not assumed.
+
+**Does not catch it:**
+
+- Anything absolutely positioned with no assertion below it. The e-ticket's page constants are
+  offsets from `bandHeight` (R-022) but the offsets themselves are literals: a heading that
+  grows 16 → 18 pt pushes into the accent rule with nothing to notice.
+- `e2e/` — the shipped PDF is compressed (R-025). Playwright sees attachment count, filename,
+  magic bytes and page count, and nothing about layout.
+
+**Therefore the type-scale change needs a visual diff, not just a green suite.** Render the
+e-ticket before and after and compare against Figma `683:148` by eye — quickstart Revision 6
+Step 3. This is the same conclusion R-021 reached about the mark's legibility, and for the
+same reason: no assertion in this repo vouches for "looks like the design".
+
+## Summary of decisions — Revisions 5 and 6
+
+| ID | Decision | Touches |
+|---|---|---|
+| R-028 | Event name `#475569` as `pdfEventName`; `pdfBrand` deleted | `pdf.go` |
+| R-029 | Footer emphasis inverted back: labels `#d0d1d4`, values and envelope white; `pdfBandDim` deleted | `pdf.go` |
+| R-030 | E-ticket type scale adopted wholesale; **zinc-vs-slate palette flagged, not adopted** | `pdf.go` |
+| R-031 | `AddUTF8FontFromBytes` + static Inter TTFs via `//go:embed`; never the variable font | `assets/`, `pdf.go`, `receipt_pdf.go` |
+| R-032 | Regular/Bold/Italic as `Inter`; Medium and SemiBold as their own families | same |
+| R-033 | `latin1()` deleted, 22 call sites, same change as the font | `text.go`, `pdf.go`, `receipt_pdf.go` |
+| R-034 | Letter-spacing not reproducible; accepted and recorded | — |
+| R-035 | Geometry drift needs a visual diff; the suite alone does not vouch for it | `quickstart.md` |
+
+## R-036 — The email rule inverts, and `maskFrom` dies with it
+
+**Decision**: `MaskEmail` masks the last 3 characters of the local part, keeping at least one
+character visible. `emailKeep` and `maskFrom` are deleted.
+
+| Local part | Old (keep first 5) | New (mask last 3) |
+|---|---|---|
+| `dimasprasetyo` (13) | `dimas********` | `dimasprase***` |
+| `alexpradita` (11) | `alexp******` | `alexprada***` |
+| `dimas` (5) | `dimas` — **printed whole** | `di***` |
+| `budi` (4) | `b***` | `b***` (coincides) |
+| `abc` (3) | `a**` | `a**` (coincides) |
+| `ab` (2) | `a*` | `a*` (coincides) |
+| `a` (1) | `*` | `*` (coincides) |
+
+**The rule closes a disclosure, not just an asterisk count.** Under keep-first-5 a local part of
+exactly 5 characters returned unchanged — `maskFrom` has an explicit `len == keep` branch that
+returns `s`. A masking function returning its input is the one outcome such a function exists
+to prevent, and no requirement had ever noticed. The new floor — at least one character
+hidden, always — removes the branch entirely.
+
+**`maskFrom` becomes dead code and must go.** Revision 4 deleted its phone caller; this deletes
+its two email callers (`mask.go:46`, `:50`). Nothing else in the package references it. Left
+behind, it would be a helper encoding a superseded rule, sitting in the same file as the rule
+that replaced it.
+
+**The floors are arithmetic, and worth writing down**: asterisks = `min(3, len-1)`, except a
+one-character local part, which cannot both keep a character and hide one, and is masked
+entirely. Four of the seven cases above coincide with the old rule — which is exactly why the
+test fixtures need checking rather than trusting (R-037).
+
+## R-037 — The e2e fixture is blind to this change
+
+**Decision**: change `defaultHolder.email` from `budi@example.com` to a local part longer than
+four characters, or the e2e assertion cannot be red.
+
+`e2e/support/journey.ts:26` carries `budi@example.com`. Its local part is 4 characters, and
+the table above shows 4-character locals render `b***` under **both** rules. An e2e assertion
+written against the current fixture would be green before and after the fix — the "never seen
+red" failure Principle VIII names by hand, and the second time this feature has walked into
+it (R-027 caught the first).
+
+**The blast radius is one line.** `defaultHolder.email` is referenced three times and every one
+of them is by identity, not by literal:
+
+```
+guest-purchase.spec.ts:124  expect(order.buyer_email).toBe(defaultHolder.email)
+guest-purchase.spec.ts:157  waitForMail(defaultHolder.email)
+guest-purchase.spec.ts:245  waitForMail(defaultHolder.email, { minCount: 2 })
+```
+
+No spec hardcodes the address. Changing the constant is therefore safe, and it makes every
+spec that fills a holder form exercise a mask that actually hides something.
+
+`siti@example.com` (the second holder) stays as it is: holder addresses are printed in **full**
+on the e-ticket by FR-034, so its length has no bearing on any mask.
+
+**Alternative considered and rejected**: leave the fixture and cover the email at the Go tier
+only. It would work, but it declines free acceptance coverage on a covered flow for no reason
+other than not editing a constant — and it would leave `mail.HTML` asserting the phone mask
+while silently ignoring the email mask beside it.
+
+## R-038 — `MaskEmail` and `MaskPhone` stay two functions
+
+**Decision**: keep them separate. Do not extract a shared "mask the trailing N" helper.
+
+After this change the two are the same shape — mask the tail, keep the head — which invites a
+merge. They differ in the one place that matters, their floor:
+
+| | Trailing masked | Floor when the value is too short |
+|---|---|---|
+| Phone | 4 | masked **entirely** at 4 characters or fewer |
+| Email local part | 3 | keeps **one character visible**; masked entirely only at length 1 |
+
+Those floors come from different requirements, not from an accident: the phone's is arithmetic
+("everything except the last four" is nothing at four), while the email's was asked for
+directly — a two-character local part renders one asterisk.
+
+A shared helper would carry the difference as a boolean parameter, which reads at every call
+site as `maskTrailing(local, 3, true)` — a literal true that no reader can decode without
+opening the definition. Two short functions, each obvious on its own, are the better trade.
+Recorded because the symmetry is genuinely tempting and the merge looks like a cleanup.
+
+## R-039 — The same two tests still cannot catch it
+
+`receipt_pdf_test.go:112` and `service_test.go:510` call `MaskEmail` as their own oracle,
+exactly as their phone counterparts do:
+
+```go
+assert.Contains(t, text, notification.MaskEmail("alexpradita@gmail.com"))
+maskedEmail := notification.MaskEmail("budi@example.com")
+```
+
+Both pass whatever the helper returns. They stay as they are — proving the two surfaces agree
+with one helper is what SC-008 asks of them — and `TestMaskEmail` remains the only place the
+literal shapes are pinned, so **four of its seven cases change** (`bud`, `a` and the empty value coincide between the two rules).
+
+`service_test.go:510`'s fixture is `budi@example.com`, whose output coincides under both
+rules, so even a literal rewrite there would not be red. `receipt_pdf_test.go:112`'s
+`alexpradita@gmail.com` does change (`alexp******` → `alexprada***`) and is the better fixture
+if a literal assertion is wanted at that tier.
+
+`TestMaskingNeverLengthensAValue` still holds: asterisks replace exactly the characters they
+hide, so a masked value is never longer than the stored one.
+
+## Summary of decisions — Revision 7
+
+| ID | Decision | Touches |
+|---|---|---|
+| R-036 | `MaskEmail` masks the trailing 3, floor of one visible character; `emailKeep` and `maskFrom` deleted | `mask.go` |
+| R-037 | `defaultHolder.email` lengthened so the e2e assertion can be red | `e2e/support/journey.ts` |
+| R-038 | Two mask functions, not one shared helper — the floors differ by requirement | `mask.go` |
+| R-039 | `TestMaskEmail` rewritten (4 of 7 cases change); the two oracle-style tests left alone | `mask_test.go` |

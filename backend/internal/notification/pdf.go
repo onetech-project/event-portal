@@ -132,10 +132,9 @@ func renderTicketsPDF(order OrderDelivery, tickets []TicketDetail, brand Brandin
 // The palette, mirrored from the frontend brand tokens so the printed documents
 // match the site and the email.
 var (
-	pdfBrand = [3]int{203, 28, 79}
-	pdfInk   = [3]int{24, 24, 27}
-	pdfLine  = [3]int{224, 224, 228}
-	pdfGray  = [3]int{110, 110, 110}
+	pdfInk  = [3]int{24, 24, 27}
+	pdfLine = [3]int{224, 224, 228}
+	pdfGray = [3]int{110, 110, 110}
 	// #151A26, the design's band colour.
 	//
 	// This used to be load-bearing for a second reason: the retired mark had a
@@ -144,12 +143,27 @@ var (
 	// alpha channel (research R-020), so that constraint is gone and this is a
 	// free design choice again. Recorded because the old comment would otherwise
 	// have a future reader preserve a coupling that no longer exists.
-	pdfBand    = [3]int{21, 26, 38}
-	pdfBandFg  = [3]int{236, 238, 243}
-	pdfBandDim = [3]int{150, 156, 172}
-	// The accent rule beside the QR panel: #334155, the design's slate. Not
-	// pdfBrand — this is structure, not brand accent.
+	pdfBand   = [3]int{21, 26, 38}
+	pdfBandFg = [3]int{236, 238, 243}
+	// The footer's VALUES — the site address and the support address — in pure
+	// white, so the one thing a buyer acts on is the brightest text in the band
+	// (FR-022f). This inverts what the code did until 2026-08-19.
+	pdfBandValue = [3]int{255, 255, 255}
+	// The accent rule beside the QR panel: #334155, the design's slate. Not a
+	// brand accent — this is structure.
 	pdfAccent = [3]int{51, 65, 85}
+	// #475569, the event name above the ticket-type heading (FR-019b).
+	//
+	// Distinct from pdfAccent on purpose. FR-022b reserves #334155 for the QR
+	// rule, and the design draws these two slates at different weights for
+	// different jobs — collapsing them would lose that.
+	pdfEventName = [3]int{71, 85, 105}
+	// #d0d1d4, the e-ticket footer's section labels (FR-022f).
+	//
+	// The design expresses this as white at 80% opacity over the band. A PDF has
+	// no alpha here, so the value is the flattened composite:
+	// 0.8*255 + 0.2*band, componentwise against #151a26.
+	pdfBandLabel = [3]int{208, 209, 212}
 )
 
 // A4 portrait geometry, in mm. Named because three renderers share them and a
@@ -248,8 +262,9 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	labelledValue("Email", ticket.AttendeeEmail)
 	labelledValue("Order No.", order.OrderNumber)
 
-	// Event name above the ticket-type headline (FR-019).
-	setColor(pdf, pdfBrand)
+	// Event name above the ticket-type headline (FR-019), in the design's slate
+	// rather than the brand crimson it used until 2026-08-19 (FR-019b).
+	setColor(pdf, pdfEventName)
 	pdf.SetFont("Helvetica", "B", 9.5)
 	pdf.SetXY(marginLeft, eventY)
 	pdf.MultiCell(contentWide, 5, latin1(strings.ToUpper(ticket.EventName)), "", "L", false)
@@ -315,11 +330,11 @@ func drawTicketFooter(pdf *gofpdf.Fpdf, brand Branding) {
 
 	const labelY, valueY = 7.0, 11.5
 
-	setColor(pdf, pdfBandFg)
+	setColor(pdf, pdfBandLabel)
 	pdf.SetFont("Helvetica", "B", 7.5)
 	pdf.SetXY(marginLeft, footerTop+labelY)
 	pdf.CellFormat(80, 4, latin1(strings.ToUpper(brand.SiteName)), "", 1, "L", false, 0, "")
-	setColor(pdf, pdfBandDim)
+	setColor(pdf, pdfBandValue)
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetX(marginLeft)
 	pdf.CellFormat(80, 5, latin1(brand.SiteURL), "", 1, "L", false, 0, "")
@@ -327,7 +342,7 @@ func drawTicketFooter(pdf *gofpdf.Fpdf, brand Branding) {
 	const label = "CUSTOMER SERVICE"
 	blockLeft, blockWidth := customerServiceBlock(pdf, label, brand.SupportEmail)
 
-	setColor(pdf, pdfBandFg)
+	setColor(pdf, pdfBandLabel)
 	pdf.SetFont("Helvetica", "B", 7.5)
 	pdf.SetXY(blockLeft, footerTop+labelY)
 	pdf.CellFormat(blockWidth, 4, label, "", 1, "L", false, 0, "")
@@ -339,15 +354,16 @@ func drawTicketFooter(pdf *gofpdf.Fpdf, brand Branding) {
 	// reading GetY() after drawEnvelope returns the icon path's own Y and pushes
 	// the address below its own icon.
 	//
-	// The flap is drawn in the BAND colour rather than white — on this ground the
-	// envelope reads as a cut-out, and white would glare next to 9pt dim text.
+	// The body is white, matching the address it precedes (FR-022f). The FLAP
+	// stays the band colour rather than becoming white too: on this ground that
+	// is what makes the envelope read as a cut-out instead of a filled block.
 	const lineHeight = 5.0
 	const bodyTop, bodyBottom = 2.0 / 12, 10.0 / 12
 	textY := footerTop + valueY
 	iconY := textY + lineHeight/2 - footerIconSize*(bodyTop+bodyBottom)/2
-	drawEnvelope(pdf, blockLeft, iconY, footerIconSize, pdfBandDim, pdfBand)
+	drawEnvelope(pdf, blockLeft, iconY, footerIconSize, pdfBandValue, pdfBand)
 
-	setColor(pdf, pdfBandDim)
+	setColor(pdf, pdfBandValue)
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetXY(blockLeft+footerIconSize+footerIconGap, textY)
 	pdf.CellFormat(blockWidth-footerIconSize-footerIconGap, lineHeight,

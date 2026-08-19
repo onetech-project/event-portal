@@ -23,7 +23,10 @@ export type Holder = {
 
 export const defaultHolder: Holder = {
   name: "Budi Santoso",
-  email: "budi@example.com",
+  // Local part deliberately longer than four characters. At four or fewer the
+  // email mask renders identically under the old and new FR-033 rules, so an
+  // assertion on the masked address could never be red (research R-037).
+  email: "budisantoso@example.com",
   phone: "081234567890",
   gender: "Male",
   dob: "15/08/1995",

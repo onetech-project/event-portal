@@ -20,7 +20,8 @@ import type { ResendRetryAfter, TicketOrderDetail } from "@/lib/types";
  */
 export function OrderConfirmation({
   order,
-}: Readonly<{ order: TicketOrderDetail }>) {
+  event
+}: Readonly<{ order: TicketOrderDetail; event: string }>) {
   return (
     <main className="mx-auto w-full max-w-2xl flex-1 px-6 py-10">
       <Card className="items-center gap-6 py-6">
@@ -48,7 +49,7 @@ export function OrderConfirmation({
 
           <Receipt order={order} />
 
-          <Button render={<Link href="/" />} variant="outline" size="lg">
+          <Button render={<Link href={`/events/${event}`} />} variant="outline" size="lg">
             Back to home
           </Button>
         </CardContent>

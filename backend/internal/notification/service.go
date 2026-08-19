@@ -211,8 +211,16 @@ func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) (strin
 	body, inline := buildEmailBody(order, tickets, s.brand)
 
 	if err := s.mailer.Send(Message{
-		To:       recipient,
-		Subject:  fmt.Sprintf("Your tickets for %s", tickets[0].EventName),
+		To: recipient,
+		// FR-005a: the order first, then the event it belongs to. The order
+		// number is the same identifier the receipt prints as "Order No." and
+		// both attachment filenames carry, so a buyer searching their inbox and
+		// a support agent reading a receipt are looking at one string.
+		//
+		// The event name is READ FROM THE ORDER, never fixed: tickets[0] is safe
+		// because orders are event-scoped (spec 007), so every ticket in an order
+		// carries the same event.
+		Subject:  fmt.Sprintf("[%s] E-receipt & E-Ticket for %s", order.OrderNumber, tickets[0].EventName),
 		HTMLBody: body,
 		// The brand mark and the location pin, referenced from the body by
 		// content ID. Not attachments — a buyer still receives exactly two

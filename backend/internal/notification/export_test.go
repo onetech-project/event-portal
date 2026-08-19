@@ -2,6 +2,8 @@ package notification
 
 import (
 	"bytes"
+	"fmt"
+	"math"
 
 	"github.com/jung-kurt/gofpdf"
 )
@@ -90,4 +92,63 @@ func BrandMarkBox(brand Branding) (w, h float64, ok bool) {
 	}
 	h = bandHeight - 2*logoBandInset
 	return h * info.Width() / info.Height(), h, true
+}
+
+// --- Spec 016 Revision 5: colour seams -------------------------------------
+
+// ColorOperator returns the PDF content-stream operator gofpdf emits for a text
+// or fill colour, so a test can search a rendered page for the colour a node was
+// ACTUALLY drawn in.
+//
+// This exists because the alternative is circular: a test that compares a
+// package constant against itself passes for any value, which is the blind spot
+// research R-027 found in the mask tests. Here the expected operator is built
+// from a literal in the test and matched against the document's own bytes.
+//
+// The formatting mirrors gofpdf's rgbColorValue (fpdf.go:863) exactly, quirk
+// included: a colour it considers grey collapses to the one-component "g"
+// operator instead of three components and "rg". Its grey test compares the red
+// and green INTEGER components but the red and blue FLOAT ones; that asymmetry
+// is reproduced rather than corrected, because the goal is to match what the
+// library writes, not what it ought to write.
+func ColorOperator(c [3]int) string {
+	r := float64(c[0]) / 255.0
+	g := float64(c[1]) / 255.0
+	b := float64(c[2]) / 255.0
+	if c[0] == c[1] && r == b {
+		return fmt.Sprintf("%.3f g", r)
+	}
+	return fmt.Sprintf("%.3f %.3f %.3f rg", r, g, b)
+}
+
+// The palette values the colour assertions name. Exported individually rather
+// than as one map so a deleted constant is a compile error in this file, which
+// is where a reader looks to find out what the document is supposed to use.
+var (
+	PdfEventName = pdfEventName
+	PdfBandLabel = pdfBandLabel
+	PdfBandFg    = pdfBandFg
+	PdfWhite     = [3]int{255, 255, 255}
+)
+
+// RetiredCrimson is the brand crimson the e-ticket used for its event name until
+// FR-019b moved it to slate.
+//
+// It is a LITERAL and must stay one. Writing it as pdfBrand would delete this
+// guard along with the constant, and SC-024's whole job is to fail if the colour
+// ever comes back.
+var RetiredCrimson = [3]int{203, 28, 79}
+
+// RelativeLuminance is the WCAG relative luminance of a colour, used to assert
+// that the footer's labels recede behind the values they head (FR-022f) rather
+// than only that two particular hex values were drawn.
+func RelativeLuminance(c [3]int) float64 {
+	lin := func(v int) float64 {
+		s := float64(v) / 255.0
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(c[0]) + 0.7152*lin(c[1]) + 0.0722*lin(c[2])
 }

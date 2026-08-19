@@ -110,7 +110,7 @@ What `SendTicketEmail` hands to `Mailer.Send`:
 ```go
 Message{
     To:      order.BuyerEmail,                       // unchanged: the primary contact, alone
-    Subject: "Your tickets for " + tickets[0].EventName,
+    Subject: "[" + order.OrderNumber + "] E-receipt & E-Ticket for " + tickets[0].EventName,
     HTMLBody: buildEmailBody(order, tickets, brand), // rewritten to Figma 741-5105
     Attachments: []Attachment{
         {Filename: "receipt-" + order.OrderNumber + ".pdf",  ContentType: "application/pdf", Content: receiptPDF},
@@ -126,6 +126,11 @@ Message{
 - Both filenames contain the order number and differ from each other (FR-004).
 - Both are `application/pdf` and both begin with the `%PDF-` magic bytes.
 - `HTMLBody` contains no ticket code and no `data:image` QR (FR-030).
+- `Subject` is `[<order number>] E-receipt & E-Ticket for <event name>`, with the order
+  number matching both attachment filenames and the event name read from the order rather
+  than fixed (FR-005a, SC-022). **Revision 4** — the previous `"Your tickets for " +
+  EventName` recorded here was an implementation choice no requirement had ever governed
+  (R-026).
 - Ordering: receipt first. Not required by the spec, but fixed here so the assertions can
   be positional rather than order-tolerant, and so two mail clients don't show the buyer a
   different first attachment.
@@ -377,6 +382,17 @@ asset behind it changes.
 | Backend (embedded) | `internal/notification/assets/brand/jive-logo-white.png` | `//go:embed`; trimmed, 800 px wide, 64-colour, ~15 KB |
 | Frontend (public) | `/brand/jive-logo-white.png` | Same derivative; served statically |
 | Frontend (public) | `/brand/jive-logo-black.png` | Carried for light surfaces; **no consumer today** (FR-023c) |
+| Backend (embedded) | `internal/notification/assets/fonts/Inter-{Regular,Medium,SemiBold,Bold,Italic}.ttf` | **Revision 6.** `//go:embed`, registered via `AddUTF8FontFromBytes`; gofpdf subsets to the glyphs drawn, so each document grows a few KB per weight (FR-003a, R-031) |
+
+**The five font faces MUST be the static instances, never `InterVariable.ttf`.** gofpdf reads
+the classic TrueType tables and ignores `fvar`/`gvar`: a variable font renders every weight as
+its default instance, so Bold and SemiBold come out identical and **no error is raised**. The
+failure is silent and reads as a styling bug (R-031).
+
+Two of the design's weights have no gofpdf `styleStr` and are registered as their own
+families — `InterMedium` and `InterSemiBold` — while Regular, Bold and Italic occupy
+`Inter`'s `""`, `"B"` and `"I"` slots (R-032).
+
 
 `/brand/jive-logo.png` is **removed**. It is referenced today only by `site-header.tsx:21`;
 SC-019 fails if any reference or either copy survives.

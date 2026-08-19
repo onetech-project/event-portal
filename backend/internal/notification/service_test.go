@@ -190,7 +190,11 @@ func TestSendTicketEmailSendsOneEmailToTheBuyerWithEveryTicket(t *testing.T) {
 	assert.NotContains(t, f.mailer.toAddresses(), "ani@example.com",
 		"holder addresses are identity, never delivery targets")
 	assert.NotContains(t, f.mailer.toAddresses(), "bayu@example.com")
-	assert.Contains(t, msg.Subject, "Jazz Night 2026")
+	// Spec 016 FR-005a / SC-022: the whole subject, not just the event name.
+	// The previous Contains("Jazz Night 2026") passed unchanged under the new
+	// subject — a test that survives a deliberate behaviour change was not
+	// asserting that behaviour.
+	assert.Equal(t, "[ORD-20260731-ABCDEF] E-receipt & E-Ticket for Jazz Night 2026", msg.Subject)
 
 	// Spec 016 FR-001: two attachments now — the receipt and the merged tickets.
 	require.Len(t, msg.Attachments, 2, "a receipt and one PDF holding every ticket")

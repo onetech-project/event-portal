@@ -16,26 +16,39 @@ import (
 // included — those are the ones that turn a masking helper into a disclosure.
 func TestMaskEmail(t *testing.T) {
 	for name, tc := range map[string]struct{ in, want string }{
-		"ordinary address keeps five and the whole domain": {
-			in: "dimasprasetyo@gmail.com", want: "dimas********@gmail.com",
+		"ordinary address masks only the trailing three of the local part": {
+			in: "dimasprasetyo@gmail.com", want: "dimasprase***@gmail.com",
 		},
-		"local part exactly the kept prefix is unchanged": {
-			in: "dimas@gmail.com", want: "dimas@gmail.com",
+		"five-character local part is no longer printed whole": {
+			// Under the superseded keep-first-5 rule this returned UNCHANGED — a
+			// masking function handing back its input. FR-033's floor now hides at
+			// least one character always.
+			in: "dimas@gmail.com", want: "di***@gmail.com",
 		},
-		"local part shorter than the prefix masks from the second character": {
+		"four characters coincide with the superseded rule": {
+			in: "budi@gmail.com", want: "b***@gmail.com",
+		},
+		"three characters keep one visible and mask the rest": {
 			in: "bud@gmail.com", want: "b**@gmail.com",
 		},
-		"single character local part is masked, not disclosed": {
+		"two characters get exactly one asterisk": {
+			in: "ab@gmail.com", want: "a*@gmail.com",
+		},
+		"single character cannot keep one and hide one, so it is masked entirely": {
 			in: "a@gmail.com", want: "*@gmail.com",
 		},
-		"no at sign is treated as a local part and never printed whole": {
-			in: "notanemail", want: "notan*****",
+		"no at sign is treated as a local part under the same rule": {
+			// Accepted knowingly in clarification: this discloses more than the old
+			// rule did. The field is format-validated at checkout, so the branch is
+			// close to unreachable, and a second masking rule would be a second
+			// thing to keep correct.
+			in: "notanemail", want: "notanem***",
 		},
 		"empty stays empty so the row is omitted rather than showing asterisks": {
 			in: "", want: "",
 		},
 		"only the last at sign splits, so a quoted local part survives": {
-			in: "we.ird@thing@example.com", want: "we.ir*******@example.com",
+			in: "we.ird@thing@example.com", want: "we.ird@th***@example.com",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -49,20 +62,23 @@ func TestMaskEmail(t *testing.T) {
 // phone number on their own receipt, which is a surprise nobody asked for.
 func TestMaskPhone(t *testing.T) {
 	for name, tc := range map[string]struct{ in, want string }{
-		"international form keeps five leading and four trailing": {
-			in: "+628123456789", want: "+6281****6789",
+		"international form masks only the trailing four": {
+			in: "+6281234567890", want: "+628123456****",
 		},
-		"local form long enough for both windows": {
-			in: "081234567890", want: "08123***7890",
+		"one character shorter, one character less kept": {
+			in: "+628123456789", want: "+62812345****",
 		},
-		"exactly nine has no room for a trailing window": {
+		"local form masks only the trailing four": {
+			in: "081234567890", want: "08123456****",
+		},
+		"nine characters, same shape as the superseded rule by coincidence": {
 			in: "081234567", want: "08123****",
 		},
-		"exactly the two windows with nothing between is unchanged": {
-			in: "081234567", want: "08123****",
+		"separators the buyer typed survive verbatim": {
+			in: "+62 812 3456 7890", want: "+62 812 3456 ****",
 		},
-		"shorter than the leading window masks from the second character": {
-			in: "0812", want: "0***",
+		"exactly the trailing window is masked entirely": {
+			in: "0812", want: "****",
 		},
 		"single character is masked": {
 			in: "0", want: "*",

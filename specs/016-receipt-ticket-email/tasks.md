@@ -840,3 +840,762 @@ shippable and testable without touching the email or the frontend.
 
 **Do not start with the frontend.** It is the only blocked work, and it is the only surface
 none of the three user stories covers.
+
+---
+
+# Revision 4 — Subject Line + Phone Mask Tasks (2026-08-19)
+
+**Spec**: [spec.md](./spec.md) §Clarifications, Session 2026-08-19 (subject line + phone
+masking) · **Plan**: [plan.md](./plan.md) §Revision 4 · **Research**: R-026, R-027
+
+Task IDs continue from T160. Revisions 1–3 are complete; nothing below re-opens them.
+
+> **`setup-tasks.sh` cannot resolve this feature.** It derives `FEATURE_DIR` from the branch,
+> and `fix/receipt` is not numbered, so it now reports `020-qris-frame-simplify` (the
+> fallback target moved because a newer spec directory exists). It is read-only and wrote
+> nothing. **`/speckit-implement` must be pointed at `016-receipt-ticket-email` explicitly.**
+
+## Three things to read before starting
+
+**The phone mask IS a real bug this time.** Unlike Revision 3, Principle VIII's red-first
+rule applies: the e2e scenario must be confirmed failing against unfixed code before
+`mask.go` is touched.
+
+**Do not write the mask assertion through `MaskPhone`.** R-027: two existing Go tests already
+use the helper as their own oracle and pass for any shape it returns. The e2e assertion must
+be the literal `08123456****`, or the acceptance gate inherits the same blind spot and the
+scenario can never be red.
+
+**The subject was never specified** (R-026). FR-005a is a new requirement, not an amendment,
+and `contracts/notification.md` recorded the old string as though it were a contract — that
+file was corrected during planning.
+
+---
+
+## Phase 1: Setup (Revision 4)
+
+**Purpose**: A running stack and a recorded baseline, so "red" in Phase 2 is evidence rather
+than assertion.
+
+- [X] T161 Bring the real dependencies up and migrate: `REDIS_PORT=6380 docker compose up -d postgres redis mailpit && docker compose run --rm migrate up`. Mailpit is not optional — every assertion in this revision reads the real delivered message off it
+- [X] T162 [P] Record the shipped baseline per [quickstart.md](./quickstart.md) Revision 4 Step 0: settle one order through the real flow, then capture `.Subject` and the masked phone out of `.HTML` from `http://localhost:8025/api/v1/message/$ID`. Expect `Your tickets for …` and `08123***7890`. This is the "before" half of the red-first evidence
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: The failing assertions, written and **seen red**, before any production code
+moves. Both user stories depend on this — Principle VIII requires it for the mask, and the
+subject is only meaningfully covered if its assertion was once red too.
+
+**⚠️ CRITICAL**: T163–T165 land before T166 or T170. Writing the fix first makes the red-first
+confirmation unreproducible without a `git stash`, and a regression test never seen red
+proves nothing about the bug it claims to pin.
+
+- [X] T163 Add the subject assertion to the delivery block of `e2e/specs/guest-purchase.spec.ts` (~line 155, where `orderNumber` and `mail` are already in scope): ``expect(mail.Subject).toBe(`[${orderNumber}] E-receipt & E-Ticket for ${event.name}`)``. Use `event.name` from the `createSellableEvent` result — it is `"UAT Full Journey"` in that scenario, so this assertion **also fails a hardcoded "JIVE 2026"**, which is what makes FR-005a's dynamic requirement genuinely covered rather than merely stated
+- [X] T164 Add both mask assertions to the same block: `expect(mail.HTML).toContain("08123456****")` and `expect(mail.HTML).not.toContain("08123***7890")`. `08123456****` is the default holder phone `081234567890` ([e2e/support/journey.ts:27](../../e2e/support/journey.ts#L27)) under the new rule. **Literals only** — never `MaskPhone(...)`, never a regex over asterisks (R-027). The negative assertion is what puts both shapes side by side in the failure output
+- [X] T165 Run `cd e2e && npx playwright test specs/guest-purchase.spec.ts` and **confirm all three assertions fail**, with the received values matching T162's baseline. Paste the failure output into the implementation record. If any assertion passes here, it is asserting the wrong thing and must be rewritten before proceeding
+
+---
+
+## Phase 3: User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1) 🎯 MVP
+
+**Goal**: The delivered email identifies the order and the event in its subject.
+
+**Independent test**: Settle an order, list the inbox, and read the subject — it carries the
+order number in brackets and the name of the event the order was actually placed against.
+
+### Tests for User Story 1 ⚠️
+
+- [X] T166 [US1] Tighten `backend/internal/notification/service_test.go:193` from `assert.Contains(t, msg.Subject, "Jazz Night 2026")` to the full literal subject including the bracketed order number. **This test passes untouched under the new behaviour**, which is the reason to change it: a test that survives a deliberate behaviour change unchanged was not asserting that behaviour. Confirm the tightened version is red before T167
+
+### Implementation for User Story 1
+
+- [X] T167 [US1] Replace the subject at `backend/internal/notification/service.go:215` with `fmt.Sprintf("[%s] E-receipt & E-Ticket for %s", order.OrderNumber, tickets[0].EventName)` (FR-005a). No new plumbing — `OrderNumber` is already used two lines down for both attachment filenames, and `tickets[0].EventName` is already read on the line being replaced. `tickets[0]` is safe because orders are event-scoped (spec 007) and the existing code already depends on it
+- [X] T168 [US1] Confirm T166 and T163 both go green, and that the order number in the subject is byte-identical to the one in `receipt-<n>.pdf` and `tickets-<n>.pdf` (FR-004, SC-022)
+
+---
+
+## Phase 4: User Story 2 - Email body reads as the new confirmation design (Priority: P2)
+
+**Goal**: The buyer's phone shows its asterisks at the end, on the body and the receipt
+alike, rendered exactly as stored.
+
+**Independent test**: Settle an order whose buyer phone is `081234567890`; the body and the
+receipt's Order Details both read `08123456****`.
+
+### Tests for User Story 2 ⚠️
+
+- [X] T169 [US2] Rewrite `TestMaskPhone`'s table in `backend/internal/notification/mask_test.go:50` to the new shapes: `+6281234567890 → +628123456****`, `+628123456789 → +62812345****`, `081234567890 → 08123456****`, `081234567 → 08123****` (**unchanged by coincidence** — keep it, it is the case that proves the rules overlap rather than that nothing happened), `0812 → ****`, `0 → *`, `"" → ""`. This table is the only place in the codebase where the literal shapes are pinned. Confirm red before T170
+
+### Implementation for User Story 2
+
+- [X] T170 [US2] Rewrite `MaskPhone` in `backend/internal/notification/mask.go:48`: replace `phoneKeepLeading`/`phoneKeepTrailing` with a single `phoneMaskTrailing = 4`, keep `len(runes)-4` characters and asterisk the remainder, and mask a value of 4 runes or fewer entirely (FR-033). **Keep the character-counting behaviour and its comment** — rendering the stored value verbatim, `+` and spacing included, is now an explicit FR-033 clause rather than an implementation nicety
+- [X] T171 [US2] Delete the now-unreachable `maskFrom(phone, phoneKeepLeading)` short-value branch in the same function. `maskFrom` itself stays — `MaskEmail` still needs it and the email rule is unchanged. Dead code encoding the superseded rule is exactly what a later reader would restore the old behaviour from
+- [X] T172 [P] [US2] Confirm `TestMaskingNeverLengthensAValue` at `mask_test.go:82` is still green **without editing it**. One asterisk replaces one character, so output length still equals input length — the guard on the receipt's column alignment
+- [X] T173 [P] [US2] Confirm `receipt_pdf_test.go:113` and `service_test.go:507` pass **untouched**. Both call `MaskPhone` as their own oracle, so they track the helper by construction; their job is surface-vs-helper agreement (SC-008), not shape. If either needs an edit, the two surfaces have stopped sharing one helper — that is a finding to report, not a test to fix
+- [X] T174 [US2] Open the delivered message and the receipt attachment per [quickstart.md](./quickstart.md) Revision 4 Step 2 and confirm the phone reads identically on both, character for character (FR-032, SC-008, SC-023). The receipt half is a human check — the shipped PDF is compressed and unreadable from Playwright (R-025)
+
+---
+
+## Phase 5: User Story 3 - A resend delivers the identical pair (Priority: P3)
+
+**Goal**: Nothing regresses. This revision adds no resend behaviour.
+
+- [X] T175 [US3] Run the existing resend coverage at `e2e/specs/guest-purchase.spec.ts:224-239` unchanged and confirm it stays green. The resend shares one send path with the automatic delivery, so it inherits both the new subject and the new mask with no code of its own
+- [X] T176 [US3] Confirm a resent order's subject carries the **same** order number and event name as the first delivery, and its ticket codes are unchanged (FR-007)
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+### Verification
+
+- [X] T177 Confirm the three Phase 2 assertions are now **green**, closing the red-first loop T165 opened
+- [X] T178 Run the Go tier green: `cd backend && ./scripts/test.sh ./...`
+- [X] T179 Run the e2e gate green: `cd e2e && npm test`
+- [X] T180 Run it again with the cache off: `cd e2e && E2E_CACHE_ENABLED=false npm test` (Principle VII kill switch)
+- [X] T181 [P] Confirm the frontend tier needs no run — nothing in this revision reaches `frontend/`. Revision 3's frontend work was the logo; this one is two backend strings
+
+### Governance — verify, do not assume
+
+- [X] T182 [P] Confirm `contracts/notification.md`'s Message contract and its new `Subject` assertable property match what shipped. Both were corrected during the Revision 4 planning pass, so this is a re-read against the code, not an edit
+- [X] T183 [P] Confirm `SCHEMA.md` needs no change and no migration exists — this revision adds no column, table or migration ([data-model.md](./data-model.md) §Derived values: both changes are computed at render time and never stored)
+- [X] T184 [P] Confirm `PRD.md` needs no edit. Verified during planning: §1.4 describes one email with two document attachments and says nothing about the subject line. `grep -i subject PRD.md` returns nothing
+- [X] T185 [P] Confirm `.specify/memory/constitution.md` needs **no** amendment — `grep -i subject` returns only unrelated prose, and nothing in it constrains the mask. Record that it was verified
+
+### Recorded, deliberately not done
+
+- [X] T186 Confirm three things stay as they are and are recorded rather than forgotten: the **email masking rule is unchanged** (FR-033's email clause is untouched — only the phone shape moved); the **receipt's mask assertion stays at the Go tier** because the shipped PDF is compressed (R-025); and the mask now **discloses more of the number than before**, accepted deliberately and recorded in FR-033, spec.md §Assumptions and R-027 so a later reader does not reverse it as a privacy fix
+
+---
+
+## Dependencies & Execution Order — Revision 4
+
+### Phase dependencies
+
+```
+Phase 1 (T161-T162)  stack up, baseline recorded
+        ↓
+Phase 2 (T163-T165)  assertions written and SEEN RED   ← blocking, non-negotiable
+        ↓
+   ┌────┴────┐
+Phase 3      Phase 4        US1 and US2 are independent — different files entirely
+(T166-T168)  (T169-T174)    US1 is service.go; US2 is mask.go
+   └────┬────┘
+Phase 5 (T175-T176)  regression only
+        ↓
+Phase 6 (T177-T186)  gates and governance
+```
+
+### Critical path
+
+T161 → T162 → T165 → T170 → T177 → T179 → T180
+
+T165 before T166/T170 is the ordering that matters most. It is the only point at which the
+red-first evidence can be gathered, and once the fix lands it cannot be recovered without
+reverting.
+
+### Parallel opportunities
+
+- **Phase 1**: T162 needs T161; nothing else in the phase
+- **Phase 3 / Phase 4**: entire phases run in parallel after T165. `service.go` and `mask.go`
+  do not overlap
+- **Phase 4**: T172 and T173 together — both read-only confirmations on different files
+- **Phase 6**: T181, T182, T183, T184, T185 all `[P]` — read-only checks on different files
+
+### Blocked
+
+Nothing. This revision carries no open question, no unavailable asset and no judgment call —
+unlike Revisions 2 and 3, both of which shipped with one item held.
+
+---
+
+## Implementation Strategy — Revision 4
+
+**MVP scope**: Phases 1–3 (T161–T168). The subject line is independently shippable: it
+touches one line of `service.go`, one Go assertion and one e2e assertion, and delivers a
+buyer-visible improvement without going near the masking helper.
+
+**Increment 2**: Phase 4 (T169–T174), the mask. Larger blast radius — one helper feeding two
+surfaces — and the half that carries the red-first obligation.
+
+**Both are small enough to land together**, and doing so halves the settle-an-order cycles.
+Split them only if the mask's privacy tradeoff needs re-confirming before it ships; the
+subject does not depend on that answer.
+
+## Notes — Revision 4
+
+- `[P]` marks tasks touching different files with no ordering constraint between them
+- The two behaviours share no code: `service.go:215` composes the subject; `mask.go`'s
+  `MaskPhone` serves both the body and the receipt. Neither fix can break the other
+- **Stop and report rather than adjusting an assertion** if T173's two tests need edits, or
+  if any Phase 2 assertion passes at T165. Both are signals that the system is not shaped the
+  way this plan assumes
+
+---
+
+# Revision 5 — E-Ticket Colour Tasks (2026-08-19)
+
+**Spec**: [spec.md](./spec.md) §Clarifications, Session 2026-08-19 (e-ticket colours) ·
+**Plan**: [plan.md](./plan.md) §Revision 5 · **Research**: R-028, R-029, R-030
+
+Task IDs continue from T186. Revision 4 ships first; nothing below re-opens it.
+
+> **`setup-tasks.sh` cannot resolve this feature** — it reports `020-qris-frame-simplify`.
+> Read-only, wrote nothing. Point `/speckit-implement` at `016-receipt-ticket-email`.
+
+## Two things to read before starting
+
+**Nothing in this revision can move a coordinate.** Every change is a colour constant or a
+`setColor` argument. That is the whole reason it ships before the typeface — once Revision 6
+starts, a failing geometry assertion has two possible causes.
+
+**Assert the drawn colour, not the constant.** A test comparing `pdfBandDim` against itself
+passes for any value — the same blind spot R-027 found in the mask tests. T188 exists so the
+assertions in T189/T190 test the document.
+
+---
+
+## Phase 1: Setup (Revision 5)
+
+- [X] T187 Render a baseline e-ticket through `RenderTicketsPDFPlain` and record the drawn colours of the event name, both footer labels and both footer values in `backend/internal/notification/`. Expect `#cb1c4f`, `#eceef3`, `#969cac` — the "before" half of the red-first evidence
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**⚠️ CRITICAL**: T188 lands before T189 or T190. Without it the only assertable thing is a
+constant's value, which is circular.
+
+- [X] T188 Add a colour seam to `backend/internal/notification/export_test.go`, following the existing `TableInsets` / `HeaderColumnRights` pattern, exposing the colour operators drawn on a rendered page so a test can ask what the *document* says rather than what the package constant holds
+
+---
+
+## Phase 3: User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1) 🎯 MVP
+
+**Goal**: The e-ticket's event name reads as a label rather than a warning, and the footer's
+support address is the brightest text in its band rather than the dimmest.
+
+**Independent test**: Render a multi-ticket order's e-ticket, open it, and read it against
+Figma `683-148` — then print it in greyscale, which is where the old footer failed worst.
+
+### Tests for User Story 1 ⚠️
+
+Written first, at the **Go tier**. R-025 established that the shipped PDF is compressed and
+Playwright cannot read what a page says; a drawn *colour* is further out of reach still.
+
+- [X] T189 [US1] Add a footer-emphasis test in `backend/internal/notification/eticket_test.go` asserting each footer **value** is drawn brighter than the label above it, through the T188 seam (FR-022f, SC-024). **Confirm it fails first** — today the label is `#eceef3` and the value `#969cac`, so the failure output names both
+- [X] T190 [P] [US1] Add a no-crimson test in `backend/internal/notification/eticket_test.go` asserting `#cb1c4f` appears nowhere on a rendered page outside the logo image (FR-019b, SC-024). Confirm it fails first
+
+### Implementation for User Story 1
+
+- [X] T191 [US1] Add `pdfEventName = [3]int{71, 85, 105}` (`#475569`) to the palette block in `backend/internal/notification/pdf.go` (~line 135) and use it at `pdf.go:252` in place of `pdfBrand` (FR-019b)
+- [X] T192 [US1] Delete `pdfBrand` from `backend/internal/notification/pdf.go:135`. R-028 confirms `pdf.go:252` was its **only** consumer; leaving it would preserve a retired decision inside a palette block a future reader treats as authoritative. `emailBrand` in `service.go` is a different surface and stays
+- [X] T193 [US1] Add `pdfBandLabel = [3]int{208, 209, 212}` (`#d0d1d4`) and use it for both footer labels at `backend/internal/notification/pdf.go:318` and `:330`. The value is white at 80% opacity flattened against the band — a PDF has no alpha here, so it is computed, not eyeballed; R-029 carries the arithmetic
+- [X] T194 [US1] Change both footer **values** to pure white at `backend/internal/notification/pdf.go:322` and `:350` (FR-022f)
+- [X] T195 [US1] Draw the envelope body in white at `backend/internal/notification/pdf.go:348`, **keeping the flap in `pdfBand`** so it still reads as a cut-out rather than a filled block (the existing comment explains why the flap is not white)
+- [X] T196 [US1] Delete `pdfBandDim` from `backend/internal/notification/pdf.go:149` — the footer value and the envelope were its only consumers. **`pdfBandFg` must NOT be deleted**: it still serves the wordmark fallback at `pdf.go:430` and the receipt at `receipt_pdf.go:183`
+- [X] T197 [US1] Print a rendered e-ticket in **greyscale** per [quickstart.md](./quickstart.md) Revision 5 Step 2. That is where the inverted emphasis was worst and where the fix should be most obvious
+
+---
+
+## Phase 4: User Story 3 - A resend delivers the identical pair (Priority: P3)
+
+**Goal**: Nothing regresses. This revision adds no resend behaviour.
+
+- [X] T198 [US3] Run the existing resend coverage at `e2e/specs/guest-purchase.spec.ts:224-239` unchanged and confirm it stays green — the resend shares one renderer with the automatic send and inherits the colours with no code of its own
+
+> **User Story 2 has no work in this revision.** The email body's colours were settled in
+> Revision 3 and no clarification reached them. Recorded so the gap is not read as an
+> oversight.
+
+---
+
+## Phase 5: Polish & Cross-Cutting Concerns
+
+- [X] T199 Run the Go tier green: `cd backend && ./scripts/test.sh ./...`
+- [X] T200 Run the e2e gate green: `cd e2e && npm test`. No new assertion is expected here — the change is invisible to Playwright
+- [X] T201 Run it again with the cache off: `cd e2e && E2E_CACHE_ENABLED=false npm test`
+- [X] T202 [P] Confirm `backend/internal/notification/receipt_pdf_test.go` passes untouched. The receipt shares only `pdfBandFg`, which survives; if anything moves there, a colour leaked across documents — report it rather than adjusting the test
+- [X] T203 [P] Confirm `SCHEMA.md`, `PRD.md` and `.specify/memory/constitution.md` need no change — this revision adds no column, endpoint, migration or configuration key. Record that it was verified
+
+---
+
+## Dependencies & Execution Order — Revision 5
+
+```
+Phase 1 (T187)       baseline colours recorded
+        ↓
+Phase 2 (T188)       colour seam            ← blocking: without it the tests are circular
+        ↓
+Phase 3 (T189-T197)  assertions red, then the six constant/call-site changes
+        ↓
+Phase 4 (T198)       resend regression only
+        ↓
+Phase 5 (T199-T203)  gates and governance
+```
+
+**Critical path**: T187 → T188 → T189 → T191 → T194 → T199
+
+**Parallel opportunities**: T189 + T190 (different test functions); T202 + T203 in Phase 5.
+T191–T196 all edit `pdf.go` and are **not** parallel.
+
+**Blocked**: nothing.
+
+## Implementation Strategy — Revision 5
+
+**MVP scope**: all of it. Seventeen tasks, one file of production code, no coordinate moves.
+Splitting this further would cost more in settle-an-order cycles than it saves.
+
+**Ship it before Revision 6**, not with it. That sequencing is the point.
+
+---
+
+# Revision 6 — Inter Typeface + Type Scale Tasks (2026-08-19)
+
+**Spec**: [spec.md](./spec.md) FR-003a, FR-003b · **Plan**: [plan.md](./plan.md) §Revision 6 ·
+**Research**: R-031 … R-035
+
+Task IDs continue from T203. **Revision 5 must be green before starting** — see T205.
+
+## Three things to read before starting
+
+**Do not ship `InterVariable.ttf`.** gofpdf reads the classic TrueType tables and ignores
+`fvar`/`gvar`, so a variable font renders every weight as its default instance: Bold and
+SemiBold come out identical and **nothing errors**. It looks like a styling bug. T206 and
+T213 exist solely to catch this (R-031).
+
+**`latin1()` cannot be deferred.** It emits raw high bytes — correct for a cp1252 core font,
+malformed UTF-8 under an embedded one. "Remove it later" is the option that ships broken
+glyphs for exactly the names this change fixes (R-033).
+
+**A green suite does not mean this worked.** R-035: the receipt's table seams catch drift and
+`customerServiceBlock` self-adjusts, but the e-ticket's absolute offsets are literals with
+nothing below them to notice a collision. T220's visual diff is a required step, not a nicety.
+
+---
+
+## Phase 1: Setup (Fonts)
+
+- [ ] T204 Add the five **static** Inter faces — Regular, Medium, SemiBold, Bold, Italic — to `backend/internal/notification/assets/fonts/`, taken from the Inter release's `static` directory. This is the repository's first committed font asset; nothing ships one today (the frontend gets Inter from `next/font/google` at build time)
+- [ ] T205 Confirm Revision 5 is merged and both tiers are green before proceeding: `cd backend && ./scripts/test.sh ./... && cd ../e2e && npm test`. Every failure after this point must be attributable to the font, which is why the colours shipped separately
+- [ ] T206 [P] Verify none of the five files is a variable font — check that no `fvar` table is present. A variable font produces no error and no visible failure until Bold and SemiBold are compared side by side (R-031)
+- [ ] T207 [P] Record the Inter version and its SIL Open Font License alongside the files, as `assets/brand/` already does for the mark
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**⚠️ CRITICAL**: no type-scale work can begin until T208–T213 land. Every size change is
+expressed against a registered family.
+
+- [ ] T208 Register the faces once per document in `backend/internal/notification/pdf.go` using `AddUTF8FontFromBytes` — it takes bytes, so the fonts ship through the existing `//go:embed` path with no filesystem dependency and no `SetFontLocation` (R-031)
+- [ ] T209 Register the same faces in `backend/internal/notification/receipt_pdf.go`. Map `Inter` to `""`/`B`/`I`, and register **`InterMedium` and `InterSemiBold` as their own families** — gofpdf's style string has no slot for weights 500 and 600 (R-032)
+- [ ] T210 Replace every `SetFont("Helvetica", …)` in `backend/internal/notification/pdf.go` (~14 call sites) with the right Inter family and style
+- [ ] T211 Replace every `SetFont("Helvetica", …)` in `backend/internal/notification/receipt_pdf.go`. **One call takes `style` as a variable and cannot be sed-replaced** — its family depends on the caller, so read it (R-032)
+- [ ] T212 Delete `latin1()` from `backend/internal/notification/text.go` and all 22 call sites — 12 in `pdf.go`, 10 in `receipt_pdf.go` (R-033)
+- [ ] T213 Render a page and confirm Bold and SemiBold are **visibly distinct**. If they are identical, T204 shipped the variable font despite T206 — stop and fix the assets rather than adjusting weights to compensate
+
+---
+
+## Phase 3: User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1) 🎯 MVP
+
+**Goal**: Both documents are typeset in the family the designs use, non-ASCII names survive,
+and the e-ticket's type matches the design.
+
+**Independent test**: Render an order whose holder name carries a diacritic on a machine
+without Inter installed; both documents render in Inter and the name prints as stored.
+
+### Tests for User Story 1 ⚠️
+
+- [ ] T214 [US1] Add a diacritic test in `backend/internal/notification/eticket_test.go` rendering a holder name carrying a diacritic through `RenderTicketsPDFPlain` and asserting the glyph survives rather than being transliterated to its nearest plain letter (FR-003a, SC-025). This is the one genuinely new behaviour in the revision
+
+### Implementation for User Story 1
+
+- [ ] T215 [US1] Apply the design's sizes and weights in `backend/internal/notification/pdf.go` per R-030's table: `Ticket N of M` 16→18 Bold; identity label 7.5→11 SemiBold; identity value 12→16 Bold; event name 9.5→14 Bold; ticket-type heading 20→22 Bold; `VALID FOR` 7.5→11 SemiBold; valid-for value 12→14 Bold; footer label 7.5→10 SemiBold; footer value 9→12 Medium (FR-003b)
+- [ ] T230 [US1] Bring the rest of the e-ticket onto the design's slate palette in `backend/internal/notification/pdf.go`: field labels and `VALID FOR` → `#64748b` (from `pdfGray` `#6e6e6e`), field values and the ticket-type heading → `#0f172a` (from `pdfInk` `#18181b`), `Ticket N of M` → `#1e293b`, the divider rule → `#e2e8f0` (from `pdfLine` `#e0e0e4`) — FR-019c. **Do this in the same pass as T215**: it edits the same call sites, and split across two passes every one of them is visited twice. Check whether `pdfInk`, `pdfGray` and `pdfLine` retain consumers on the **receipt** before deleting anything — unlike `pdfBrand` and `pdfBandDim` in Revision 5, these are shared across documents
+- [ ] T216 [US1] Re-derive every y-offset below a grown element in `backend/internal/notification/pdf.go`. The page constants are offsets from `bandHeight` (R-022) but the offsets themselves are literals — a heading growing 16→18 pt pushes toward the accent rule with **no assertion to notice** (R-035)
+- [ ] T217 [US1] Confirm `marginLeft`/`marginRight` stay at 17.0mm. FR-003b explicitly excludes them: the design's 14.1mm inset would move the QR panel and the accent rule FR-022b pins
+- [ ] T218 [US1] Re-derive the receipt's table-geometry assertions in `backend/internal/notification/receipt_pdf_test.go` from the `TableInsets` / `HeaderColumnRights` seams (SC-016, SC-017). **These failing is the system working** — they are the only automated guard on metric drift. Never re-hardcode
+- [ ] T219 [US1] Confirm the FR-022e short/long-address test in `backend/internal/notification/eticket_test.go` passes **untouched** — `customerServiceBlock` computes width from `GetStringWidth` and self-adjusts. If it breaks, the width math stopped being metric-driven: report it rather than adjusting the expectation
+- [ ] T220 [US1] Visual diff against Figma `683:148` per [quickstart.md](./quickstart.md) Revision 6 Step 3, using the before-PDFs kept at T205. Look for **collisions**, not just sizes — the heading grew 16→18 and identity values 12→16 while the accent rule and QR sit at fixed offsets below them
+
+---
+
+## Phase 4: User Story 2 - Email body reads as the new confirmation design (Priority: P2)
+
+- [ ] T221 [US2] Confirm the email body needs **no** change. FR-003a scopes to the two PDF *documents*; the body is HTML and cannot embed a font that Outlook or Gmail would honour. Its stack is `font-family:Helvetica,Arial,sans-serif` at `backend/internal/notification/service.go:326`, and changing it to lead with Inter would help only recipients who already have it installed. Record the decision either way rather than leaving it unexamined
+
+---
+
+## Phase 5: User Story 3 - A resend delivers the identical pair (Priority: P3)
+
+- [ ] T222 [US3] Run the resend coverage at `e2e/specs/guest-purchase.spec.ts:224-239` and confirm a resent order's documents carry the same ticket codes and the **same page count** as the first delivery (FR-007)
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+### Verification
+
+- [ ] T223 Run the Go tier green: `cd backend && ./scripts/test.sh ./...`
+- [ ] T224 Run the e2e gate green: `cd e2e && npm test`. It gains no new assertion — but a **changed page count is a stop signal**, meaning type growth spilled one ticket across two pages, which `SetAutoPageBreak(false)` exists to prevent
+- [ ] T225 Run it again with the cache off: `cd e2e && E2E_CACHE_ENABLED=false npm test`
+- [ ] T226 [P] Confirm the shipped PDFs grew by only a few KB per weight, not by the ~300 KB of a full face — evidence that gofpdf's subsetting engaged (R-031)
+
+### Governance and known limits
+
+- [ ] T227 [P] Record **letter-spacing** as a known limit in this file's §Known limits, beside the day-boundary and footer-coverage entries: the design tracks every uppercase label 0.35–0.55px, gofpdf exposes `SetWordSpacing` but no `Tc` operator, and both workarounds are worse than the gap — per-glyph drawing breaks `MultiCell` wrapping the event name depends on, and thin spaces corrupt the selectable text layer (R-034)
+- [ ] T228 [P] Confirm `SCHEMA.md`, `PRD.md` and `.specify/memory/constitution.md` need no change. The repository gains its first font assets, which is a new asset class but not a new architectural boundary — verify rather than assume
+- [ ] T229 [P] Confirm `contracts/notification.md`'s static asset contract matches what shipped. The five faces and the variable-font prohibition were added during the Revision 6 planning pass, so this is a re-read against the code
+
+### Recorded, deliberately not done
+
+- [ ] T231 Confirm two gaps stay open and recorded rather than forgotten: the **receipt's type scale has never been examined** against its own design (FR-003b covers the e-ticket only, and its absence here is not a finding of agreement), and the **page margins stay at 17mm** against the design's 14.1mm because closing them is a layout change, not a typographic one
+
+---
+
+## Dependencies & Execution Order — Revision 6
+
+```
+Phase 1 (T204-T207)  fonts present, static, licensed, Revision 5 green
+        ↓
+Phase 2 (T208-T213)  registered, every SetFont replaced, latin1 gone   ← blocking
+        ↓
+Phase 3 (T214-T220)  diacritic test, type scale, geometry re-derived, visual diff
+        ↓
+   ┌────┴────┐
+Phase 4       Phase 5      independent of each other
+(T221)        (T222)
+   └────┬────┘
+Phase 6 (T223-T231)  gates, governance, known limits
+```
+
+**Critical path**: T204 → T206 → T208 → T210 → T212 → T215 → T216 → T218 → T220 → T223
+
+T212 before T215 matters: deleting `latin1()` while the font is already registered means any
+malformed-glyph fallout surfaces before the type scale starts moving coordinates, so the two
+failure modes stay separable.
+
+**Parallel opportunities**:
+
+- **Phase 1**: T206 + T207 together, both read-only checks on the same new files
+- **Phase 2**: T210 and T211 are different files, but both depend on T208/T209 — run after
+- **Phase 4 / Phase 5**: entire phases in parallel
+- **Phase 6**: T226, T227, T228, T229 all `[P]`
+
+**Blocked**: nothing. T230 was the only blocked task and was answered on 2026-08-19 (FR-019c);
+it now sits in Phase 3 beside T215/T216, which edit the same call sites. **Its ID is out of
+numeric sequence deliberately** — it was renumbered nowhere so that plan.md, quickstart.md and
+this file keep pointing at the same task.
+
+## Implementation Strategy — Revision 6
+
+**MVP scope**: Phases 1–3 (T204–T220). That is the whole substantive change: both documents
+in Inter, non-ASCII names surviving, and the e-ticket matching the design's type.
+
+**Do not descope Phase 2.** T212 in particular is not separable — a registered UTF-8 font with
+`latin1()` still in place is strictly worse than either end state.
+
+**T230 is answered** (FR-019c) and belongs inside Phase 3, not after it. Running it as a
+follow-up pass means visiting every identity-block, heading, valid-for and divider call site a
+second time.
+
+## Notes — Revisions 5 and 6
+
+- `[P]` marks tasks touching different files with no ordering constraint between them
+- **Stop and report rather than adjusting an assertion** if: T219's address test breaks, T224
+  shows a changed page count, or T213 finds Bold and SemiBold identical. Each is a signal that
+  the system is not shaped the way these plans assume
+- The two revisions are deliberately not interleaved. Revision 5 cannot move a coordinate;
+  Revision 6 moves all of them
+
+---
+
+## Implementation record — Revisions 4 and 5 (2026-08-19)
+
+**T161–T203 complete.** Go tier green, e2e green in both cache modes (44 passed / 2 skipped
+enabled; 36 passed / 10 skipped disabled).
+
+### Both red-first obligations were evidenced, and one needed a second run
+
+The subject assertion failed first and aborted the test **before reaching the mask
+assertion** — so the mask, the half that actually owed the red-first proof, had not been seen
+red. Rather than accept that, the subject was fixed and the suite re-run so the mask assertion
+became the failing one against unfixed masking code:
+
+```
+Expected substring: "08123456****"
+Received string:    …<td …>08123***7890</td>…
+```
+
+`TestMaskPhone` was red on **4 of 7** cases; the 3 that passed are exactly the ones R-027
+predicted would coincide (`081234567`, `0`, `""`).
+
+### The spec carried an off-by-one that the implementation caught
+
+FR-033, R-027's table, the quickstart and User Story 2 scenario 8 all paired
+`+628123456789` → `+628123456****`. That output is 14 characters for a 13-character input,
+which no length-preserving mask can produce. The example belongs to `+6281234567890` (+62
+with an 11-digit mobile). **The code was right and the documents were wrong**; all four were
+corrected, and `mask_test.go` now pins both lengths so the boundary cannot drift again.
+
+### R-027's warning held exactly
+
+`receipt_pdf_test.go:113` and `service_test.go:507` passed **untouched** through a deliberate
+change of the mask's shape — they call `MaskPhone` as their own oracle. They were left alone
+(surface-vs-helper agreement is their job, SC-008) and the e2e assertion was written as a
+literal, which is why it could be red at all.
+
+`service_test.go:193` also passed untouched under the new subject and was tightened to the
+full literal for the same reason.
+
+### Revision 5's colour seam, and its honest limit
+
+`ColorOperator` builds gofpdf's content-stream operator from a literal so a test can find the
+colour the **document** drew, not compare a constant with itself. It mirrors
+`rgbColorValue` (fpdf.go:863) including the quirk that a grey collapses to the one-component
+`g` operator — so pure white is `1.000 g`, not `1.000 1.000 1.000 rg`.
+
+**Its limit is positional**: it proves a colour is drawn on the page, not which glyph carries
+it. That is why FR-022f also asserts the luminance ORDERING of the two constants, and why the
+greyscale check stays a required step rather than a nicety.
+
+### Verified by eye
+
+- Event name renders slate; no crimson anywhere outside the logo image.
+- Footer in greyscale: the site URL and `help@manjo.com` are the brightest text in the band,
+  `JIVE` and `CUSTOMER SERVICE` recede, envelope white with a band-coloured flap.
+- Receipt Order Details shows `08123456****` — byte-identical to the email body (SC-008).
+
+### Found in passing, not fixed
+
+`backend/internal/notification/pdf.go` and `pdf_test.go` carry **pre-existing gofmt drift** in
+the committed tree (14 and 16 diff lines at HEAD). Only the hunk this change caused was
+corrected; the rest was left alone rather than bundling an unrelated reformat. `service.go`
+was gofmt-clean before and is gofmt-clean after.
+
+### Not done
+
+Revision 6 (T204–T231) is untouched: it needs the five static Inter TTFs committed, which is
+not a decision to take unprompted. T230 is no longer blocked and sits in its Phase 3.
+
+---
+
+# Revision 7 — Email Mask Direction Tasks (2026-08-19)
+
+**Spec**: [spec.md](./spec.md) §Clarifications, Session 2026-08-19 (email mask direction) ·
+**Plan**: [plan.md](./plan.md) §Revision 7 · **Research**: R-036 … R-039
+
+Task IDs continue from T231. **Independent of Revision 6** — this touches `mask.go` and a test
+fixture, neither of which the typeface work goes near, so it can ship without the Inter assets.
+
+> **`setup-tasks.sh` cannot resolve this feature** — it reports `020-qris-frame-simplify`.
+> Read-only, wrote nothing. Point `/speckit-implement` at `016-receipt-ticket-email`.
+
+## Three things to read before starting
+
+**The e2e fixture is blind to this change.** `defaultHolder.email` is `budi@example.com`, and a
+4-character local part renders `b***` under **both** rules. An assertion written against it is
+green before and after the fix. T234 must land before T235 or the red-first step is not
+reproducible (R-037).
+
+**Four of the seven mask cases coincide** between old and new rules. Any fixture with a local
+part of four characters or fewer cannot see this change. Hold that in mind for every assertion
+below.
+
+**This is the second test-that-cannot-fail in this feature.** R-027 caught the first, in the
+phone masking. Same shape, same cause: an assertion routed through the function under test, or
+a fixture whose value is unchanged by the change.
+
+---
+
+## Phase 1: Setup (Revision 7)
+
+- [X] T232 Bring the real dependencies up and migrate: `REDIS_PORT=6380 docker compose up -d postgres redis mailpit && docker compose run --rm migrate up`
+- [X] T233 [P] Record the shipped baseline: settle one order and capture the masked email out of `.HTML` at `http://localhost:8025/api/v1/message/$ID`, per [quickstart.md](./quickstart.md) Revision 7 Step 1. This is the "before" half of the red-first evidence
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**⚠️ CRITICAL — ordering, not just sequence**: T234 before T235, and both before any change to
+`mask.go`. Writing the assertion against the current fixture produces a test that passes in
+every state of the code, which is the exact failure Principle VIII names by hand.
+
+- [X] T234 Lengthen `defaultHolder.email`'s local part past four characters in `e2e/support/journey.ts:26` — e.g. `budisantoso@example.com`. **All three references to the constant are by identity, not by literal** (`guest-purchase.spec.ts:124`, `:157`, `:245`), so nothing else moves; confirm with `grep -rn 'defaultHolder.email' e2e/specs/` before and after. Leave `siti@example.com` alone — holder addresses print in full on the e-ticket (FR-034), so its length has no bearing on any mask
+- [X] T235 Add the email-mask assertions to the delivery block of `e2e/specs/guest-purchase.spec.ts`, beside the phone assertions from Revision 4: the new masked shape as a **literal** `toContain`, plus a `not.toContain` naming the old front-masked shape. **Literals only** — never `MaskEmail(...)`, never a regex over asterisks (R-039)
+- [X] T236 Run `cd e2e && npx playwright test specs/guest-purchase.spec.ts -g "browses, books"` and **confirm the new assertion fails**, with the received body showing the old shape. Paste the failure into the implementation record. If it passes here, T234 did not take effect and the assertion is worthless
+
+---
+
+## Phase 3: User Story 2 - Email body reads as the new confirmation design (Priority: P2) 🎯 MVP
+
+**Goal**: The buyer's email hides its last three characters before the `@` and nothing else,
+with the domain intact.
+
+**Independent test**: Settle an order whose buyer email has a local part longer than four
+characters; the body's Buyer Information block shows exactly three asterisks immediately before
+the `@`.
+
+### Tests for User Story 2 ⚠️
+
+- [X] T237 [US2] Rewrite `TestMaskEmail` in `backend/internal/notification/mask_test.go:17` — **4 of its 7 cases change** — `bud`, `a` and the empty value coincide between the rules. Add a case for a **5-character local part** (`dimas@gmail.com` → `di***@gmail.com`): under the old rule that returned unchanged, which is the disclosure R-036 found and no requirement had noticed. Keep the short cases that coincide, they are what prove the two rules overlap rather than that nothing happened. Confirm red before T238
+
+### Implementation for User Story 2
+
+- [X] T238 [US2] Replace `emailKeep = 5` with `emailMaskTrailing = 3` in `backend/internal/notification/mask.go:12`, carrying a comment that records what it replaced and why, as `phoneMaskTrailing` does
+- [X] T239 [US2] Rewrite `MaskEmail` in `backend/internal/notification/mask.go:25`: keep the whole domain and every character of the local part except the last 3; asterisks = `min(3, len-1)`; a one-character local part, which cannot both keep and hide a character, is masked entirely (FR-033). A value with no `@` takes the same rule — accepted knowingly in clarification, and it discloses more than before
+- [X] T240 [US2] Delete `maskFrom` from `backend/internal/notification/mask.go:90`. Revision 4 removed its phone caller and T239 removes its two email callers, so it has none left. Confirm with `grep -rn maskFrom backend/`
+- [X] T241 [P] [US2] Confirm `TestMaskingNeverLengthensAValue` at `mask_test.go:87` is still green **without editing it** — asterisks replace exactly the characters they hide, so a masked value is never longer than the stored one
+- [X] T242 [P] [US2] Confirm `receipt_pdf_test.go:112` and `service_test.go:510` pass **untouched**. Both call `MaskEmail` as their own oracle; surface-vs-helper agreement is their job (SC-008, R-039). If either needs an edit, the two surfaces stopped sharing one helper — report it rather than fixing the test
+- [X] T243 [US2] Open the delivered message per [quickstart.md](./quickstart.md) Revision 7 Step 3 and confirm the body shows exactly three asterisks immediately before the `@`, with the domain intact (SC-026)
+
+---
+
+## Phase 4: User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1)
+
+**Goal**: The receipt agrees with the body, character for character.
+
+- [X] T244 [US1] Open the **receipt attachment** and confirm its Buyer Information email is byte-identical to the body's (FR-032, SC-008, SC-026). This half is a human check — the shipped PDF is compressed and unreadable from Playwright (R-025) — and it is the assertion that would catch the two surfaces drifting apart
+
+---
+
+## Phase 5: User Story 3 - A resend delivers the identical pair (Priority: P3)
+
+- [X] T245 [US3] Run the resend coverage at `e2e/specs/guest-purchase.spec.ts:224-239` unchanged and confirm it stays green — the resend shares one renderer with the automatic send and inherits the new mask with no code of its own
+
+---
+
+## Phase 6: Polish & Cross-Cutting Concerns
+
+### Verification
+
+- [X] T246 Confirm the T235 assertions are now **green**, closing the red-first loop T236 opened
+- [X] T247 Run the Go tier green: `cd backend && ./scripts/test.sh ./...`
+- [X] T248 Run the e2e gate green: `cd e2e && npm test`
+- [X] T249 Run it again with the cache off: `cd e2e && E2E_CACHE_ENABLED=false npm test` (Principle VII kill switch)
+
+### Governance — verify, do not assume
+
+- [X] T250 [P] Confirm `SCHEMA.md`, `PRD.md` and `.specify/memory/constitution.md` need no change — no column, endpoint, migration or configuration key. Record that it was verified
+- [X] T251 [P] Confirm `contracts/notification.md` needs no change: masking is applied inside the renderers and the Message contract does not describe it
+
+### Recorded, deliberately not done
+
+- [X] T252 Confirm three decisions stay as recorded rather than being quietly revisited: `MaskEmail` and `MaskPhone` remain **two functions** despite now sharing a shape, because their floors come from different requirements and a shared helper would carry the difference as an undecodable boolean at each call site (R-038); a value with **no `@` discloses more** than before (`notan*****` → `notanem***`), accepted because the field is format-validated at checkout; and the **e-ticket's holder email stays unmasked** (FR-034) — it is identity at a gate, not a contact detail on a forwardable receipt
+
+---
+
+## Dependencies & Execution Order — Revision 7
+
+```
+Phase 1 (T232-T233)  stack up, baseline recorded
+        ↓
+Phase 2 (T234-T236)  FIXTURE first, then assertion, then SEEN RED   ← ordering is the point
+        ↓
+Phase 3 (T237-T243)  Go test red, then one function rewritten
+        ↓
+   ┌────┴────┐
+Phase 4       Phase 5      independent of each other
+(T244)        (T245)
+   └────┬────┘
+Phase 6 (T246-T252)  gates and governance
+```
+
+**Critical path**: T232 → T234 → T235 → T236 → T237 → T239 → T246 → T248
+
+T234 before T235 is the ordering that matters most, and it is the one a reader is most likely
+to skip: the fixture looks like an unrelated detail, and the assertion looks correct without
+it.
+
+**Parallel opportunities**:
+
+- **Phase 1**: T233 needs T232; nothing else in the phase
+- **Phase 3**: T241 + T242 together — both read-only confirmations on different files
+- **Phase 4 / Phase 5**: entire phases in parallel
+- **Phase 6**: T250 + T251
+
+**Blocked**: nothing.
+
+## Implementation Strategy — Revision 7
+
+**MVP scope**: all of it. Twenty-one tasks, one production function, one test fixture, one test
+table. There is nothing here worth splitting across two commits.
+
+**Do not start at Phase 3.** The function change is the easy part and takes ten minutes; the
+value of this revision is the acceptance coverage, and that only exists if Phase 2 lands in
+order.
+
+## Notes — Revision 7
+
+- `[P]` marks tasks touching different files with no ordering constraint between them
+- **Stop and report rather than adjusting an assertion** if T236 passes before the fix, or if
+  T242's two tests need edits. Both mean the system is not shaped the way this plan assumes
+- This revision is independent of Revision 6 (Inter). Neither blocks the other
+
+---
+
+## Implementation record — Revision 7 (2026-08-19)
+
+**T232–T252 complete.** Go tier green (17 packages), e2e green in both cache modes
+(44 passed / 2 skipped enabled; 36 passed / 10 skipped disabled).
+
+### R-037 was right, and it was the whole point
+
+The fixture change was necessary **and** sufficient. With `budi@example.com` the assertion
+could not have failed; with `budisantoso@example.com` it failed exactly as predicted, the body
+showing the old front-masked shape:
+
+```
+Expected substring: "budisant***@example.com"
+Received:           …<td …>budis******@example.com</td>…
+```
+
+`TestMaskEmail` was red on **4 of 7** original cases — not 5, as the plan, research, tasks and
+quickstart all said. Corrected in all four: `bud`, `a` and the empty value coincide between the
+two rules.
+
+### The e2e run was blocked by a running dev server, and that needed a decision
+
+Playwright starts its own Next dev server on :3100, but Next 16 refuses a second dev server for
+the same directory, and one was running on :3000 (PID 215624, ~2h). It was not wired to the e2e
+stack, so running against it would have produced misleading results. **`mask.go` was left
+untouched while the question was asked**, which is what preserved the red-first evidence — had
+the implementation landed first, T236 would have needed a stash-and-rerun to reproduce.
+
+The server was stopped with the user's agreement and left stopped.
+
+### Three arithmetic slips, all mine, all in the documents
+
+The masked-value examples were hand-derived and wrong three times: `+628123456789` in
+Revision 4, then `notanemai***` and `we.ird@thi***` in the test table, then
+`budisanto***` in the e2e assertion. Every one was **longer than its input**, which a
+length-preserving mask cannot produce.
+
+The implementation was correct each time; the expectations were not. They are now computed
+rather than counted, and `TestMaskEmail` pins nine cases including both lengths around each
+boundary. The lesson is recorded because the same slip recurred across two revisions: **derive
+these values from the rule, do not count characters by eye.**
+
+### Verified on one real order, both surfaces
+
+```
+Subject: [ORD-20260819-7RQ8KP] E-receipt & E-Ticket for UAT Full Journey
+Body:    budisant***@example.com   08123456****
+Receipt: Email : budisant***@example.com   Phone Number : 08123456****
+```
+
+Read out of Mailpit and out of the receipt attachment via `pdftotext` — character for
+character identical (FR-032, SC-008, SC-026).
+
+### Held as planned
+
+- `receipt_pdf_test.go:112` and `service_test.go:510` passed **untouched** — they call
+  `MaskEmail` as their own oracle, exactly as R-039 said, and were left alone.
+- `TestMaskingNeverLengthensAValue` green untouched.
+- `maskFrom` and `emailKeep` **deleted**; `grep` returns nothing.
+- `MaskEmail` and `MaskPhone` remain two functions (R-038).
+- No schema, migration, PRD, constitution or contract change. The `contracts/notification.md`
+  modification in the tree is Revision 6's font-asset entry and carries no masking content.
