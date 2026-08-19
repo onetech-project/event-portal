@@ -211,6 +211,64 @@ export class GuestJourney {
   /** The QR screen, waiting on the provider. */
   async expectAwaitingPayment(): Promise<void> {
     await expect(this.page.getByText(/waiting for payment/i)).toBeVisible();
+    await this.expectQrisFrameContents();
+  }
+
+  /**
+   * The Scan to Pay card carries what the design draws and nothing else
+   * (spec 020, contracts/ui.md).
+   *
+   * Asserted two ways because the two profiles can supply different things.
+   *
+   * The sentinels are the strong pin, and they only work locally: the runner
+   * hands the frontend the five retired values (playwright.config.ts), so
+   * before spec 020 the frame printed them and this method failed naming them.
+   * A deployment cannot be made to export those, so under the uat profile the
+   * sentinel half passes vacuously.
+   *
+   * The label half is what still bites there. `NMID`, `Dicetak oleh` and
+   * `Versi Cetak` are the literal captions the frame used to print beside the
+   * real values, so they catch a reintroduction in an environment carrying
+   * genuine merchant configuration, which is the only kind a deployment has.
+   */
+  async expectQrisFrameContents(): Promise<void> {
+    // Located by its text rather than by heading role, deliberately: the role
+    // only holds AFTER spec 020 (the title used to be a styled div), and a
+    // locator that cannot resolve against the old markup would fail this method
+    // on a timeout instead of on the thing it exists to catch. The absences are
+    // asserted before the positives for the same reason — the first failure a
+    // reader sees should name the field that came back.
+    const card = this.page
+      .getByText("Scan to Pay", { exact: true })
+      .locator("xpath=ancestor::*[@data-slot='card'][1]");
+    await expect(card).toBeVisible();
+
+    const text = (await card.textContent()) ?? "";
+
+    // Absent: the five the runner is actively trying to make it print.
+    for (const sentinel of [
+      "E2E-MERCHANT-MUST-NOT-RENDER",
+      "E2E-NMID-MUST-NOT-RENDER",
+      "E2E-TERMINAL-MUST-NOT-RENDER",
+      "E2E-ACQUIRER-MUST-NOT-RENDER",
+      "E2E-VERSION-MUST-NOT-RENDER",
+    ]) {
+      expect(text, `payment card still renders ${sentinel}`).not.toContain(sentinel);
+    }
+
+    // Absent: the captions, which bite wherever real values are configured.
+    for (const label of ["NMID", "Dicetak oleh", "Versi Cetak"]) {
+      expect(text, `payment card still renders the "${label}" label`).not.toContain(
+        label,
+      );
+    }
+
+    // Present: the heading as a real heading, its subtitle, and the live code.
+    await expect(card.getByRole("heading", { name: "Scan to Pay" })).toBeVisible();
+    await expect(
+      card.getByText(/use any e-wallet or mobile banking app supporting qris/i),
+    ).toBeVisible();
+    await expect(card.getByRole("img", { name: /qris code for/i })).toBeVisible();
   }
 
   /**

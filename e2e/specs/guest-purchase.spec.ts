@@ -652,6 +652,60 @@ test.describe("Guest purchase, end to end", () => {
     expect(await orderRow(orderNumber)).toMatchObject({ total_amount: "550000.00" });
   });
 
+  /**
+   * Spec 019 FR-001 to FR-006 and FR-013: the Scan to Pay card carries what the
+   * design draws, and none of the five fields it used to print.
+   *
+   * `expectAwaitingPayment` already runs this check for every scenario that
+   * reaches the payment screen. It gets a named home here anyway, because a
+   * contract enforced only as a side effect of a helper is a contract nobody
+   * can find when it fails.
+   *
+   * What makes it a test rather than a tautology is in playwright.config.ts:
+   * the runner hands the frontend all five retired values. Against pre-019 code
+   * the frame prints them and this fails naming them; after 019 nothing reads
+   * them, so the same env block also demonstrates that a deployment still
+   * exporting the retired names is simply ignored (FR-013).
+   */
+  test("the payment card shows the code and none of the retired frame fields", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-qris-frame",
+      name: "UAT QRIS Frame",
+      quota: 5,
+      price: "250000.00",
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+    const orderNumber = await guest.agreeToTermsAndBook();
+    await guest.fillHolder(0, defaultHolder);
+    await guest.payWithQris();
+
+    // The inventory itself, present and absent halves both.
+    await guest.expectAwaitingPayment();
+
+    // The code is the live one this order was issued, not a placeholder: the
+    // image the browser loaded resolves to the path the API reports.
+    const paying = await publicOrder(orderNumber);
+    expect(paying.payment?.qr_image_path).toBeTruthy();
+    const qr = page.getByRole("img", { name: /qris code for/i });
+    await expect(qr).toHaveAttribute(
+      "src",
+      new RegExp(`${paying.payment?.qr_image_path}$`),
+    );
+
+    // The instructions no longer send the guest to a label that is gone
+    // (FR-010, FR-011). The amount is named; no merchant is.
+    await page.getByRole("button", { name: /how to pay with qris/i }).click();
+    const steps = page.getByRole("list").filter({ hasText: /enter your PIN/i });
+    await expect(steps).toContainText(/250[.,]000/);
+    await expect(steps).not.toContainText(/merchant name printed/i);
+    await expect(steps).not.toContainText("E2E-MERCHANT-MUST-NOT-RENDER");
+  });
+
   // Spec 011 FR-006, clarified 2026-08-13: the phone floor is twelve digits,
   // counted on the value exactly as the guest typed it — no prefix inspection,
   // so a number can be too short in local form and long enough in international

@@ -219,6 +219,33 @@ export default defineConfig({
           stderr: "pipe",
           env: {
             API_BASE_URL: env.apiURL,
+
+            // Five values the payment frame USED to print, supplied here on
+            // purpose. Do not delete them as dead configuration — they are what
+            // makes the "the card shows none of this" assertion mean something
+            // (spec 020 research D-3).
+            //
+            // `frontend/.env` is gitignored, so a developer's machine sets these
+            // via NEXT_PUBLIC_* and CI sets nothing at all. Without this block
+            // the assertion is red locally and GREEN IN CI before the change —
+            // a regression pin that pins nothing, which is exactly the
+            // "green because the suite never looked" failure Principle VIII
+            // names. Supplying them here makes the check red-then-green in both
+            // places.
+            //
+            // The bare names are deliberate: runtimeConfigFromEnv() reads the
+            // bare name before the NEXT_PUBLIC_ one, so these win over whatever
+            // .env a developer happens to have. Sentinel values rather than
+            // plausible ones, so a failure reads as a diagnosis.
+            //
+            // After spec 020 nothing reads them, which makes this block the
+            // FR-013 scenario too: a deployment still exporting the retired
+            // names starts normally and ignores them.
+            QRIS_MERCHANT_NAME: "E2E-MERCHANT-MUST-NOT-RENDER",
+            QRIS_MERCHANT_ID: "E2E-NMID-MUST-NOT-RENDER",
+            QRIS_TERMINAL_LABEL: "E2E-TERMINAL-MUST-NOT-RENDER",
+            QRIS_ACQUIRER_CODE: "E2E-ACQUIRER-MUST-NOT-RENDER",
+            QRIS_PRINT_VERSION: "E2E-VERSION-MUST-NOT-RENDER",
           },
         },
       ]

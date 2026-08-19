@@ -7,7 +7,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { qrisMerchantName } from "@/lib/env";
 import { formatCurrency } from "@/lib/format";
 
 type Props = {
@@ -21,14 +20,21 @@ type Props = {
  *
  * Step 4 is the one that matters. A QRIS payment is authorised inside an app
  * this page cannot see, so the only check available to the guest is comparing
- * what their app shows against what this screen says — and it has to name both
- * halves, the merchant and the amount, or it is not a check at all. Naming the
- * merchant explicitly rather than saying "the organizer" is the whole point:
- * "does this match?" is answerable, "is this right?" is not.
+ * what their app shows against what this screen says. It names the exact amount
+ * for that reason: "does this match?" is answerable, "is this right?" is not.
+ *
+ * It used to name the merchant too, and that half was removed deliberately by
+ * spec 020, not lost — the frame it told the guest to read the name off no
+ * longer prints one, and an instruction pointing at absent text is worse than
+ * no instruction, because it reads as a safety check while offering nothing to
+ * check against. Spec 012's FR-021c is narrowed to the amount accordingly.
+ *
+ * The consequence is worth stating where someone will find it: the amount is
+ * now the whole of the guest's defence against a swapped code. Do not soften it
+ * to "check the amount is correct" — the figure has to be on screen to be
+ * compared against.
  */
 export function QrisInstructions({ amount }: Readonly<Props>) {
-  const merchantName = qrisMerchantName();
-
   return (
     <Collapsible className="border-y py-3">
       <CollapsibleTrigger className="group flex w-full items-center justify-between gap-2 text-sm font-medium">
@@ -50,15 +56,9 @@ export function QrisInstructions({ amount }: Readonly<Props>) {
           <li>Select the Scan QR or Pay menu.</li>
           <li>Point the camera at the QR Code shown on the left.</li>
           <li>
-            Check that your app shows{" "}
-            {merchantName ? (
-              <span className="font-medium text-foreground">{merchantName}</span>
-            ) : (
-              "the merchant name printed above the code"
-            )}{" "}
-            and the amount{" "}
+            Check that your app shows the amount{" "}
             <span className="font-medium text-foreground">{formatCurrency(amount)}</span>.
-            If either differs, stop and do not enter your PIN.
+            If it differs, stop and do not enter your PIN.
           </li>
           <li>Confirm the payment and enter your PIN.</li>
           <li>Save your payment receipt.</li>

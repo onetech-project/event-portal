@@ -287,6 +287,13 @@ a running page, so backend and frontend removal belong in the same change.
 
 ## R9. QRIS frame identity is configured, not parsed
 
+> **Superseded by [spec 020](../020-qris-frame-simplify/spec.md).** The frame no longer displays a
+> merchant name, registration number or terminal label, so the question this section answers — parse
+> them or configure them — no longer arises, and the deferred parsing work is withdrawn rather than
+> pending. Kept because the payload decoding below is still true of the payload, and because the
+> mismatch this decision's release step actually caught (see the table under R15) is worth not
+> forgetting.
+
 **Decision**: Render the frame's merchant name, registration number, and terminal label as fixed
 configured values. Do not parse the payload.
 
@@ -329,7 +336,7 @@ than merely safe. The matching edge case has been removed from the spec.
 | --- | --- |
 | Is the QR dynamic (amount fixed by the code)? | Yes — tag `01` is `12` and tag `54` carries the amount. Confirms R9 against this gateway rather than only against the supplied samples, which is what makes the callback's missing amount field tolerable. |
 | What is the gateway's own default validity? | **~8 minutes** (`qr_ea` came back 8 minutes out), not the 15 the retired `PAYMENT_EXPIRY` assumed. Adopted verbatim per FR-009c. `PAYMENT_WINDOW=15m` remains a sane fallback and sits inside FR-009d's tolerance, so it raises no signal. |
-| Frame identity | Merchant `Pupuk Kalteng` (tag 59), NMID `936008580287697876` (26→01), terminal `659` (62→07), city `JAKARTA BARAT` (60). The values first configured from the older sample (`Ayoborong` / `…176412711` / `A01`) were **wrong for this environment** and were corrected — exactly the mismatch FR-021b exists to prevent, caught by the release step rather than by a guest. |
+| Frame identity | Merchant `Pupuk Kalteng` (tag 59), NMID `936008580287697876` (26→01), terminal `659` (62→07), city `JAKARTA BARAT` (60). The values first configured from the older sample (`Ayoborong` / `…176412711` / `A01`) were **wrong for this environment** and were corrected — exactly the mismatch FR-021b exists to prevent, caught by the release step rather than by a guest. *Spec 020 retired FR-021b by removing the display, which removes this failure mode rather than re-guarding it; the tags themselves are unchanged in the payload.* |
 
 ---
 

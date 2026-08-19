@@ -1,14 +1,7 @@
 "use client";
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  apiOrigin,
-  qrisAcquirerCode,
-  qrisMerchantId,
-  qrisMerchantName,
-  qrisPrintVersion,
-  qrisTerminalLabel,
-} from "@/lib/env";
+import { Card, CardContent } from "@/components/ui/card";
+import { apiOrigin } from "@/lib/env";
 import { formatCurrency } from "@/lib/format";
 import type { PaymentInstruction } from "@/lib/types";
 
@@ -33,20 +26,27 @@ const PAY_STEPS = [
  * Indonesian QRIS frame, and the exact amount due. The payment countdown lives
  * in the Complete Purchase banner above the columns, not here.
  *
- * The frame is not decoration. A QRIS code is scanned by an app the guest
- * trusts, and the only thing standing between them and a swapped code is
- * reading the merchant name off the screen and comparing it to what their app
- * shows before they enter a PIN. So the name, the registration number, and the
- * terminal label are rendered prominently, and they come from configuration
- * rather than from the payload being displayed (FR-021a) — a code cannot vouch
- * for itself.
+ * The frame carries what the design draws and nothing else. Spec 020 removed
+ * the merchant name, the registration number, the terminal label and the two
+ * printed-footer lines — the design masks that whole band out and puts the
+ * heading and its subtitle in the space instead, which is why the title sits
+ * inside the frame here rather than in a card header above it.
+ *
+ * Worth knowing before restoring any of it: the merchant name was there as a
+ * check. A QRIS code is scanned by an app the guest trusts, and comparing the
+ * name on screen against the name the app shows was the one defence available
+ * against a swapped code. That comparison was removed deliberately, not lost —
+ * the amount check in [qris-instructions.tsx](./qris-instructions.tsx) now
+ * carries the whole verification weight, which is why it names the exact sum
+ * rather than saying "check the amount". Spec 020 supersedes spec 012's
+ * FR-021a and retires FR-021b.
  *
  * The Figma node for this frame is one flat raster with a mockup QR baked into
  * it, so it is rebuilt here as markup: the QR has to be the live one this order
  * was issued, rendered by the API on demand from the stored payload. Only the
  * artwork is imaged — the QRIS and GPN marks, the batik ground, and the three
  * step icons — because those are trademarks and illustration. Redrawing a brand
- * mark by hand would undermine the very check this frame exists to invite.
+ * mark by hand would undermine the very frame it belongs to.
  *
  * After the order ends the frame stays and only the code goes (US5 scenario 7).
  * An expired order must not present something scannable, but blanking the whole
@@ -58,28 +58,12 @@ export function QrisPanel({
   totalAmount,
   endedStatus = null,
 }: Readonly<Props>) {
-  const merchantName = qrisMerchantName();
-  const merchantId = qrisMerchantId();
-  const terminalLabel = qrisTerminalLabel();
-  const acquirerCode = qrisAcquirerCode();
-  const printVersion = qrisPrintVersion();
-
   const ended = endedStatus !== null;
   const amount = payment !== null ? payment.amount : totalAmount;
 
   return (
     <Card>
-      <CardHeader className="justify-center items-center">
-        <CardTitle className="text-xl font-bold text-center">
-          Scan to Pay
-        </CardTitle>
-        <CardDescription className="text-xs text-muted-foreground">
-          {ended
-            ? "This order can no longer be paid."
-            : "Use any e-Wallet or Mobile Banking app supporting QRIS."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5 pt-2">
+      <CardContent className="space-y-5">
         {/*
           A container query, not viewport breakpoints: every measurement below is
           a fraction of the frame's own width, taken from the design (522 × 735),
@@ -93,7 +77,16 @@ export function QrisPanel({
                 optimizer would only re-encode small static PNGs. */}
 
             {/* The batik ground, lifted from the design as one layer so its
-                motif and its diagonal masking stay exactly as drawn. */}
+                motif and its diagonal masking stay exactly as drawn.
+
+                One hazard in this asset: it was produced by erasing the
+                artwork's overlaid text, and the eraser took the motif with it,
+                leaving letter-shaped holes wherever text used to sit. The
+                footer band was repaired by hand when spec 020 removed the text
+                that had been hiding it. The holes under "SATU QRIS UNTUK SEMUA"
+                and the aspi-qris.id lines are still there, invisible only
+                because the live text below sits exactly on top of them. Move or
+                shorten that copy and the ghost of the old wording appears. */}
             <img
               src="/brand/qris-batik.png"
               alt=""
@@ -132,23 +125,22 @@ export function QrisPanel({
                 />
               </div>
 
-              {merchantName ? (
-                <p className="mt-[4%] text-center text-[4.6cqw]/[1.22] font-bold uppercase">
-                  {merchantName}
-                </p>
-              ) : null}
-
-              {merchantId ? (
-                <p className="mt-[2.4%] text-center text-[3.9cqw]/[1.2]">
-                  NMID : {merchantId}
-                </p>
-              ) : null}
-
-              {terminalLabel ? (
-                <p className="mt-[3.6%] text-center text-[3.9cqw]/[1.2]">
-                  {terminalLabel}
-                </p>
-              ) : null}
+              {/*
+                The title and its subtitle, inside the frame rather than above
+                it: the design puts them below the QRIS and GPN marks, which are
+                part of the frame artwork, and a card header could never produce
+                that order. The three margins here are measured off the design at
+                its native 522 × 735 — heading top at 122px, code top at 249px —
+                and expressed in cqw so the whole block scales with the frame.
+              */}
+              <h2 className="mt-[6.36cqw] text-center text-[3.83cqw]/[1.4] font-bold text-[#111]">
+                Scan to Pay
+              </h2>
+              <p className="mt-[1.53cqw] text-center text-[2.49cqw]/[1.5] text-[#6b7280]">
+                {ended
+                  ? "This order can no longer be paid."
+                  : "Use any e-Wallet or Mobile Banking app supporting QRIS."}
+              </p>
 
               {payment !== null ? (
                 /*
@@ -162,10 +154,10 @@ export function QrisPanel({
                   alt={`QRIS code for ${formatCurrency(amount)}`}
                   width={627}
                   height={627}
-                  className="mt-[4.5%] aspect-square w-[68%] object-contain"
+                  className="mt-[13.7cqw] aspect-square w-[68%] object-contain"
                 />
               ) : (
-                <div className="mt-[4.5%] flex aspect-square w-[68%] items-center justify-center rounded-[2cqw] border border-dashed border-neutral-300 bg-white/70 px-[4%]">
+                <div className="mt-[13.7cqw] flex aspect-square w-[68%] items-center justify-center rounded-[2cqw] border border-dashed border-neutral-300 bg-white/70 px-[4%]">
                   <p className="text-center text-[3.6cqw]/[1.35] font-medium text-neutral-500">
                     {endedStatus === "CANCELLED"
                       ? "This order was cancelled, so no code can be shown."
@@ -182,17 +174,6 @@ export function QrisPanel({
                 <br />
                 di: www.aspi-qris.id
               </p>
-            </div>
-
-            {/*
-              Footer, in two independently placed blocks rather than one row:
-              the acquirer lines sit on the white at 3.2% from the bottom, while
-              the step labels run almost to the card edge. Bottom-aligning them
-              together would lift the steps off the design by three percent.
-            */}
-            <div className="absolute bottom-[3.2%] left-[7%] text-[2.9cqw]/[1.45] font-bold whitespace-nowrap">
-              {acquirerCode ? <p>Dicetak oleh : {acquirerCode}</p> : null}
-              {printVersion ? <p>Versi Cetak : {printVersion}</p> : null}
             </div>
 
             {/*
