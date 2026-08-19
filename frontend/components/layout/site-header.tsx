@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { FaWhatsapp } from "react-icons/fa6";
 
 import { SiteNav } from "@/components/layout/site-nav";
@@ -15,7 +14,6 @@ export function SiteHeader() {
     <header className="bg-ink">
       <div className="mx-auto flex h-24.25 max-w-330 items-center justify-between gap-6 px-6">
         <div className="flex items-center gap-6">
-          <Link href="/" aria-label="JIVE home" className="shrink-0">
             {/*
               Capped by HEIGHT, with width following the asset's own ratio, so the
               bar can never grow to accommodate a mark (spec 016 FR-023b). A 200px
@@ -39,8 +37,6 @@ export function SiteHeader() {
               height={55}
               className="h-13.75 w-auto object-contain"
             />
-          </Link>
-
           <SiteNav />
         </div>
 
