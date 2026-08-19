@@ -16,7 +16,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Loading, StatusAlert } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
 import { useCheckoutStatus } from "@/lib/checkout-status";
-import { orderDonePath, orderFormsPath } from "@/lib/order-routes";
+import { eventDetailPath, orderDonePath, orderFormsPath } from "@/lib/order-routes";
 import { isFinalOrderStatus, useOrderDetail } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -111,7 +111,7 @@ export function CheckoutView({
             : "We could not load this order right now. Please try again in a moment."}
         </StatusAlert>
         <p className="mt-4 text-sm">
-          <Link href={`/events/${eventSlug}`} className="underline">
+          <Link href={eventDetailPath(eventSlug)} className="underline">
             Back to the event
           </Link>
         </p>
@@ -240,7 +240,7 @@ export function CheckoutView({
         </aside>
       </div>
 
-      {endedStatus && <EndOfJourneyDialog status={endedStatus} />}
+      {endedStatus && <EndOfJourneyDialog status={endedStatus} eventSlug={eventSlug} />}
     </main>
   );
 }

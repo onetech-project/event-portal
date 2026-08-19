@@ -321,6 +321,15 @@ describe("checkout page — state forwards", () => {
       await screen.findByRole("heading", { name: /order cancelled/i }),
     ).toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
+
+    // The fourth corner of spec 019's 2x2 — two endings across two screens.
+    // Without this, three of the four combinations were pinned and a cancelled
+    // order on THIS screen could have kept pointing at the site home unnoticed
+    // (FR-006 with FR-008).
+    expect(screen.getByRole("link", { name: /return to event page/i })).toHaveAttribute(
+      "href",
+      "/events/jazz-night-2026",
+    );
   });
 });
 
@@ -359,10 +368,14 @@ describe("checkout page — the dialog cannot be dismissed", () => {
     const dialog = await openedDialog();
 
     expect(within(dialog).queryByRole("button", { name: /close/i })).not.toBeInTheDocument();
-    // Exactly one way out, and it leaves the flow rather than dismissing.
+    // Exactly one way out, and it leaves the flow rather than dismissing. Spec
+    // 019 FR-003/FR-004: it leads to the event's page and says so. FR-008 is
+    // what makes this assertion worth repeating on both screens — the dialog is
+    // shared, so a per-screen destination would be a silent divergence.
     const actions = within(dialog).getAllByRole("link");
     expect(actions).toHaveLength(1);
-    expect(actions[0]).toHaveAttribute("href", "/");
+    expect(actions[0]).toHaveAccessibleName(/return to event page/i);
+    expect(actions[0]).toHaveAttribute("href", "/events/jazz-night-2026");
   });
 });
 

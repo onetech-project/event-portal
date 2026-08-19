@@ -9,6 +9,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { eventDetailPath } from "@/lib/order-routes";
 
 /**
  * The dead end for an order that ended without a purchase (Figma 293-3).
@@ -35,14 +36,31 @@ import {
  *
  * Base UI's docs suggest keeping a `Dialog.Close` inside a modal popup so touch
  * screen-reader users have an escape. FR-023 forbids a close control, so the
- * single "Return to Home Page" button is that escape: focusable, inside the
+ * single "Return to Event Page" button is that escape: focusable, inside the
  * trap, and a real way out. Browser navigation is never blocked — this blocks
  * the page, not the browser.
+ *
+ * Spec 019 FR-003 changed where that button leads and, with it, what it says.
+ * It used to deposit the guest on the site home — several steps from the event
+ * they were buying for, and with no sign that the seats they just lost were
+ * back on sale. It now leads to the event's own page. Nothing else here moved:
+ * the guest is still never navigated automatically (FR-005), so this stays a
+ * plain link rather than gaining a router call.
  */
 export function EndOfJourneyDialog({
   status,
+  eventSlug,
 }: {
   status: "EXPIRED" | "CANCELLED";
+  /**
+   * The event whose page the single action leads to.
+   *
+   * Required rather than optional on purpose (FR-008): an optional slug would
+   * let a call site forget it and silently inherit some fallback destination,
+   * which is the per-screen divergence this feature had to rule out. Both order
+   * screens hold this value already, so there is nothing to thread.
+   */
+  eventSlug: string;
 }) {
   const expired = status === "EXPIRED";
 
@@ -66,15 +84,18 @@ export function EndOfJourneyDialog({
             : "This order was cancelled. Your seats have been released."}
         </DialogDescription>
 
-        {/* Exactly one action (FR-024). The old "Repeat Order" link into the
-            event's ticket selection is gone, and with it the copy above that
-            used to tell the guest to repeat — promising an action this dialog
-            does not offer. */}
+        {/* Still exactly one action (FR-024, spec 019 FR-009). The old "Repeat
+            Order" link is gone and is NOT what this is: that one jumped into
+            the event's ticket SELECTION, and the copy above promised a repeat
+            this dialog does not offer. This leads to the event's landing page
+            instead — one step short of selection — so the guest arrives where
+            the released seats are listed without being told an order was
+            repeated for them. */}
         <Link
-          href="/"
+          href={eventDetailPath(eventSlug)}
           className="mt-6 flex h-11 w-full items-center justify-center rounded-lg bg-brand text-base font-bold text-brand-foreground transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-brand focus:ring-offset-2 disabled:opacity-60"
         >
-          Return to Home Page
+          Return to Event Page
         </Link>
       </DialogContent>
     </Dialog>

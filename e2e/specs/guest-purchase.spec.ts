@@ -284,6 +284,92 @@ test.describe("Guest purchase, end to end", () => {
     expect(await quotaOf(ticketType.id)).toBe(6);
     const listed = await publicTicketTypes(event.slug);
     expect(listed[0].quota_remaining).toBe(6);
+
+    // Spec 019 FR-003/FR-006/FR-008. The guest never left the payment screen, so
+    // the dialog opens over it and its ONE action leads back to the event rather
+    // than to the site home. Asserted here rather than in a scenario of its own
+    // because this is the only place the suite arranges a real provider expiry.
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: /time's up/i })).toBeVisible();
+
+    const action = dialog.getByRole("link");
+    await expect(action).toHaveCount(1);
+    await expect(action).toHaveAccessibleName(/return to event page/i);
+
+    // FR-005: the expiry moved nothing by itself. Still on /checkout until the
+    // guest presses, and only then on the event's own page.
+    expect(new URL(page.url()).pathname).toMatch(/\/checkout$/);
+    await action.click();
+    await expect(page).toHaveURL(new RegExp(`/events/${event.slug}$`));
+  });
+
+  /**
+   * Spec 019 FR-005/FR-007, the holder-forms half of the same rule. The scenario
+   * above cannot reach it: its order has already started payment, so it is on the
+   * payment screen by the time it expires. Here the guest never leaves the forms
+   * and the booking hold lapses underneath them.
+   *
+   * Booking and checkout share one deadline column, so the ordinary expiry
+   * sweeper releases an untouched hold with no payment involved — which is what
+   * lets this be arranged entirely through the real system rather than by writing
+   * a status into the database (Principle VIII).
+   *
+   * The wait budget comes from `testInfo.timeout` rather than a literal: that
+   * value is already scaled by the same factor the config applies to
+   * BOOKING_HOLD, so a headed `npm run test:slow` run — where the hold grows to
+   * minutes — stretches with it instead of hanging on a hardcoded 30 seconds.
+   */
+  test("an expired hold sends the guest back to the event from the holder forms", async ({
+    page,
+  }, testInfo) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-hold-expiry",
+      quota: 4,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 2);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    expect(await quotaOf(ticketType.id)).toBe(2);
+
+    // Half-filled deliberately: FR-001 keeps the forms rendered behind the
+    // dialog, so what the guest typed is neither cleared nor submitted.
+    await guest.fillHolder(0, defaultHolder);
+
+    await waitFor(
+      () => orderStatusOf(orderNumber),
+      (status) => status === "EXPIRED",
+      {
+        timeoutMs: Math.round(testInfo.timeout * 0.6),
+        intervalMs: 1_000,
+        what: "the booking hold to lapse",
+      },
+    );
+
+    // The seats went back on sale without anyone reopening the page.
+    expect(await quotaOf(ticketType.id)).toBe(4);
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: /time's up/i })).toBeVisible();
+
+    // The forms are still there behind it — the dialog did not replace the screen
+    // (FR-001). Located by attribute rather than by role on purpose: the open
+    // dialog marks everything behind it aria-hidden, so a role query is excluded
+    // from the accessibility tree and would report "not found" for a form that is
+    // sitting right there. checkout/page.test.tsx documents the same trap.
+    await expect(page.locator('form[aria-label="Visitor registration"]')).toBeAttached();
+
+    const action = dialog.getByRole("link");
+    await expect(action).toHaveCount(1);
+    await expect(action).toHaveAccessibleName(/return to event page/i);
+
+    // FR-005 again, and this is the assertion that would catch an automatic
+    // redirect: the guest is still on the forms address until they press.
+    expect(new URL(page.url()).pathname).toMatch(/\/orders\/[^/]+$/);
+    await action.click();
+    await expect(page).toHaveURL(new RegExp(`/events/${event.slug}$`));
   });
 
   /**
@@ -420,6 +506,62 @@ test.describe("Guest purchase, end to end", () => {
     expect(bundleLine).toMatch(/\d/);
     // Two distinct days are listed, not collapsed to one and not ranged.
     expect(bundleLine.split(",").length).toBe(2);
+  });
+
+  /**
+   * Spec 019 FR-011/FR-014. Everywhere else the suite books a package with
+   * quantity 1 — and a single unit never carried a visitor number — so the only
+   * shape that ever showed one has until now been assembled nowhere but jsdom.
+   * This books two units of one bundle in a real browser.
+   */
+  test("a bundle bought twice shows two unnumbered holder cards", async ({ page }) => {
+    const { event, ticketType: dayOne } = await createSellableEvent(token, {
+      slug: "uat-bundle-twice",
+      ticketName: "Day 1 Pass",
+      quota: 6,
+    });
+    const dayTwo = await createTicketType(token, {
+      eventId: event.id,
+      name: "Day 2 Pass",
+      price: "150000.00",
+      quota: 6,
+    });
+    await createPackage(token, {
+      eventId: event.id,
+      name: "Two-Day Bundle",
+      price: "250000.00",
+      ticketTypeIds: [dayOne.id, dayTwo.id],
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity("Two-Day Bundle", 2);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    // Located by attribute rather than by role: `form` is not an implicit ARIA
+    // role unless it is named, and keying off the DOM here keeps the query
+    // working whichever way the heading markup moves.
+    const form = page.locator('form[aria-label="Visitor registration"]');
+    const titles = form.locator('[data-slot="card-title"]');
+
+    // Two purchased units, two cards, each covering that unit's two tickets.
+    await expect(titles).toHaveCount(2);
+    await expect(titles.nth(0)).toContainText("Two-Day Bundle");
+    await expect(titles.nth(0)).toContainText("2 tickets");
+    await expect(titles.nth(1)).toContainText("Two-Day Bundle");
+    await expect(titles.nth(1)).toContainText("2 tickets");
+
+    // FR-011: nothing numbers them any more. The two headings are now identical,
+    // which is the accepted cost recorded in the spec's Assumptions.
+    await expect(form.getByText(/^Visitor \d+$/)).toHaveCount(0);
+
+    // FR-014: one card still fills its WHOLE unit. Two cards filled, four
+    // attendees stored — proven against the real API rather than a stubbed fetch.
+    await guest.fillHolder(0, defaultHolder);
+    await guest.fillHolder(1, { ...defaultHolder, name: "Second Unit Holder" });
+    await guest.payWithQris();
+
+    expect(await attendeeCountFor(orderNumber)).toBe(4);
   });
 
   /**
