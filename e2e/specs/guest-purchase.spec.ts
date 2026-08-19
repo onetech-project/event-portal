@@ -156,6 +156,12 @@ test.describe("Guest purchase, end to end", () => {
     // MIME the production mailer composed, off Mailpit, after a real SMTP hop.
     const mail = await waitForMail(defaultHolder.email);
 
+    // FR-005a / SC-022: the subject names the order and the event it belongs to.
+    // event.name is "UAT Full Journey" here, not "JIVE 2026", so this assertion
+    // also fails a hardcoded event name — which is what makes FR-005a's "read it
+    // from the order" genuinely covered rather than merely stated.
+    expect(mail.Subject).toBe(`[${orderNumber}] E-receipt & E-Ticket for ${event.name}`);
+
     expect(mail.Attachments).toHaveLength(2); // FR-001 / SC-001
     const [receiptPart, ticketsPart] = mail.Attachments;
 
@@ -179,6 +185,26 @@ test.describe("Guest purchase, end to end", () => {
       expect(mail.HTML).not.toContain(code);
     }
     expect(mail.HTML).toContain("Buyer Information");
+
+    // FR-033 / SC-023: the buyer's phone masks its LAST FOUR characters and
+    // nothing else, rendered exactly as stored — no +62 normalisation and no
+    // reformatting. defaultHolder.phone is 081234567890.
+    //
+    // Written as LITERALS on purpose. Asserting through MaskPhone() would pass
+    // for whatever shape the helper returns, so the scenario could never be red —
+    // the failure Principle VIII names by hand (research R-027). The negative
+    // assertion names the superseded shape so a failure shows both side by side.
+    expect(mail.HTML).toContain("08123456****");
+    expect(mail.HTML).not.toContain("08123***7890");
+
+    // FR-033 / SC-026: the email masks the LAST THREE characters of its local part
+    // and keeps the whole domain. defaultHolder.email is budisantoso@example.com.
+    //
+    // Literals again, for the reason above — and note the fixture's local part is
+    // deliberately longer than four characters: at four or fewer both the old and
+    // new rules render "b***", so this assertion could not be red (R-037).
+    expect(mail.HTML).toContain("budisant***@example.com");
+    expect(mail.HTML).not.toContain("budis******@example.com");
 
     // FR-023a, FR-025: every cid: the body references resolves to an inline
     // part, and the inline parts are NOT counted as attachments. A reference

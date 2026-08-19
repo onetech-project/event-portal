@@ -88,7 +88,7 @@ export function OrderDoneView({
   }
 
   if (data.status === "PAID") {
-    return <OrderConfirmation order={data} />;
+    return <OrderConfirmation order={data} event={eventSlug} />;
   }
 
   // On its way back to the payment screen; see the effect above.

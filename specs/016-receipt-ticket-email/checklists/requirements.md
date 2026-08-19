@@ -154,5 +154,95 @@ the mark's secondary line is legible at 100% zoom.
   document title is still "Event Ticketing". Neither is a logo call, so the "update every
   logo call" instruction does not reach them.
 
+**Iteration 6 (2026-08-19, subject line + phone mask direction)** — the user reported that
+the subject should name the order and the event, and that the phone's asterisks sit in the
+wrong place. Four questions were answered. **14/16 → 14/16; no checklist item changed
+state.**
+
+- **FR-005a is new.** The email subject was never specified — the implementation's
+  "Your tickets for <event>" was a choice nobody had recorded. It is now
+  `[<order number>] E-receipt & E-Ticket for <event name>`, with the event name read from
+  the order rather than hardcoded, so the subject stays correct for every event the platform
+  sells.
+- **FR-033's phone clause was replaced, not amended.** The old keep-leading-5 /
+  keep-trailing-4 rule masked the middle (`14239***6621`); the rule now masks only the last
+  4 characters (`+628123456****`). The clarification records that this discloses more of the
+  number than before and that the tradeoff was accepted deliberately — it is not an
+  oversight for a later reader to "fix".
+- **The edge case and the Assumptions entry were both rewritten** rather than left standing:
+  the short-value fallback now splits email from phone, and the phone shape is no longer
+  described as discretionary.
+
+### "All acceptance scenarios are defined" would have regressed
+
+FR-005a and the rewritten FR-033 arrived with nothing in the user stories exercising them.
+User Story 1 scenario 6 (subject line) and User Story 2 scenario 8 (the literal
+`+628123456****` shape) were added, and SC-022/SC-023 give both a measurable outcome.
+
+**Iteration 7 (2026-08-19, e-ticket colours + typeface)** — a rendered e-ticket was read
+against Figma `683-148`. Four questions answered. **14/16 → 14/16; no checklist item changed
+state.**
+
+- **FR-019b is new.** The event name rendered in the brand crimson `#cb1c4f`; the design
+  gives it as slate `#475569`. The crimson constant has exactly one consumer in the codebase,
+  so this retires it from the e-ticket entirely.
+- **FR-022f is new, and it corrects an inversion rather than a shade.** The footer drew its
+  *labels* brighter than the *values* they head, so the support address — the only thing on
+  the document a buyer acts on — was the dimmest text in the band, worst in greyscale print.
+  The design has the opposite emphasis.
+- **FR-003a and FR-003b are new.** Both documents move from the built-in Helvetica to Inter,
+  the family the designs use, and the e-ticket's type sizes are re-read from the design
+  wholesale. FR-003a also retires the single-byte transliteration step, so a holder name
+  carrying a diacritic renders as stored — a correctness gain that arrived as a side effect
+  and is recorded so it is not lost.
+
+### "All acceptance scenarios are defined" would have regressed twice
+
+FR-019b/FR-022f and then FR-003a/FR-003b each arrived with nothing exercising them. User
+Story 1 scenarios 7 and 8 were added, with SC-024 and SC-025 giving both a measurable
+outcome. SC-025 is deliberately phrased as an outcome — "the same typeface as the site and
+the designs", not "Inter is embedded" — so the technology-agnostic criterion keeps passing,
+the same rewrite iterations 3 and 5 both needed.
+
+### Scope deliberately bounded, recorded so it is not mistaken for agreement
+
+- **The page margin is out of scope.** The design insets content at 14.1mm and the document
+  at 17mm. Closing that would move the QR panel and the accent rule FR-022b pins, which is a
+  layout change, not a typographic one.
+- **The receipt's type scale has not been examined** against its own design. FR-003b covers
+  the e-ticket only. Its absence from this iteration is not a finding that the receipt agrees.
+- **Sequencing was decided at spec level and belongs in the plan**: the typeface ships as its
+  own increment after the colour, subject and mask work, because it moves every coordinate in
+  both documents while the colour changes move none.
+
+**Iteration 8 (2026-08-19, email mask direction)** — the phone rule had shipped; reading a
+delivered receipt raised the same question about the email. Two questions answered.
+**14/16 → 14/16; no checklist item changed state.**
+
+- **FR-033's email clause was replaced, not amended.** It kept the first 5 characters of the
+  local part and asterisked the rest — 8 asterisks on an ordinary address, and a local part of
+  exactly 5 printed **whole**. It now masks the last 3 characters and keeps everything before,
+  which makes the two halves of FR-033 the same shape: mask the tail, keep the head, differing
+  only in how much.
+- **The rule closes a disclosure nobody had flagged.** Under keep-first-5, `dimas@gmail.com`
+  rendered as itself — a masking function returning its input unchanged. The new rule always
+  hides at least one character.
+- **One consequence was accepted rather than overlooked**: a value in the email field with no
+  `@` now discloses more than before (`notan*****` → `notanemai***`). The field is
+  format-validated at checkout so the branch is close to unreachable, and a second masking
+  rule would be a second thing to keep correct.
+
+### "All acceptance scenarios are defined" would have regressed again
+
+The rewritten FR-033 arrived with only its phone half exercised. User Story 2 scenario 9 and
+SC-026 were added for the email half.
+
+### Invariant re-checked rather than assumed
+
+`TestMaskingNeverLengthensAValue` still holds: asterisks replace exactly the characters they
+hide, so the masked value is the same length as the stored one. This was checked because the
+rejected "always exactly 3 asterisks" reading would have **lengthened** a short local part —
+`abcdef` → `abcde***` — and silently broken the receipt's column alignment.
+
 Items marked incomplete remain the two accepted implementation-detail deviations described
 above. They do not block `/speckit-tasks`.

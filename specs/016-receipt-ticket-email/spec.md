@@ -190,6 +190,84 @@ finding rather than a decision:
   credit nobody reads off a ticket or a navigation bar. Capping by height has the further
   property that swapping the asset can no longer change any layout (FR-023b).
 
+### Session 2026-08-19 (subject line + phone masking)
+
+Raised after a delivered email was read in a real inbox.
+
+- **Q**: In the subject `[ORDERID] E-receipt & E-Ticket for JIVE 2026`, should "JIVE 2026" be
+  a fixed literal string in every email, or the event's own name pulled from the order? →
+  **A**: Dynamic — the subject carries the order's own event name, so it reads "JIVE 2026"
+  while that is the event's name and stays correct for every other event the platform sells
+  (FR-005a).
+- **Q**: Which identifier is `[ORDERID]`, and do the square brackets appear literally? →
+  **A**: The order number, in literal square brackets — the same identifier the receipt
+  prints as "Order No." and both attachment filenames carry, not the internal database key
+  (FR-005a).
+- **Q**: Does the change to the buyer-phone masking apply to the receipt document too, or
+  only to the email body? → **A**: Both. The receipt's email and phone MUST render in exactly
+  the same shape as the email body's; one masking rule serves both surfaces, as FR-032 and
+  FR-033 already require, and any revision to the rule changes both together.
+- **Q**: Under the revised phone rule, which characters are replaced by asterisks? →
+  **A**: Exactly the last 4 characters; every character before them prints verbatim, and the
+  value is rendered as stored rather than normalised to any country-code format
+  (`+6281234567890` → `+628123456****`). This replaces the previous keep-leading-5 /
+  keep-trailing-4 rule, which masked the middle instead (FR-033). It is accepted that the
+  new shape discloses more of the number than the old one; the reported defect was that the
+  asterisks appeared in the wrong place, and legibility of the buyer's own number on their
+  own receipt was preferred over the extra concealment.
+
+### Session 2026-08-19 (e-ticket colours)
+
+Raised while reading a rendered e-ticket against Figma `683-148`.
+
+- **Q**: The event name above the ticket-type heading renders in the brand crimson
+  `#cb1c4f`. What colour does the design specify? → **A**: `#475569`, taken exactly, as its
+  own constant. **Not** the existing `#334155` — FR-022b pins that to the QR accent rule, a
+  different meaning, and the two are visibly distinct slates at this size. The crimson then
+  has no consumer left on the e-ticket (FR-019b).
+- **Q**: The footer's emphasis is inverted against the design — the code draws the labels
+  brighter than the values they head, so the support address is the dimmest text in the band.
+  Adopt the design's emphasis? → **A**: Yes. Labels dim, values and the envelope icon in pure
+  white (FR-022f).
+- **Q**: Can the documents use Inter, the family the designs are drawn in, instead of the
+  built-in Helvetica? → **A**: Yes, on **both** PDF documents — a receipt in Helvetica beside
+  an e-ticket in Inter, arriving in one email, reads worse than both in Helvetica. It ships
+  as its own increment immediately after the colour, subject and mask work, because the font
+  moves every coordinate in both documents while the colour changes move none, and bundling
+  them makes a failing geometry assertion impossible to bisect (FR-003a).
+- **Q**: During the font swap, should the type sizes be re-read from the design wholesale, or
+  should only the measured mismatches be corrected? → **A**: Wholesale, for the e-ticket —
+  every text node in Figma `683:148`. Four elements were spot-checked and three were wrong
+  (event name 9.5 vs 14, footer label 7.5 vs 10, footer value 9 vs 12), which is too poor a
+  hit rate to extrapolate from, and the coordinates are being re-derived anyway. The page
+  margin is explicitly **excluded** — the design insets at 14.1mm and the document at 17mm,
+  and closing that moves the QR panel and the accent rule FR-022b pins, which is a layout
+  change rather than a typographic one (FR-003b).
+- **Q**: Reading the design node by node showed the e-ticket is a different colour *family*
+  from the design throughout — Tailwind slate in the design, zinc/neutral in the document —
+  and FR-019b and FR-022f reach only the event name and the footer. Should the rest follow? →
+  **A**: Yes, and inside the typeface revision, where the same elements are already being
+  retouched for the type scale. The identity block, the `Ticket N of M` heading, the
+  valid-for row and the divider rule all move to the design's values (FR-019c).
+
+### Session 2026-08-19 (email mask direction)
+
+Raised after the phone rule shipped, on reading a delivered receipt.
+
+- **Q**: How much of the email address should be hidden, and where? → **A**: The **last 3
+  characters of the local part**, keeping everything before them and the whole domain —
+  `dimasprasetyo@gmail.com` renders `dimasprase***@gmail.com`. This replaces the keep-first-5
+  rule, under which the same address showed 8 asterisks and a local part of exactly 5
+  characters was printed whole. At least one character always stays visible, so a 2-character
+  local part gets 1 asterisk; only a single-character local part is masked entirely. The rule
+  is now positionally the same as the phone rule — mask the tail, keep the head — differing
+  only in how much (FR-033).
+- **Q**: Should a value in the email field with no `@` get the same treatment, or be masked
+  more aggressively? → **A**: The same rule. The field is format-validated at checkout, so
+  this branch is close to unreachable, and a second masking rule is a second thing to keep
+  correct. Accepted knowingly: it discloses more of such a value than the previous rule did
+  (`notanemail` was `notan*****`, becomes `notanem***`).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1)
@@ -224,6 +302,20 @@ with the e-ticket file holding exactly one page per issued ticket.
    same ticket code.
 5. **Given** a paid order, **When** the e-ticket document is opened, **Then** no page shows
    a price, a fee, or a total.
+6. **Given** a paid order, **When** the delivered email is listed in the recipient's inbox,
+   **Then** its subject reads `[<order number>] E-receipt & E-Ticket for <event name>`,
+   carrying the same order number the receipt prints and the name of the event the order was
+   placed against (FR-005a).
+7. **Given** a paid order, **When** an e-ticket page is opened, **Then** the event name above
+   the ticket-type heading is slate `#475569` and no crimson appears anywhere on the page
+   except within the brand mark itself, **and** in the footer each label is dimmer than the
+   value beneath it (FR-019b, FR-022f), **and** the field labels, field values,
+   pagination heading and divider carry the design's slate values rather than the neutral ones
+   (FR-019c).
+8. **Given** a paid order whose holder name carries a diacritic, **When** either document is
+   opened on a machine that does not have the design's typeface installed, **Then** both
+   render in that typeface and the name prints as stored rather than approximated, **and**
+   the e-ticket's text sizes match the design (FR-003a, FR-003b).
 
 ---
 
@@ -263,6 +355,13 @@ design: every section is present, in order, populated from the real order.
    render as images in the body rather than as files to open (FR-001, FR-023a, FR-025).
 7. **Given** a delivered email, **When** the header band is read at 100% zoom, **Then** the
    brand mark's secondary line is legible without magnification (FR-023b).
+8. **Given** an order whose stored buyer phone is `+6281234567890`, **When** the body and the
+   receipt are read, **Then** both show `+628123456****` — the stored value unchanged except
+   for its last 4 characters, with no country-code normalisation and no reformatting
+   (FR-033).
+9. **Given** an order whose stored buyer email is `dimasprasetyo@gmail.com`, **When** the body
+   and the receipt are read, **Then** both show `dimasprase***@gmail.com` — the whole domain
+   and every character of the local part except its last 3 (FR-033).
 
 ---
 
@@ -314,8 +413,9 @@ byte the codes issued the first time.
   line's date — never the parent event's opening date.
 - **Buyer with no recorded phone**: the buyer-information block and the receipt omit the
   phone row rather than printing an empty, placeholder, or fully-masked value.
-- **Contact value too short to mask under the standard rule** (a very short local part or a
-  short phone): it is masked from its second character onward rather than printed in full.
+- **Contact value too short to mask under the standard rule**: a very short email local part
+  is masked from its second character onward rather than printed in full, and a phone of 4
+  characters or fewer is masked entirely.
 - **Very long event name, venue, address, or attendee name**: the value wraps within the
   document rather than overflowing the page or being silently truncated.
 - **Order that is not paid**: no email and no documents are produced — unchanged from
@@ -339,6 +439,18 @@ byte the codes issued the first time.
   single file, one page per issued ticket, in the order's canonical ticket order.
 - **FR-003**: Both attachments MUST be produced in a portable, printable page format
   (A4 portrait) that opens without additional software on desktop and mobile mail clients.
+- **FR-003a**: Both documents MUST be typeset in **Inter**, the family the designs use,
+  embedded in the file so they render identically for a reader who does not have it
+  installed. Only the glyphs actually drawn need be embedded. This replaces the built-in
+  Helvetica the documents shipped with, and it retires the transliteration step that
+  Helvetica's single-byte encoding required — a holder name carrying a diacritic MUST render
+  as stored rather than being approximated.
+- **FR-003b**: The e-ticket's type sizes MUST match the design's (Figma `683:148`), read
+  from every text node rather than from the elements that happened to be spot-checked. The
+  page margins are explicitly out of scope and stay as they are: the design's narrower inset
+  would move the QR panel and the accent rule FR-022b pins. **The receipt's type scale has
+  not been examined against its own design and is not covered by this requirement** —
+  recorded so its absence is not read as a finding of agreement.
 - **FR-004**: Each attachment's file name MUST identify the order it belongs to and
   distinguish the receipt from the e-tickets, so two files saved to one folder never
   collide or become ambiguous.
@@ -346,6 +458,12 @@ byte the codes issued the first time.
   feature MUST NOT change the recipient, the number of emails, or the trigger.
 - **FR-006**: If either document cannot be produced, the email MUST NOT be sent, the
   order MUST NOT be marked as delivered, and the resend MUST remain available.
+- **FR-005a**: The email's subject line MUST identify both the order and the event, in the
+  form `[<order number>] E-receipt & E-Ticket for <event name>` — the order number enclosed
+  in literal square brackets, being the same human-facing identifier printed on the receipt
+  and carried in both attachment filenames (FR-004, FR-009), never the order's internal
+  database key. The event name MUST be the one recorded on the order rather than a fixed
+  string, so an email for any other event names that event.
 - **FR-007**: A resend MUST produce the same two attachments with the same already-issued
   ticket codes; ticket codes MUST NOT be regenerated by any send.
 
@@ -397,6 +515,16 @@ byte the codes issued the first time.
 - **FR-018**: Each e-ticket page MUST show the holder's name and email address, and the
   order number the ticket belongs to.
 - **FR-019**: Each e-ticket page MUST show the event name and the ticket type's name.
+- **FR-019c**: The e-ticket's remaining text colours MUST follow the design rather than the
+  document's current neutral family: field labels and the `VALID FOR` label `#64748b`, field
+  values and the ticket-type heading `#0f172a`, the `Ticket N of M` heading `#1e293b`, and the
+  divider rule `#e2e8f0`. Each differs from today's value by only a few percent; together they
+  are the difference between a warm-neutral document and the design's cool slate, which is why
+  they are specified as a set rather than individually.
+- **FR-019b**: The event name above the ticket-type heading MUST be rendered in `#475569`
+  and MUST NOT use the brand crimson `#cb1c4f`. The design gives it as a slate at that
+  position (Figma `683:185`); crimson there reads as an alert rather than as a label. This is
+  distinct from `#334155`, which FR-022b reserves for the QR accent rule.
 - **FR-019a**: An e-ticket page MUST NOT show the venue. The design carries no such field.
   This is a deliberate trade, recorded so it is not re-added by reflex: a holder arriving
   at a gate no longer has the address on the pass itself, and the venue remains on the
@@ -442,6 +570,12 @@ byte the codes issued the first time.
   configured support address, short or long, the label, the envelope icon and the address
   still share one left edge and the block still sits against the right margin. A footer that
   lines up only for the mock's own address does not meet FR-022a.
+
+- **FR-022f**: In the e-ticket footer, each section label MUST be rendered **dimmer** than
+  the value it heads: the labels at white composited over the band at 80% opacity, the values
+  and the envelope icon in pure white. The support address is the only value on the document
+  a buyer needs to act on and MUST NOT be the dimmest text in the band — which is what the
+  inverted emphasis produced, and it is worst in greyscale print.
 
 #### Email body
 
@@ -558,11 +692,22 @@ byte the codes issued the first time.
   and phone — from one source. The two surfaces MUST NOT disagree about who bought the
   order.
 - **FR-033**: The buyer's email address and phone number MUST be partially masked on both
-  those surfaces, under one identical rule on both: an email keeps the first 5 characters of
-  its local part and its whole domain, with the remainder of the local part replaced by
-  asterisks; a phone number keeps its leading 5 and trailing 4 characters, with the middle
-  replaced by asterisks. A value too short for that rule MUST be masked from its second
-  character onward rather than printed in full.
+  those surfaces, under one rule shaped the same way for both — mask the tail, keep the head,
+  differing only in how much.
+
+  An email MUST keep its whole domain and every character of its local part except the last
+  3, which are replaced by asterisks: `dimasprasetyo@gmail.com` renders
+  `dimasprase***@gmail.com`. At least one character of the local part MUST stay visible, so
+  the asterisk count is the smaller of 3 and one less than the local part's length; a
+  single-character local part, which cannot satisfy both, MUST be masked entirely. A value in
+  the email field carrying no `@` MUST be treated as a bare local part under this same rule
+  rather than printed whole or given a stricter one of its own.
+
+  A phone number MUST keep every character except its last 4, which are replaced by
+  asterisks — so a stored `+6281234567890` renders as `+628123456****`. The phone rule MUST
+  count characters, not digits, and MUST render the value as stored: no country-code
+  normalisation, no reformatting, and no separators added or removed. A phone of 4 characters
+  or fewer MUST be masked entirely.
 - **FR-034**: The holder email printed on each e-ticket page MUST be shown in full — it is
   holder identity on a document presented at the gate, not a contact detail on a receipt
   that may be forwarded.
@@ -676,6 +821,23 @@ byte the codes issued the first time.
 - **SC-021**: In the e-ticket footer, the "Customer Service" label, the envelope icon and
   the support address share one left edge, for any configured support address, and the block
   as a whole stays against the right margin (FR-022a, FR-022d).
+- **SC-022**: The delivered email's subject reads `[<order number>] E-receipt & E-Ticket for
+  <event name>` for 100% of sent orders, with the order number matching the one printed on
+  the receipt and the event name matching the event the order was placed against (FR-005a).
+- **SC-023**: The buyer's phone renders with only its last 4 characters replaced by
+  asterisks, character-for-character identical to the stored value elsewhere, and identically
+  on the email body and the receipt (FR-033).
+- **SC-024**: The e-ticket carries no brand crimson outside the brand mark, and in its
+  footer the site address and support address are the brightest text in the band while their
+  labels are dimmer — for any configured address, and legibly so in greyscale print
+  (FR-019b, FR-022f).
+- **SC-025**: Both documents render in the same typeface as the site and the designs, for a
+  reader who does not have that typeface installed, and a holder name carrying a diacritic
+  prints as stored rather than approximated to its nearest plain letter (FR-003a).
+- **SC-026**: The buyer's email renders with only the last 3 characters of its local part
+  replaced by asterisks and its domain intact, identically on the email body and the receipt,
+  and never with the local part printed whole — for a local part of any length down to one
+  character (FR-033).
 - **SC-010**: No regression in delivery: the share of paid orders reaching delivered status
   is unchanged from before this feature, and a failure to build either document leaves the
   order undelivered with resend armed rather than sending a partial email.
@@ -692,9 +854,10 @@ byte the codes issued the first time.
   mask the same kinds of value differently (`dimas***@gmail.com` vs `Palex******@gma**.com`;
   `+628123456****` vs `+62812****1119`). FR-033 picks one rule and applies it to both
   surfaces, because the clarification established that both render the same underlying
-  value and two shapes for one value would read as two different buyers. The specific
-  keep-5/keep-4 rule is the one detail here chosen rather than given — it is a display rule
-  and cheap to change if the intended shape differs.
+  value and two shapes for one value would read as two different buyers. The email shape
+  (keep 5) remains the one detail chosen rather than given; the phone shape is no longer
+  discretionary — the 2026-08-19 clarification fixed it as `+628123456****`, the first of
+  the two mock shapes.
 - **Fee line names are printed exactly as frozen onto the order.** The designs label fees
   variously ("Tax", "Platform Fee", "PPN (11%)", "Application Fee (Admin Fee)"); the order's
   own frozen names are authoritative, because inventing display names would make the

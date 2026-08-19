@@ -545,3 +545,373 @@ needs **no change**.
 - **`favicon.ico` is still the Next.js scaffold icon** and the title is still
   "Event Ticketing". Neither is a logo call, and the lockup would need a glyph-only crop to
   work at 32×32.
+
+---
+
+# Revision 4 — Validating the Subject Line and the Mask Direction (2026-08-19)
+
+Research: [research.md](./research.md) R-026, R-027. Plan: [plan.md](./plan.md) §Revision 4.
+
+Two string-shaped behaviours. The whole risk in this revision is writing an assertion that
+cannot fail, so Step 0 is not optional.
+
+## Step 0 — See both assertions red BEFORE touching `mask.go` or `service.go`
+
+The phone mask is a genuine bugfix in a covered flow, so Principle VIII requires the scenario
+to be confirmed red against the unfixed code. Add the two `e2e/` assertions first, run them,
+and read the failure.
+
+```bash
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit
+docker compose run --rm migrate up
+cd e2e && npx playwright test specs/guest-purchase.spec.ts -g "delivery"
+```
+
+Expected failures, and what each proves:
+
+| Assertion | Fails with | Proves |
+|---|---|---|
+| `` expect(mail.Subject).toBe(`[${orderNumber}] E-receipt & E-Ticket for ${eventName}`) `` | received `"Your tickets for JIVE 2026"` | The subject was never asserted before; FR-005a genuinely changes what ships. |
+| `expect(mail.HTML).toContain("08123456****")` | not found | The mask direction is wrong in the shipped body, not merely in the spec. |
+| `expect(mail.HTML).not.toContain("08123***7890")` | found | Names the *old* shape explicitly, so the failure output shows both shapes side by side. |
+
+`08123456****` is the default holder phone `081234567890`
+([e2e/support/journey.ts:27](../../e2e/support/journey.ts#L27)) under the new rule.
+
+> **Write the literal, not `MaskPhone(...)` and not a regex.** R-027: two existing Go tests
+> already call the helper as their own oracle and therefore pass for any shape it returns.
+> An e2e assertion built the same way would be green before and after the fix — a test never
+> seen red, which is the one outcome Principle VIII names by hand.
+
+## Step 1 — Go tier
+
+```bash
+cd backend && ./scripts/test.sh ./internal/notification/...
+```
+
+What must hold afterwards:
+
+| Check | Where | Expect |
+|---|---|---|
+| Mask shapes | `mask_test.go` `TestMaskPhone` | `+6281234567890 → +628123456****`; `081234567890 → 08123456****`; `081234567 → 08123****` (unchanged by coincidence); `0812 → ****`; `0 → *`; `"" → ""` |
+| Never lengthens | `mask_test.go` `TestMaskingNeverLengthensAValue` | Still green, untouched — output length equals input length |
+| Subject, full literal | `service_test.go:193` | Tightened from `Contains(…, "Jazz Night 2026")` to the whole subject including the bracketed order number |
+| Receipt carries the same shape | `receipt_pdf_test.go:113` | Still green **without editing it** — it calls `MaskPhone`, so it tracks the helper by construction (SC-008) |
+
+If `receipt_pdf_test.go` needed an edit, the two surfaces had stopped sharing one helper —
+that is a finding, not a test to fix.
+
+## Step 2 — Look at the real message
+
+```bash
+ID=$(curl -s http://localhost:8025/api/v1/messages | jq -r '.messages[0].ID')
+curl -s "http://localhost:8025/api/v1/message/$ID" | jq -r '.Subject'
+curl -s "http://localhost:8025/api/v1/message/$ID" | jq -r '.HTML' | grep -o '[0-9+][0-9*]*\*\*\*\*'
+```
+
+Expected: `[ORD-…] E-receipt & E-Ticket for JIVE 2026`, and a phone whose only asterisks are
+its last four characters.
+
+Then open the **receipt attachment** and confirm the Order Details phone reads identically —
+character for character, including any `+` or spacing the buyer typed (FR-032, SC-023). This
+is a human check; the automated half lives at the Go tier because the shipped PDF is
+compressed (R-025).
+
+## Step 3 — Full gates
+
+```bash
+cd backend && ./scripts/test.sh ./...
+cd e2e && npm test
+E2E_CACHE_ENABLED=false npm test
+```
+
+The frontend tier is untouched by this revision (nothing reaches the frontend), but run it if
+anything else in the branch did.
+
+## Definition of done — Revision 4
+
+- [ ] Both e2e assertions confirmed **red** against unfixed code before the fix (Step 0)
+- [ ] Subject is `[<order number>] E-receipt & E-Ticket for <event name>`, order number
+      matching both attachment filenames (FR-005a, SC-022)
+- [ ] Event name read from the order — verified by delivering an order for a second event and
+      seeing that event's name, not "JIVE 2026"
+- [ ] Phone masks only its trailing 4 characters, rendered as stored, no `+62`
+      normalisation (FR-033, SC-023)
+- [ ] Email body and receipt show the identical string (FR-032, SC-008)
+- [ ] `mask_test.go` table rewritten; `TestMaskingNeverLengthensAValue` still green untouched
+- [ ] `service_test.go:193` tightened to the full subject literal
+- [ ] Unreachable short-phone branch deleted from `mask.go`, not left dead
+- [ ] `contracts/notification.md` subject updated (done in this planning pass)
+- [ ] All tiers green, e2e green in both cache modes
+
+---
+
+# Revision 5 — Validating the E-Ticket Colours (2026-08-19)
+
+Research: [research.md](./research.md) R-028, R-029, R-030. Plan: [plan.md](./plan.md)
+§Revision 5.
+
+Everything here is asserted at the **Go tier**. R-025 established that the shipped PDF is
+compressed and Playwright cannot read what a page says; a drawn *colour* is further out of
+reach still.
+
+## Step 0 — See the footer defect before fixing it
+
+The inverted emphasis is a real defect, so Principle VIII owes a red-first confirmation.
+
+```bash
+cd backend && ./scripts/test.sh ./internal/notification/... -run TestETicket
+```
+
+Write the assertion first — the support address is drawn brighter than its `CUSTOMER SERVICE`
+label — and confirm it fails. Today the label is `#eceef3` and the value `#969cac`, so the
+comparison is unambiguous in the failure output.
+
+> **Assert the drawn colour, not the constant.** A test that compares `pdfBandDim` to itself
+> passes for any value. This is the same blind spot R-027 found in the mask tests, and the
+> reason work item #6 adds a colour seam to `export_test.go`.
+
+## Step 1 — Go tier
+
+```bash
+cd backend && ./scripts/test.sh ./internal/notification/...
+```
+
+| Check | Expect |
+|---|---|
+| Event name | `#475569`; **no** `#cb1c4f` anywhere on the page outside the logo image (SC-024) |
+| Footer labels | `#d0d1d4` — dimmer than the values beneath them |
+| Footer values + envelope | pure white, for any configured address (FR-022f) |
+| Wordmark fallback | still `pdfBandFg`; `eticket_test.go:150` passes untouched |
+| Receipt | unchanged — `pdfBandFg` survives and nothing else crosses documents |
+
+## Step 2 — Look at it
+
+```bash
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit
+docker compose run --rm migrate up
+# settle an order, then open the e-ticket attachment
+```
+
+Two things by eye, then **print it in greyscale** — that is where the old footer failed
+worst, and where the fix should be most obvious:
+
+- the event name reads as a label above the ticket type, not as a warning;
+- the support address is the brightest thing in the band, not the dimmest.
+
+## Definition of done — Revision 5
+
+- [ ] Footer assertion confirmed **red** before the fix (Step 0)
+- [ ] Event name `#475569`; no crimson outside the logo (FR-019b, SC-024)
+- [ ] Footer labels dimmer than values; envelope white (FR-022f)
+- [ ] `pdfBrand` and `pdfBandDim` **deleted**, not left dead
+- [ ] `pdfBandFg` retained — it still serves the wordmark fallback and the receipt
+- [ ] Greyscale print checked
+- [ ] Go tier green; `e2e/` green in both cache modes (no behavioural change expected)
+
+---
+
+# Revision 6 — Validating the Inter Swap and Type Scale (2026-08-19)
+
+Research: [research.md](./research.md) R-031 … R-035. Plan: [plan.md](./plan.md) §Revision 6.
+
+The largest revision since the first, and the one where a green suite proves the least. Read
+R-035 before starting: the receipt's table seams catch drift, but the e-ticket's absolute
+offsets are literals with nothing below them to notice a collision.
+
+## Step 0 — Ship the right font files
+
+```bash
+ls backend/internal/notification/assets/fonts/
+# Inter-Regular.ttf  Inter-Medium.ttf  Inter-SemiBold.ttf  Inter-Bold.ttf  Inter-Italic.ttf
+```
+
+> **`InterVariable.ttf` must not be among them.** gofpdf parses the classic TrueType tables
+> and ignores `fvar`/`gvar`, so every weight renders as the default instance — Bold and
+> SemiBold come out identical and **nothing errors**. It looks like a styling bug, so it is
+> checked here rather than debugged later (R-031).
+
+Confirm the weights are actually distinct once registered: render a page and compare a Bold
+heading against a SemiBold label. If they look the same, this is why.
+
+## Step 1 — Baseline before touching anything
+
+```bash
+cd backend && ./scripts/test.sh ./... && (cd ../e2e && npm test)
+```
+
+Both tiers green **first**. Every failure after this point is attributable to the font, which
+is the whole reason Revision 5 shipped separately.
+
+Keep a rendered before-PDF of a 2+ ticket order and the receipt. Step 3 needs them.
+
+## Step 2 — Go tier, after the swap
+
+```bash
+cd backend && ./scripts/test.sh ./internal/notification/...
+```
+
+| Check | Where | Expect |
+|---|---|---|
+| Diacritic survives | `eticket_test.go` | A holder name with a diacritic renders as stored, not transliterated (SC-025) |
+| Receipt table geometry | `receipt_pdf_test.go` | **Will fail** — re-derive from `TableInsets` / `HeaderColumnRights`, never re-hardcode (SC-016, SC-017) |
+| Footer alignment, short and long address | `eticket_test.go` | **Should NOT fail** — `customerServiceBlock` computes width from `GetStringWidth` and self-adjusts. If it does, the width math stopped being metric-driven: report it, do not adjust the expectation |
+| Band geometry | `eticket_test.go` | Re-derive through the T132 seam |
+| `latin1` | anywhere | Gone, with all 22 call sites |
+
+## Step 3 — The visual diff, which is not optional
+
+No tier in this repo asserts "looks like the design", and R-035 shows the e-ticket's absolute
+layout has assertion gaps exactly where grown type lands.
+
+```bash
+# render before/after and compare page by page against Figma 683:148
+```
+
+| Element | Design |
+|---|---|
+| `Ticket N of M` | 18 Bold |
+| Identity label | 11 SemiBold |
+| Identity value | 16 Bold |
+| Event name | 14 Bold |
+| Ticket-type heading | 22 Bold |
+| `VALID FOR` | 11 SemiBold |
+| Valid-for value | 14 Bold |
+| Footer label / value | 10 SemiBold / 12 Medium |
+
+Look specifically for **collisions**, not just sizes: the heading grew 16→18 and the identity
+values 12→16, and the accent rule and QR panel sit at fixed offsets below them.
+
+Check the **palette** in the same pass (FR-019c): field labels and `VALID FOR` at `#64748b`,
+field values and the ticket-type heading at `#0f172a`, `Ticket N of M` at `#1e293b`, the
+divider at `#e2e8f0`. Side by side against the old render the document should read cooler
+overall, not just differently sized.
+
+**Letter-spacing will not match and that is accepted** (R-034) — gofpdf has no `Tc` operator.
+Do not chase it.
+
+## Step 4 — Full gates
+
+```bash
+cd backend && ./scripts/test.sh ./...
+cd e2e && npm test
+E2E_CACHE_ENABLED=false npm test
+```
+
+`e2e/` gains no new assertion here, but a **changed page count is a stop signal**: it means
+type growth spilled one ticket across two pages, which `SetAutoPageBreak(false)` exists to
+prevent.
+
+## Definition of done — Revision 6
+
+- [ ] Five **static** Inter faces embedded; no variable font; version and OFL licence recorded
+- [ ] Bold and SemiBold render visibly distinct (the variable-font trap did not bite)
+- [ ] Every `SetFont("Helvetica", …)` replaced, including the one taking `style` as a variable
+- [ ] `latin1()` and all 22 call sites deleted; diacritic test green (SC-025)
+- [ ] E-ticket type sizes match R-030's table (FR-003b)
+- [ ] E-ticket palette on the design's slate values; `pdfInk`/`pdfGray`/`pdfLine` checked for surviving **receipt** consumers before any deletion (FR-019c)
+- [ ] Page margins unchanged at 17mm (FR-003b excludes them)
+- [ ] Receipt geometry assertions **re-derived from the seams**, not re-hardcoded
+- [ ] Visual diff done against Figma `683:148`; no collisions
+- [ ] Page count unchanged for a multi-ticket order
+- [ ] Letter-spacing recorded as a known limit in tasks.md
+- [ ] All tiers green; `e2e/` green in both cache modes
+
+## Still open
+
+- **The receipt's type scale has never been examined** against its own design. FR-003b covers
+  the e-ticket only, and its absence here is not a finding that the receipt agrees.
+
+---
+
+# Revision 7 — Validating the Email Mask Direction (2026-08-19)
+
+Research: [research.md](./research.md) R-036 … R-039. Plan: [plan.md](./plan.md) §Revision 7.
+
+One function and one fixture. The whole risk is an assertion that cannot fail — for the second
+time in this feature.
+
+## Step 0 — Change the fixture FIRST, or Step 1 proves nothing
+
+`defaultHolder.email` is `budi@example.com`. Its 4-character local part renders `b***` under
+**both** the old and the new rule, so any assertion written against it is green before and
+after the fix (R-037).
+
+```bash
+# e2e/support/journey.ts — local part must exceed four characters
+grep -n 'email:' e2e/support/journey.ts
+```
+
+All three references to the constant are by identity, not by literal, so nothing else moves:
+
+```bash
+grep -rn 'defaultHolder.email' e2e/specs/
+```
+
+> **Four of the seven mask cases coincide between the two rules.** Any fixture with a local
+> part of four characters or fewer is blind to this change. Hold that in mind for every
+> assertion in this revision.
+
+## Step 1 — See it red
+
+```bash
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit
+docker compose run --rm migrate up
+cd e2e && npx playwright test specs/guest-purchase.spec.ts -g "browses, books"
+```
+
+Add the assertion as a **literal** — never `MaskEmail(...)`, never a regex over asterisks — and
+confirm it fails, with the received body showing the old front-masked shape.
+
+Then the Go tier:
+
+```bash
+cd backend && ./scripts/test.sh ./internal/notification/... -run TestMaskEmail
+```
+
+Expect 4 of 7 cases red. The 3 that pass are the short local parts and the empty value, whose output coincides.
+
+## Step 2 — Go tier after the change
+
+| Check | Where | Expect |
+|---|---|---|
+| Ordinary address | `mask_test.go` | `dimasprasetyo@gmail.com` → `dimasprase***@gmail.com` |
+| Five-character local | `mask_test.go` | `dimas@gmail.com` → `di***@gmail.com` — **the disclosure the old rule had**; under keep-first-5 this returned unchanged |
+| Two characters | `mask_test.go` | `ab@x.com` → `a*@x.com` |
+| One character | `mask_test.go` | `a@x.com` → `*@x.com` |
+| No `@` | `mask_test.go` | `notanemail` → `notanem***`, accepted knowingly in clarification |
+| Never lengthens | `mask_test.go` | Still green, untouched |
+| Receipt agreement | `receipt_pdf_test.go:112` | Still green **without editing it** — it calls `MaskEmail`, so it tracks the helper (SC-008) |
+| `maskFrom` | anywhere | **Gone.** `grep -rn maskFrom backend/` returns nothing |
+
+## Step 3 — Look at the real message
+
+```bash
+ID=$(curl -s http://localhost:8025/api/v1/messages | jq -r '.messages[0].ID')
+curl -s "http://localhost:8025/api/v1/message/$ID" | jq -r '.HTML' | grep -o '[A-Za-z0-9._%-]*\*\{1,3\}@[^<]*'
+```
+
+Expected: exactly three asterisks, immediately before the `@`, with the domain intact. Then
+open the **receipt attachment** and confirm its Buyer Information email is character-for-
+character identical (FR-032, SC-008, SC-026).
+
+## Step 4 — Full gates
+
+```bash
+cd backend && ./scripts/test.sh ./...
+cd e2e && npm test
+E2E_CACHE_ENABLED=false npm test
+```
+
+## Definition of done — Revision 7
+
+- [ ] Fixture lengthened **before** the assertion was written (Step 0)
+- [ ] e2e assertion confirmed **red** against unfixed code, as a literal
+- [ ] `TestMaskEmail` red on 4 of 7, then green
+- [ ] Email masks only the last 3 characters of the local part; domain intact (FR-033, SC-026)
+- [ ] A 5-character local part is no longer printed whole
+- [ ] `maskFrom` and `emailKeep` deleted, not left unused
+- [ ] `MaskEmail` and `MaskPhone` still two functions (R-038)
+- [ ] `receipt_pdf_test.go:112` and `service_test.go:510` green untouched
+- [ ] Body and receipt show the identical string
+- [ ] All tiers green; e2e green in both cache modes

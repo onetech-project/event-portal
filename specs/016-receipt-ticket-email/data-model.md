@@ -189,8 +189,8 @@ loops over it. Carrying two files needs no change to the mail layer at all.
 
 | Value | Rule | Requirement |
 |---|---|---|
-| Masked email | keep first 5 of local part + whole domain; `<5` → mask from char 2 | FR-033 |
-| Masked phone | keep leading 5 + trailing 4; too short → mask from char 2 | FR-033 |
+| Masked email | keep whole domain + all of the local part except its last 3; asterisks = `min(3, len-1)`; single character masked entirely | FR-033 (**Revision 7** — was keep first 5 of local part) |
+| Masked phone | keep every character except the last 4; `≤4` → masked entirely | FR-033 (**Revision 4** — was keep leading 5 + trailing 4) |
 | `Ticket N of M` | N = 1-based page index, M = `len(tickets)` | FR-016 |
 | Admission window text | existing `FormatTicketWindow` | FR-020 |
 | Money | existing `formatIDR` — `Rp 550.000`, no cents | FR-037 |
@@ -278,6 +278,15 @@ a wrong display zone would silently misstate a financial document.
 | Receipt sub-line date | `27 Apr 2026`, converted to Jakarta | **Yes** — this is the day-boundary fix |
 | Band colour | `#151A26` | **Yes** (was `#141B2D`) — must equal the logo's opaque background |
 | Masking, page count, filenames, QR | unchanged | No |
+| Masked phone (**Revision 4**) | `+628123456****` — trailing 4 only, value rendered as stored | **Yes** (was `+6281****6789`) |
+| Email subject (**Revision 4**) | `[<order number>] E-receipt & E-Ticket for <event name>` | **Yes** (was `Your tickets for <event name>`) |
+| E-ticket event name (**Revision 5**) | `#475569` slate | **Yes** (was `#cb1c4f` crimson; `pdfBrand` deleted) |
+| E-ticket footer emphasis (**Revision 5**) | labels `#d0d1d4`, values and envelope `#ffffff` | **Yes** — the two roles were inverted; `pdfBandDim` deleted |
+| Document typeface (**Revision 6**) | Inter, embedded and subsetted, five static faces | **Yes** (was built-in Helvetica) |
+| Non-ASCII holder names (**Revision 6**) | rendered as stored | **Yes** — `latin1()` transliteration deleted (22 call sites) |
+| E-ticket type sizes (**Revision 6**) | the design's, read wholesale from Figma `683:148` | **Yes** — ratios ran 0.68–0.91, i.e. drift, not a scale factor |
+| Masked email (**Revision 7**) | `dimasprase***@gmail.com` — last 3 of the local part only | **Yes** (was `dimas********@gmail.com`) |
+| Page margins | 17mm | **No** — explicitly excluded by FR-003b |
 
 ## Invariant added
 

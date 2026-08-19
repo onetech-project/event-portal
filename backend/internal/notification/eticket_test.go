@@ -305,3 +305,44 @@ func TestRenderTicketsPDFDoesNotLeakRoundLineCapsAcrossPages(t *testing.T) {
 	assert.Greater(t, lastSquare, lastRound,
 		"the last join state written must be miter — drawEnvelope's reset is missing or was moved")
 }
+
+// --- Spec 016 Revision 5: e-ticket colours ---------------------------------
+
+// FR-019b / SC-024. The event name is a label above the ticket type, not an
+// alert. It rendered in the brand crimson until 2026-08-19.
+//
+// The assertion is on the RENDERED page, not on the constant: it builds the
+// operator from a literal and looks for it in the document's own bytes, so it
+// cannot pass by comparing a value against itself.
+func TestRenderTicketsPDFDrawsNoBrandCrimson(t *testing.T) {
+	doc, err := notification.RenderTicketsPDFPlain(sampleOrder(), sampleTickets(2), sampleBrand())
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(doc), notification.ColorOperator(notification.RetiredCrimson),
+		"the e-ticket must carry no brand crimson outside the logo image (FR-019b)")
+	assert.Contains(t, string(doc), notification.ColorOperator(notification.PdfEventName),
+		"the event name must be drawn in the design's slate")
+}
+
+// FR-022f / SC-024. The footer's labels must recede behind the values they head.
+//
+// The code drew them the other way round until 2026-08-19, which left the
+// support address — the only value on the document a buyer acts on — as the
+// dimmest text in the band, and worst in greyscale print.
+func TestRenderTicketsPDFFooterLabelsRecedeBehindTheirValues(t *testing.T) {
+	doc, err := notification.RenderTicketsPDFPlain(sampleOrder(), sampleTickets(1), sampleBrand())
+	require.NoError(t, err)
+
+	assert.Contains(t, string(doc), notification.ColorOperator(notification.PdfWhite),
+		"the site URL and support address are drawn in pure white")
+	assert.Contains(t, string(doc), notification.ColorOperator(notification.PdfBandLabel),
+		"the JIVE and CUSTOMER SERVICE labels are drawn dimmed")
+
+	// The ordering, not just the two values: a future palette edit that made the
+	// label brighter again would satisfy the two assertions above only until the
+	// constants moved, and this catches that directly.
+	assert.Less(t,
+		notification.RelativeLuminance(notification.PdfBandLabel),
+		notification.RelativeLuminance(notification.PdfWhite),
+		"a label must never be brighter than the value beneath it (FR-022f)")
+}
