@@ -234,8 +234,8 @@ func Load() (*Config, error) {
 		SMTPFromName: l.str("SMTP_FROM_NAME", "Event Ticketing"),
 
 		BrandSiteName:     l.str("BRAND_SITE_NAME", "JIVE"),
-		BrandSiteURL:      l.str("BRAND_SITE_URL", "https://www.jive.co.id"),
-		BrandSupportEmail: l.str("BRAND_SUPPORT_EMAIL", "help@manjo.com"),
+		BrandSiteURL:      l.str("BRAND_SITE_URL", "https://www.jive-promotion.com/"),
+		BrandSupportEmail: l.str("BRAND_SUPPORT_EMAIL", "help@manjo.co.id"),
 		BrandLegalEntity:  l.str("BRAND_LEGAL_ENTITY", "PT Manjo Teknologi Indonesia"),
 		BrandAttribution:  l.str("BRAND_ATTRIBUTION", "Powered By Manjo"),
 		BrandCopyright:    l.str("BRAND_COPYRIGHT", "© 2026 manjo"),

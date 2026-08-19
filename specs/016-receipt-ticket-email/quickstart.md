@@ -340,3 +340,208 @@ cd e2e && E2E_CACHE_ENABLED=false npm test
 exported — every route yields a blank image. Until the decision in
 [plan.md](./plan.md) is taken, the venue block ships without an icon and FR-025 is not met.
 Everything else in this revision proceeds independently.
+
+---
+
+# Revision 3 — Validating the Brand Refresh (2026-08-19)
+
+Research: [research.md](./research.md) R-018 … R-024. Plan:
+[plan.md](./plan.md) §Revision 3.
+
+## Step 0 — Reproduce the "four attachments" finding, and see why it is not one
+
+Do this **before** changing anything. It is the step that stops a day being spent fixing a
+non-defect, and it is the reason this revision writes no regression scenario.
+
+```bash
+REDIS_PORT=6380 docker compose up -d postgres redis mailpit
+docker compose run --rm migrate up
+
+# after settling one order through the real flow, read what Mailpit actually holds
+ID=$(curl -s http://localhost:8025/api/v1/messages | jq -r '.messages[0].ID')
+curl -s "http://localhost:8025/api/v1/message/$ID" \
+  | jq '{attachments: [.Attachments[].FileName], inline: [.Inline[].ContentID]}'
+```
+
+Expected — and what it means:
+
+```json
+{
+  "attachments": ["receipt-ORD-….pdf", "tickets-ORD-….pdf"],
+  "inline":      ["jive-logo.png", "location-pin.png"]
+}
+```
+
+(These are the pre-change names — Step 1 renames the logo.) The API separates them; so do Mailpit's own UI badges (`Attachments (2)` /
+`Inline images (2)`). The four-file strip beneath those badges is `allAttachments()`, which
+concatenates every part because Mailpit is a MIME debugger. **Open the same message in a
+real client to confirm** — Gmail and Yopmail list two.
+
+> Because nothing is broken here, **do not write a regression scenario for the attachment
+> count.** A test that cannot fail against the unfixed code proves nothing, which is exactly
+> what Principle VIII is guarding against.
+
+## Step 1 — Generate the shipped derivatives
+
+The supplied files are the source of truth and are **not** what ships: 6400×4290, ~276 KB,
+and carrying ~14% transparent padding that would otherwise be baked into every surface
+differently (R-020).
+
+```bash
+cd frontend/public/brand
+for v in WHITE BLACK; do
+  out=$(echo "$v" | tr 'A-Z' 'a-z')
+  magick "LOGO JIVE MINUS TWO_${v}.png" \
+    -trim +repage -resize 800x -strip -colors 64 \
+    -define png:compression-level=9 "jive-logo-${out}.png"
+done
+identify -format "%f  %wx%h  %b\n" jive-logo-*.png
+```
+
+Expected: `800x455`, roughly 15 KB each — against 349 KB for the asset being retired.
+Confirm the trimmed ratio is **1.757**, not the file's 1.492; if you see 1.492 the trim did
+not happen and every placement will inherit dead space.
+
+Copy the white derivative to `backend/internal/notification/assets/brand/` and point
+`//go:embed` at it. Then delete both copies of the retired mark — SC-019 fails if either
+survives:
+
+```bash
+rg -n 'jive-logo\.png' --glob '!node_modules' --glob '!*.md'   # must return nothing
+```
+
+## Step 2 — Confirm the legibility target with your own eyes
+
+FR-023b is the one requirement here that a passing test cannot fully vouch for. Render the
+mark at the old and new sizes on the real band colour and compare:
+
+```bash
+magick jive-logo-white.png -resize 108x -background '#151a26' -gravity center -extent 300x100 /tmp/at108.png
+magick jive-logo-white.png -resize 280x -background '#151a26' -gravity center -extent 320x180 /tmp/at280.png
+```
+
+`SPONSORED BY` and `MINUS TWO` should be mushy at 108 px and clean at 280 px. If they are
+clean at both, the trim in Step 1 produced a different crop than expected — re-check it
+rather than lowering the target.
+
+## Step 3 — Go tier
+
+```bash
+cd backend && ./scripts/test.sh ./...
+```
+
+Expected failures on first run, each with a specific correct response — see plan.md
+§"Tests that will break". In short:
+
+- `smtp_test.go:155` and `service_test.go:386` — filename changed. Update the **name only**.
+  The inline-vs-attachment assertions at `smtp_test.go:119`–`:131` are what keep R-018's
+  finding true and must not be weakened to make anything pass.
+- `pkg/config/config_test.go:275` — the two brand defaults changed (FR-035a).
+- `pdf_test.go` / `receipt_pdf_test.go` — any y-coordinate below the band moved by
+  +17.3 mm. Re-derive these from `bandHeight` rather than re-hardcoding, or the next band
+  change breaks them the same way.
+- `eticket_test.go:150` — should **not** break. It exercises the missing-asset wordmark
+  fallback, which still exists.
+
+## Step 4 — Look at both PDFs
+
+Content assertions do not catch a rule drawn through a band or an icon floating off its
+line. Render and open:
+
+```bash
+cd backend && go test ./internal/notification/ -run 'TestRenderTicketsPDF|TestRenderReceiptPDF' -v
+```
+
+Check by eye:
+
+- the mark sits inside the taller band with even inset, and **no dark rectangle hangs past
+  it** — the new asset has alpha, so a seam here means the old opaque-background fitting
+  strategy is still in force (R-020);
+- the accent rule and QR panel moved **with** the band, not independently (R-022);
+- in the footer, `CUSTOMER SERVICE`, the envelope and the address share one left edge, and
+  the block sits against the right margin (FR-022a);
+- the envelope is on the address's line, not above it (FR-022d, and the same defect FR-015b
+  already caught once on the receipt);
+- **on page 2 of a multi-ticket order**, the rules have square ends. Round ends there mean
+  `drawEnvelope`'s sticky cap/join reset was lost — a defect that renders perfectly on a
+  one-ticket order (R-023).
+
+Then vary the input, because FR-022e is about behaviour and not the mock:
+
+```bash
+BRAND_SUPPORT_EMAIL=a@b.co   # short
+BRAND_SUPPORT_EMAIL=customer-service.team@jive-promotion.example.com   # long
+```
+
+The left edge must hold in both.
+
+## Step 5 — The email, in a real client
+
+```bash
+cd backend && go test ./internal/notification/ -run TestBuildEmailBody
+# then settle a real order and open http://localhost:8025
+```
+
+- the header mark renders at 280 px and is **not** listed as an attachment;
+- `width`/`height` are present as HTML **attributes**, not only CSS — without them Outlook's
+  Word engine draws the 2× part at double size;
+- forward the message to a real Outlook/Windows account if one is available. This is the
+  client the attribute rule exists for, and Mailpit cannot stand in for it.
+
+## Step 6 — Frontend tier (new for this feature)
+
+Revision 1 said "no frontend change"; that no longer holds (R-024). Note the toolchain
+quirk — `npx` and bare `node` both fail in this repo:
+
+```bash
+cd frontend
+export PATH="$HOME/.nvm/versions/node/v26.5.1/bin:$PATH"
+./node_modules/.bin/vitest run
+./node_modules/.bin/next build      # the typecheck of record
+```
+
+Then load the site and confirm the header bar grew without pushing content below the fold
+awkwardly, and that the mark is crisp on a HiDPI display.
+
+## Step 7 — Full gates
+
+```bash
+cd backend && ./scripts/test.sh ./...
+cd e2e && npm test
+cd e2e && E2E_CACHE_ENABLED=false npm test    # Principle VII kill switch
+```
+
+The e2e addition is in the **email body only** — the mark's dimensions and the `cid:`
+pairing — because the body is readable HTML on the wire. The e-ticket footer is **not**
+assertable here: production PDFs are compressed, so their text never appears in the
+downloaded bytes, and the footer's coverage lands at the Go tier through
+`RenderTicketsPDFPlain` (R-025). The existing `expect(mail.Attachments).toHaveLength(2)`
+needs **no change**.
+
+## Definition of done — Revision 3
+
+- [ ] Derivatives trimmed to 1.757, quantised, ~15 KB; both copies of the retired mark gone
+      and `rg jive-logo.png` clean (SC-019)
+- [ ] Secondary line legible on all three surfaces at 100% zoom, print included (SC-020)
+- [ ] E-ticket footer: one left edge for label/icon/address, block against the right margin,
+      holding for a short and a long address (SC-021, FR-022a, FR-022e) — asserted at the
+      **Go tier** via `RenderTicketsPDFPlain`, not in `e2e/`
+- [ ] `bandHeight` change carried through every constant below it; page 2 rules square
+- [ ] `BRAND_SITE_URL` and `BRAND_SUPPORT_EMAIL` at the design's values, receipt footer
+      updated with them (FR-035a)
+- [ ] Email mark at 280 px with attributes and CSS in agreement; still 2 attachments in a
+      real client
+- [ ] All three tiers green, e2e green in both cache modes
+- [ ] `smtp_test.go` inline-vs-attachment assertions intact and unweakened
+
+## Still open
+
+- **The site header's size needs a nod** (plan.md §"The one thing that needs a nod"). 200 px
+  in a ~130 px bar is a judgment call, not something the clarification settled; a literal
+  reading gives 254 px in a ~190 px bar.
+- **The receipt still carries no brand mark**, contradicting FR-023a and FR-035's "all three
+  surfaces". Recorded in spec.md §Governance notes; deliberately not widened into this
+  change.
+- **`favicon.ico` is still the Next.js scaffold icon** and the title is still
+  "Event Ticketing". Neither is a logo call, and the lockup would need a glyph-only crop to
+  work at 32×32.

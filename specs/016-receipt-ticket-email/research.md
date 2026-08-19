@@ -553,3 +553,305 @@ rather than writing a dead fallback branch.
 **Deliberate asymmetry, worth recording so neither is later "harmonised" into the other**:
 the email pin must be a raster PNG because email clients cannot be trusted with vectors;
 the PDF envelope must not be, because a PDF draws vectors natively.
+
+---
+
+# Phase 0 (Revision 3): Brand Refresh Research — 2026-08-19
+
+Opened by a report that the email arrives carrying **four** attachments, and by a new brand
+asset supplied in two variants plus a footer change on the e-ticket
+(Figma `683-148`). Clarification answers are in [spec.md](./spec.md) §Clarifications,
+Session 2026-08-19.
+
+Everything in Revisions 1 and 2 still holds unless contradicted below. As before, every
+finding here was verified against a running service, the real assets, or library source —
+none is asserted from memory.
+
+## R-018 — The four attachments: the instrument was wrong, not the message
+
+**Decision**: change nothing. FR-001, FR-023a, FR-025 and SC-001 are confirmed, not amended.
+
+**Verified here** against the Mailpit instance holding a real delivered message:
+
+```
+GET /api/v1/messages          -> "Attachments": 2
+GET /api/v1/message/{id}
+  Attachments: receipt-ORD-….pdf (application/pdf, PartID 2)
+               tickets-ORD-….pdf (application/pdf, PartID 3)
+  Inline:      jive-logo.png    (image/png, ContentID jive-logo.png, PartID 1.2)
+               location-pin.png (image/png, ContentID location-pin.png, PartID 1.3)
+```
+
+Mailpit's **API** classifies correctly and its own UI badges read `Attachments (2)` /
+`Inline images (2)`. What produced the report is the file strip *below* those badges. From
+the shipped UI bundle (`/dist/app.js`):
+
+```js
+for (let o in t.Attachments) t.Attachments[o].ContentDisposition="Attachment", e.push(…)
+for (let o in t.OtherParts)  t.OtherParts[o].ContentDisposition="Other",      e.push(…)
+for (let o in t.Inline)      t.Inline[o].ContentDisposition="Inline",         e.push(…)
+```
+
+`allAttachments()` deliberately concatenates all three, because Mailpit is a MIME debugger
+and exists to expose every part for download. That strip is a developer surface; no mail
+client has an equivalent. Gmail and Yopmail were checked by hand and list two.
+
+**Consequence for the plan**: there is **no bugfix here**, so Principle VIII owes no
+red-first regression scenario for the attachment count. The existing `toHaveLength(2)`
+assertion already reads the document-only array and stays correct. Revision 2's governance
+follow-up is closed: `PRD.md` §1.4 and the constitution bullet were re-read and already say
+"document attachments".
+
+**Alternatives considered**: dropping the inline parts, or serving the logo from
+`FRONTEND_URL` as a remote `<img>`. Both were put to the user and both were declined once
+the measurement showed nothing was broken. Recorded because each would have traded a real
+requirement (FR-023a's "the real logo image") for a defect that did not exist.
+
+## R-019 — SVG is not available in the email body
+
+**Decision**: FR-025 is narrowed to "an inline image part", removing its inline-SVG
+allowance. The pin stays a raster PNG and the logo stays a raster CID part.
+
+The question was raised directly by the requester. The answer is a support matrix, not a
+preference:
+
+| Client family | `<svg>` inline | `<img src="data:image/svg+xml">` |
+|---|---|---|
+| Gmail (web, iOS, Android) | Stripped | Stripped — `data:` URIs are removed from `img` sources |
+| Outlook 2007–2021 / Microsoft 365 (Windows) | Not rendered — Word engine | Not rendered |
+| Apple Mail, iOS Mail, Thunderbird | Renders | Renders |
+
+FR-023a already records Gmail's `data:` URI stripping, so the second column was settled
+before this revision; the first is what makes the allowance unsafe. An implementer
+following FR-025 as originally written could have shipped an icon invisible to the two
+largest client families and seen it render perfectly on their own Mac.
+
+**This does not change any code** — the shipped pin is already a PNG (R-013 option A). It
+removes a trap from the spec.
+
+## R-020 — The new asset: padding, alpha, and the band-colour hack it retires
+
+**Decision**: ship one trimmed, colour-quantised derivative per variant, generated from the
+supplied originals. The originals are the source of truth and are not what ships.
+
+**Verified here** with ImageMagick against both supplied files:
+
+| Property | `…_WHITE.png` / `…_BLACK.png` | Retired `jive-logo.png` |
+|---|---|---|
+| File dimensions | 6400×4290 (**1.4918:1**) | 216×122 (1.7705:1) |
+| Content bbox | `5532x3149+434+570` | `211x80+1+13` |
+| **Artwork ratio, trimmed** | **1.7568:1** | 1.7705:1 |
+| Alpha | `Blend`, mean 0.184 — **real transparency** | mean 1.0 — **fully opaque** |
+| Size | ~276 KB each | 18 KB |
+
+Two findings, both consequential:
+
+**The 1.49:1 figure describes the file, not the mark.** The padding is symmetric — 434 px
+each side horizontally, ~570 px vertically — so the artwork inside is 1.757:1, within 0.8%
+of the mark it replaces. **No layout is forced to change by aspect ratio.** The spec's
+FR-023b originally claimed otherwise and has been corrected. Derivatives must be trimmed so
+that breathing room is decided in the layout rather than baked into the asset, where each
+surface would inherit a different amount of it.
+
+**The new asset has an alpha channel, which retires a documented hack.** R-012 established
+that the retired logo had zero transparent pixels, and two things were built on that:
+
+- `pdf.go` pins `pdfBand = #151A26` with the comment *"the design's band AND the logo's own
+  opaque background"*;
+- `drawBrandMark` fits the mark by **height** because *"the asset's background is opaque, so
+  anything taller than the band draws a dark rectangle hanging past it."*
+
+Neither constraint survives a transparent asset. The band colour becomes a free design
+choice again, and the mark can be fitted by whichever dimension the layout prefers. Both
+comments must be rewritten rather than left to mislead the next reader — they are correct
+statements about an asset that will no longer exist.
+
+**Derivative weight**, measured at candidate widths (the mark is flat-colour art, so
+64-colour quantisation is visually lossless — checked by eye against the truecolor render):
+
+| Width | Truecolor PNG | Quantised (64) |
+|---|---|---|
+| 400 px | 24.0 KB | **6.8 KB** |
+| 560 px | 34.7 KB | **9.8 KB** |
+| 800 px | 50.9 KB | **14.6 KB** |
+| 1000 px | 64.4 KB | 18.4 KB |
+
+**One 800×455 quantised derivative per variant (~15 KB) serves all three surfaces.** For
+comparison the retired frontend asset is 349 KB — a 23× reduction on every page load.
+
+## R-021 — How large the mark must be, measured rather than guessed
+
+**Decision**: ~280 px wide in the email body; ~200 px on the site header; ~55 mm on the
+e-ticket page.
+
+FR-023b requires the lockup's secondary line — `SPONSORED BY` / `-2° MINUS TWO` — to be
+legible. That line is roughly 150 px tall in a 5532 px-wide trimmed artwork, so rendered
+cap height is `150 × W / 5532`:
+
+| Placement | Displayed width | Secondary-line cap height | Verdict |
+|---|---|---|---|
+| Email, today | 108 px | ~2.9 px | Illegible |
+| Email, proposed | 280 px | ~7.6 px | Legible |
+| Site header, today | 98 px | ~2.7 px | Illegible |
+| Site header, proposed | 200 px | ~5.4 px CSS px (~10.8 device px at DPR 2) | Legible |
+| E-ticket, today | 24.6 mm | ~0.67 mm (~1.9 pt) | Illegible in print |
+| E-ticket, proposed | 55 mm | ~1.5 mm (~4.2 pt) | Legible in print |
+
+Confirmed by rendering the trimmed mark at 108 px and 280 px on the real `#151A26` band and
+looking at both: at 108 px the secondary line is present but mushy; at 280 px it is clean.
+
+**The site header is deliberately NOT scaled by the email's factor.** A literal reading of
+"proportionally scaled" would put a 280 px mark in a 97 px-tall bar, forcing it to ~190 px
+and dominating the public chrome. The web surface has a different legibility budget —
+DPR ≥ 2 on most devices, and the user can zoom — so 200 px reaches the same *perceived*
+legibility at a bar height of ~130 px. **This deviates from the strictest reading of the
+user's answer and is flagged in the plan for a nod rather than assumed.**
+
+## R-022 — Growing the e-ticket band inside an absolutely positioned page
+
+**Decision**: raise `bandHeight` from 21 mm to ~38 mm and shift every constant below it by
+the same delta. There is room.
+
+`renderTicketPage` positions everything absolutely — this is deliberate (`SetAutoPageBreak`
+is off so a tall event name cannot silently spill a ticket onto two pages). The consequence
+is that the band's height is not a layout parameter anywhere; it is baked into each
+constant below it:
+
+| Element | Current y (mm) |
+|---|---|
+| Band | `0 … bandHeight` (21) |
+| "Ticket N of M" | 29 |
+| Accent rule | 40 … 112 |
+| QR panel | 46 … 108 |
+| Footer band | 272 … 297 |
+
+At 55 mm wide the mark is 31.3 mm tall; with `logoBandInset` 3.5 mm top and bottom the band
+becomes 38.3 mm, a delta of **+17.3 mm**. Cross-checked against the design's own proportions
+that there is room: frame `683:148` ends its content at y=558/842 (≈197 mm) with the footer
+starting at 776/842 (≈274 mm), leaving ~77 mm of whitespace. A 17 mm shift consumes under a
+quarter of it.
+
+**The constants must move together or not at all.** Shifting the band without the accent
+rule puts a 72 mm rule through the band; shifting the rule without the QR separates them.
+Expressing them as offsets from `bandHeight` rather than as literals is the change that
+makes this safe, and is worth doing even though it is not strictly required.
+
+## R-023 — Reusing the envelope in a dark band
+
+**Decision**: give `drawEnvelope` explicit body and flap colours; do not fork a second
+function.
+
+`drawEnvelope` (R-017) hardcodes `pdfSlate` for the body and white for the flap, which is
+correct on the receipt's white page and wrong on the e-ticket's `#151A26` band, where a
+slate body has too little contrast. Widening the signature to take both colours is a
+two-call-site change inside one package, and keeps a single icon definition — a forked copy
+would drift the moment either is adjusted.
+
+**Two traps carried forward**, both verified in the source:
+
+- Cap and join style are **sticky Fpdf state**. R-017 already records the reset. The e-ticket
+  footer is drawn last on each page, but the tickets PDF loops pages, so an un-reset style
+  would leak into the *next* ticket's rules rather than the current one — which is exactly
+  the kind of defect that renders fine in a one-ticket test.
+- `drawEnvelope` resets cap, join and line width but leaves `SetDrawColor` white and
+  `SetFillColor` at the body colour. Harmless today because of draw order; recorded because
+  the second call site changes that order.
+
+## R-024 — The first frontend change in this feature
+
+**Decision**: swap the asset in `site-header.tsx` and grow the bar; no new component, no
+`next/image` migration.
+
+Revision 1 stated "**no frontend change**". That is no longer true — FR-023c puts the mark
+on the site header too, so this revision touches `frontend/` for the first time and the
+frontend test tier becomes relevant to the feature.
+
+**Verified**: exactly one frontend logo reference exists — `site-header.tsx:21`,
+`src="/brand/jive-logo.png"`, sized `h-13.75 w-24.5` (55×98 px) inside an `h-24.25` (97 px)
+bar. `site-footer.tsx` carries no mark, and no other component references `/brand/` for the
+logo. The element is a plain `<img>` with an eslint-disable for `@next/next/no-img-element`;
+this revision keeps it that way, because switching to `next/image` for a single static
+above-the-fold asset trades a lint suppression for a layout-shift and loader change that
+nothing here needs.
+
+**Out of scope, recorded so neither is mistaken for an oversight**: `frontend/app/favicon.ico`
+is still the unmodified Next.js scaffold icon, and the document title is still
+"Event Ticketing". Neither is a logo call, so "update every logo call" does not reach them —
+and a 1.757:1 lockup makes a poor 32×32 favicon regardless, so that would need a
+glyph-only crop the brand has not supplied.
+
+## R-021a — The enlargement was reversed once seen
+
+**Decision**: supersedes R-021. The mark is **capped by the height of its container**;
+no container grows to fit it.
+
+R-021 measured what the lockup's secondary line needs to be legible and concluded ~280px
+in the email, ~200px on the site header and 55mm on the e-ticket. The arithmetic was right
+and the conclusion was wrong, which only became visible once it was rendered:
+
+| Surface | Before | Enlarged | Cost |
+|---|---|---|---|
+| E-ticket band | 21 mm | 38.3 mm | +17.3 mm of every ticket, pushing the page down |
+| Email header band | 113 px | 211 px | The message opens on a brand panel |
+| Site header bar | 97 px | ~130 px | Chrome before content on every page |
+
+The premise R-021 never questioned is whether the sponsor credit needs to be *read* off
+these surfaces at all. It does not: a ticket is scanned at a gate and a navigation bar is
+looked past. The credit's job is presence, which it keeps at any size.
+
+Capping by height also buys an invariant the enlargement destroyed: with the mark fitted to
+a fixed container, **swapping the asset can no longer change any layout**. The width follows
+from the asset's own ratio and nothing else moves. That is now asserted rather than assumed
+— see `TestBrandMarkIsCappedByTheBandAndNeverGrowsIt`.
+
+The `bandHeight`-offset refactor from R-022 is what made the reversal a one-line change, so
+it is kept: it earned itself in both directions.
+
+## R-025 — The e-ticket footer cannot be covered in `e2e/`
+
+**Decision**: the footer's acceptance lands at the **Go tier**, through the existing
+uncompressed test seam. `e2e/` gains email-body assertions only.
+
+This corrects a claim made earlier in this same planning pass, which assumed the tickets PDF
+was text-searchable from Playwright because `eticket_test.go:150` asserts
+`Contains(string(doc), "JIVE")`. It does — but on a *different document*:
+
+```go
+// pdf.go:102
+func renderTicketsPDF(order OrderDelivery, tickets []TicketDetail, brand Branding, compress bool) {
+    pdf.SetCompression(compress)   // production passes true
+```
+
+```go
+// export_test.go — test-only seam
+func RenderTicketsPDFPlain(…) ([]byte, error) { return renderTicketsPDF(…, false) }
+```
+
+The comment above `renderTicketsPDF` states it outright: *"gofpdf compresses content
+streams, so what a page SAYS is unreadable in the shipped bytes. Production always
+compresses."* Playwright downloads the production document.
+
+| Tier | Can assert | Cannot |
+|---|---|---|
+| Go, via `RenderTicketsPDFPlain` | Footer strings, geometry, band offsets | — |
+| e2e, via `downloadAttachment` | Attachment count, filename, PDF magic, page count | Anything the page *says* |
+| e2e, via `mail.HTML` | Mark dimensions, `cid:` pairing — the body is plain HTML | — |
+
+This is the same split `tasks.md` §Known limits already records for the day-boundary defect,
+which was pinned at the Go tier for exactly this reason and asserted through the email body
+in `e2e/`. **Following that precedent is the correct move; inventing a PDF text extractor
+for Playwright is not**, and would produce a test asserting against a decompression routine
+rather than against the product.
+
+## Summary of decisions — Revision 3
+
+| ID | Decision | Touches |
+|---|---|---|
+| R-018 | No change; the report measured Mailpit's debug view, not the message | none |
+| R-019 | FR-025 narrowed to an inline image part; SVG ruled out | spec only |
+| R-020 | Trimmed, 64-colour derivatives; alpha retires the band-colour hack | `assets/`, `pdf.go`, `frontend/public/brand/` |
+| R-021 | 280 px email / 200 px header / 55 mm e-ticket, measured for legibility | `service.go`, `pdf.go`, `site-header.tsx` |
+| R-022 | Band 21 → 38.3 mm; express page constants as offsets from it | `pdf.go` |
+| R-023 | `drawEnvelope` gains explicit colours; single definition | `receipt_pdf.go`, `pdf.go` |
+| R-024 | First frontend change; plain `<img>` retained | `site-header.tsx` |
+| R-025 | E-ticket footer covered at the Go tier; `e2e/` gets body assertions only | `*_test.go`, `guest-purchase.spec.ts` |

@@ -1,6 +1,7 @@
 package notification_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestRenderTicketsPDFNumbersEveryPage(t *testing.T) {
 	for _, want := range []string{"Ticket 1 of 3", "Ticket 2 of 3", "Ticket 3 of 3"} {
 		assert.Contains(t, string(doc), want)
 	}
-	assert.NotContains(t, string(doc), "Ticket 4 of 3")
+	assert.NotContains(t, pdfDrawnText(doc), "Ticket 4 of 3")
 }
 
 func TestRenderTicketsPDFNumbersASingleTicketAsOneOfOne(t *testing.T) {
@@ -86,7 +87,10 @@ func TestRenderTicketsPDFPrintsNoMoneyAtAll(t *testing.T) {
 
 	doc, err := notification.RenderTicketsPDFPlain(order, sampleTickets(3), sampleBrand())
 	require.NoError(t, err)
-	text := string(doc)
+
+	// Drawn text only. The page also embeds the QR codes and the brand mark, and
+	// a short needle like "Rp" occurs by chance in that binary — see pdfDrawnText.
+	text := pdfDrawnText(doc)
 
 	for _, forbidden := range []string{
 		"Rp", "IDR", "121.550", "105.000", "35.000", "11.550",
@@ -200,5 +204,104 @@ func TestRenderTicketsPDFAppliesTheLatin1Guard(t *testing.T) {
 
 	assert.Contains(t, text, "ROCK 'N' ROLL - 2026")
 	assert.Contains(t, text, `The "Main" Stage`)
-	assert.NotContains(t, text, "â", "the em dash must not survive as mojibake")
+	assert.NotContains(t, pdfDrawnText(doc), "â", "the em dash must not survive as mojibake")
+}
+
+// --- Spec 016 Revision 3: the brand refresh -------------------------------
+
+// FR-035a, FR-022d / T129. The footer prints the configured site address and the
+// customer-service address the design specifies.
+//
+// Asserted at the GO tier, not in e2e: renderTicketsPDF compresses its content
+// streams in production, so what a page SAYS is unreachable from Playwright
+// (research R-025). RenderTicketsPDFPlain is the seam that makes it readable.
+func TestRenderTicketsPDFFooterCarriesTheConfiguredContacts(t *testing.T) {
+	brand := sampleBrand()
+	brand.SiteURL = "https://www.jive-promotion.com/"
+	brand.SupportEmail = "help@manjo.co.id"
+
+	doc, err := notification.RenderTicketsPDFPlain(sampleOrder(), sampleTickets(1), brand)
+	require.NoError(t, err)
+
+	text := string(doc)
+	assert.Contains(t, text, "https://www.jive-promotion.com/")
+	assert.Contains(t, text, "help@manjo.co.id")
+	assert.Contains(t, text, "CUSTOMER SERVICE")
+}
+
+// FR-022a, FR-022e, SC-021 / T130. The customer-service block is
+// right-POSITIONED with its contents LEFT-aligned: the label, the envelope and
+// the address share one starting edge.
+//
+// Parameterised over address length on purpose. The design's mock happens to show
+// the address ending flush at the right margin, and a footer that lines up only
+// for that one string does not meet FR-022e.
+func TestTicketFooterCustomerServiceBlockIsLeftAlignedWithin(t *testing.T) {
+	addresses := []string{
+		"a@b.co",
+		"help@manjo.co.id",
+		"customer-service.team@jive-promotion.example.com",
+	}
+
+	for _, address := range addresses {
+		left, width := notification.TicketFooterGeometry(address)
+
+		// The BLOCK's right edge meets the right margin, whatever the address.
+		assert.InDelta(t, notification.FooterRightMargin, left+width, 0.01,
+			"the block's right edge must meet the right margin for %q", address)
+
+		// The block never runs off the left of the page or collides with the
+		// site block on the other side of the band.
+		assert.Greater(t, left, 100.0,
+			"the customer-service block must stay in the band's right half for %q", address)
+	}
+}
+
+// FR-022a / T130. A longer address widens the block leftwards; it must never
+// move the shared left edge to the RIGHT of a shorter one, which is what
+// right-aligning each line independently used to do.
+func TestTicketFooterBlockGrowsLeftwardsAsTheAddressGrows(t *testing.T) {
+	shortLeft, _ := notification.TicketFooterGeometry("a@b.co")
+	longLeft, _ := notification.TicketFooterGeometry("customer-service.team@jive-promotion.example.com")
+
+	assert.Less(t, longLeft, shortLeft,
+		"a longer address must extend the block leftwards from a fixed right edge")
+}
+
+// FR-023b. The mark is CAPPED by the band, never the other way round.
+//
+// This is the invariant that keeps the page from growing when the asset changes.
+// It was briefly inverted on 2026-08-19 — the band was grown to 38.3mm so the
+// lockup's secondary line would read in print — and reversed the same day,
+// because it made every ticket visibly taller for a credit nobody reads off a
+// pass. The assertion is kept, pointing the other way, so the enlargement cannot
+// return by accident.
+func TestBrandMarkIsCappedByTheBandAndNeverGrowsIt(t *testing.T) {
+	w, h, ok := notification.BrandMarkBox(sampleBrand())
+	require.True(t, ok, "the embedded mark must register as an image")
+
+	assert.Equal(t, 21.0, notification.BandHeight,
+		"the header band is fixed; a mark must never size it")
+	assert.Less(t, h, notification.BandHeight,
+		"the mark must fit inside the band with inset to spare")
+	assert.Less(t, w, 30.0,
+		"a mark wider than ~30mm means the band grew to fit it again")
+}
+
+// R-023 / T131. drawEnvelope sets round line caps and joins, which are STICKY
+// Fpdf state. The footer is drawn last on a page, so an un-reset style leaks into
+// the NEXT ticket's rules — a defect that renders perfectly on a one-ticket order
+// and only appears from page 2.
+func TestRenderTicketsPDFDoesNotLeakRoundLineCapsAcrossPages(t *testing.T) {
+	doc, err := notification.RenderTicketsPDFPlain(sampleOrder(), sampleTickets(3), sampleBrand())
+	require.NoError(t, err)
+
+	// "1 J" is a round line join and "1 j" a round cap in PDF content-stream
+	// operators. The envelope sets them and must restore miter/butt, so the last
+	// cap/join state written before each page ends must not be the round pair.
+	text := string(doc)
+	lastRound := strings.LastIndex(text, "1 J")
+	lastSquare := strings.LastIndex(text, "0 J")
+	assert.Greater(t, lastSquare, lastRound,
+		"the last join state written must be miter — drawEnvelope's reset is missing or was moved")
 }

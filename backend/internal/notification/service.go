@@ -267,7 +267,7 @@ const (
 // filenames — go-mail derives Content-ID from the name — so these constants are
 // the single place the two must agree.
 const (
-	cidLogo = "jive-logo.png"
+	cidLogo = "jive-logo-white.png"
 	cidPin  = "location-pin.png"
 )
 
@@ -367,11 +367,21 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail, brand Branding)
 // would render at double size there and correctly everywhere else. The alt text
 // is the site name, so a client that blocks even inline images still shows the
 // brand rather than an empty band.
+//
+// 108x61, the size this header has always drawn (FR-023b). Enlarging it to 280px
+// for the sponsor lockup's secondary line was tried on 2026-08-19 and reversed:
+// it nearly doubled the header band, and a confirmation email should open on the
+// message rather than on a brand panel.
+//
+// max-width/height:auto are kept regardless. They cost nothing at this size and
+// they are what stops any future asset or size change from scrolling the body
+// sideways on a small phone (SC-018).
 func emailHeader(sb *strings.Builder, brand Branding) {
 	fmt.Fprintf(sb,
-		`<tr><td align="center" style="background:%s;padding:28px 28px 24px">`+
+		`<tr><td class="sec" align="center" style="background:%s;padding:28px 28px 24px">`+
 			`<img src="cid:%s" width="108" height="61" alt="%s" `+
-			`style="display:block;border:0;outline:none;text-decoration:none;width:108px;height:61px">`+
+			`style="display:block;border:0;outline:none;text-decoration:none;`+
+			`width:108px;max-width:100%%;height:auto">`+
 			`</td></tr>`,
 		emailBand, cidLogo, html.EscapeString(brand.SiteName))
 }

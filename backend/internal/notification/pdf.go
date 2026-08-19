@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -135,9 +136,15 @@ var (
 	pdfInk   = [3]int{24, 24, 27}
 	pdfLine  = [3]int{224, 224, 228}
 	pdfGray  = [3]int{110, 110, 110}
-	pdfBand  = [3]int{21, 26, 38} // #151A26 — the design's band AND the logo's own
-	// opaque background. The staged logo has zero transparent pixels, so any other
-	// band colour draws a visible rectangle around it.
+	// #151A26, the design's band colour.
+	//
+	// This used to be load-bearing for a second reason: the retired mark had a
+	// fully opaque background of exactly this colour, so any other value drew a
+	// visible rectangle around it. The mark shipped since 2026-08-19 has a real
+	// alpha channel (research R-020), so that constraint is gone and this is a
+	// free design choice again. Recorded because the old comment would otherwise
+	// have a future reader preserve a coupling that no longer exists.
+	pdfBand    = [3]int{21, 26, 38}
 	pdfBandFg  = [3]int{236, 238, 243}
 	pdfBandDim = [3]int{150, 156, 172}
 	// The accent rule beside the QR panel: #334155, the design's slate. Not
@@ -153,7 +160,32 @@ const (
 	marginLeft  = 17.0
 	marginRight = 17.0
 	contentWide = pageWidth - marginLeft - marginRight
-	bandHeight  = 21.0
+
+	// The band is FIXED and the mark is fitted into it — the mark never sizes the
+	// band (FR-023b, reversed 2026-08-19).
+	//
+	// A 38.3mm band was tried, to make the lockup's secondary line legible in
+	// print, and rejected: it pushed the whole page down and made the document
+	// visibly taller for a credit nobody needs to read off a ticket. The mark is
+	// capped by height instead, so replacing the asset can never grow the page.
+	bandHeight = 21.0
+)
+
+// The e-ticket page is absolutely positioned — SetAutoPageBreak is off, so a tall
+// event name cannot silently spill one ticket across two pages. The cost used to
+// be that every y below the band was a literal, so changing the band's height
+// meant editing each by hand and hoping none was missed (research R-022).
+//
+// They are offsets from bandHeight now, so the band and the page move together.
+// A band moved without the accent rule draws a 72mm rule straight through it.
+const (
+	headingY = bandHeight + 8   // "Ticket N of M"
+	accentY  = bandHeight + 19  // the accent rule beside the QR panel
+	accentH  = 72.0
+	qrX      = 22.0
+	qrY      = bandHeight + 25
+	qrSize   = 62.0
+	eventY   = bandHeight + 111 // event name above the ticket-type headline
 )
 
 // renderTicketPage draws one e-ticket in the Figma 683-148 layout: a dark header
@@ -175,7 +207,7 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	// tell at a glance whether they have all of them (FR-016).
 	setColor(pdf, pdfInk)
 	pdf.SetFont("Helvetica", "B", 16)
-	pdf.SetXY(marginLeft, 29)
+	pdf.SetXY(marginLeft, headingY)
 	pdf.CellFormat(contentWide, 9, latin1(fmt.Sprintf("Ticket %d of %d", index+1, total)), "", 1, "L", false, 0, "")
 
 	// The accent bar down the left edge, alongside the identity block. It sits
@@ -183,10 +215,9 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	// is top-right and bottom-right. Rounding the left pair would round corners
 	// nobody can see and leave the bar looking detached from the edge.
 	pdf.SetFillColor(pdfAccent[0], pdfAccent[1], pdfAccent[2])
-	pdf.RoundedRect(0, 40, 3.0, 72, 1.5, "23", "F")
+	pdf.RoundedRect(0, accentY, 3.0, accentH, 1.5, "23", "F")
 
 	// QR panel, left.
-	const qrX, qrY, qrSize = 22.0, 46.0, 62.0
 	png, err := RenderQR(ticket.TicketCode)
 	if err != nil {
 		return err
@@ -220,7 +251,7 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	// Event name above the ticket-type headline (FR-019).
 	setColor(pdf, pdfBrand)
 	pdf.SetFont("Helvetica", "B", 9.5)
-	pdf.SetXY(marginLeft, 132)
+	pdf.SetXY(marginLeft, eventY)
 	pdf.MultiCell(contentWide, 5, latin1(strings.ToUpper(ticket.EventName)), "", "L", false)
 
 	setColor(pdf, pdfInk)
@@ -254,33 +285,104 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 }
 
 // drawTicketFooter draws the dark closing band: the site on the left, the
-// customer-service address on the right (FR-022).
+// customer-service block on the right (FR-022, FR-022a, FR-022d).
+//
+// The two blocks sit at opposite edges of the band. Within the right-hand block
+// the label, the envelope and the address share ONE left edge — see
+// customerServiceBlock for why that replaced right-aligning each line.
+//
+// The geometry is computed by customerServiceBlock rather than inline, so the
+// arithmetic is testable without extracting positions from compressed PDF bytes.
+// What remains here is a thin mapping from those numbers to draw calls.
 func drawTicketFooter(pdf *gofpdf.Fpdf, brand Branding) {
 	const footerTop = pageHeight - 25
 	drawBand(pdf, footerTop, 25)
 
+	// Cell margin OFF for this band, restored before returning.
+	//
+	// gofpdf insets left-aligned cell text by cMargin (fpdf.go:2396), which
+	// defaults to one tenth of the page margin — 1mm here. Vector primitives get
+	// no such inset, so an envelope drawn at the same x as its label sits 1mm to
+	// its LEFT and the two can never share an edge, however carefully the
+	// arithmetic is done. FR-022a asks for exactly one shared edge, so the inset
+	// is removed rather than compensated for at each call site.
+	//
+	// Sticky state, like the cap and join styles in drawEnvelope: restore it or
+	// every later cell on the page loses its padding.
+	cellMargin := pdf.GetCellMargin()
+	pdf.SetCellMargin(0)
+	defer pdf.SetCellMargin(cellMargin)
+
+	const labelY, valueY = 7.0, 11.5
+
 	setColor(pdf, pdfBandFg)
 	pdf.SetFont("Helvetica", "B", 7.5)
-	pdf.SetXY(marginLeft, footerTop+7)
+	pdf.SetXY(marginLeft, footerTop+labelY)
 	pdf.CellFormat(80, 4, latin1(strings.ToUpper(brand.SiteName)), "", 1, "L", false, 0, "")
 	setColor(pdf, pdfBandDim)
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetX(marginLeft)
 	pdf.CellFormat(80, 5, latin1(brand.SiteURL), "", 1, "L", false, 0, "")
 
-	// Right-ALIGNED to the right margin, not merely starting from a fixed x: the
-	// two blocks sit at opposite edges of the band, so the footer reads as
-	// justified however long either string is.
-	const rightX = 110.0
-	rightWidth := pageWidth - marginRight - rightX
+	const label = "CUSTOMER SERVICE"
+	blockLeft, blockWidth := customerServiceBlock(pdf, label, brand.SupportEmail)
+
 	setColor(pdf, pdfBandFg)
 	pdf.SetFont("Helvetica", "B", 7.5)
-	pdf.SetXY(rightX, footerTop+7)
-	pdf.CellFormat(rightWidth, 4, "CUSTOMER SERVICE", "", 1, "R", false, 0, "")
+	pdf.SetXY(blockLeft, footerTop+labelY)
+	pdf.CellFormat(blockWidth, 4, label, "", 1, "L", false, 0, "")
+
+	// The envelope, then the address on the SAME line (FR-022d).
+	//
+	// textY is captured BEFORE drawing the icon, for the reason FR-015b already
+	// records on the receipt: gofpdf's MoveTo sets the current position, so
+	// reading GetY() after drawEnvelope returns the icon path's own Y and pushes
+	// the address below its own icon.
+	//
+	// The flap is drawn in the BAND colour rather than white — on this ground the
+	// envelope reads as a cut-out, and white would glare next to 9pt dim text.
+	const lineHeight = 5.0
+	const bodyTop, bodyBottom = 2.0 / 12, 10.0 / 12
+	textY := footerTop + valueY
+	iconY := textY + lineHeight/2 - footerIconSize*(bodyTop+bodyBottom)/2
+	drawEnvelope(pdf, blockLeft, iconY, footerIconSize, pdfBandDim, pdfBand)
+
 	setColor(pdf, pdfBandDim)
 	pdf.SetFont("Helvetica", "", 9)
-	pdf.SetX(rightX)
-	pdf.CellFormat(rightWidth, 5, latin1(brand.SupportEmail), "", 1, "R", false, 0, "")
+	pdf.SetXY(blockLeft+footerIconSize+footerIconGap, textY)
+	pdf.CellFormat(blockWidth-footerIconSize-footerIconGap, lineHeight,
+		latin1(brand.SupportEmail), "", 1, "L", false, 0, "")
+}
+
+// Footer icon geometry. The envelope's box and the gap between it and the
+// address it precedes (FR-022d).
+const (
+	footerIconSize = 3.2
+	footerIconGap  = 1.6
+)
+
+// customerServiceBlock reports where the footer's customer-service block starts
+// and how wide it is.
+//
+// The block is right-POSITIONED — its right edge meets the right margin — but its
+// two lines are LEFT-aligned with one another, so the label, the envelope and the
+// address share one starting edge (FR-022a). That is what frame 683:247 draws:
+// the block sits at x=432 of a 595pt page with both children at x=0.
+//
+// The design's mock happens to show the address line ending flush at the right
+// margin, but that is a coincidence of that particular address's length, not a
+// rule. Right-aligning each line independently — which is what this replaced —
+// would slide the envelope horizontally with every change of address length and
+// break its alignment under the label (FR-022e).
+func customerServiceBlock(pdf *gofpdf.Fpdf, label, address string) (left, width float64) {
+	pdf.SetFont("Helvetica", "B", 7.5)
+	labelWidth := pdf.GetStringWidth(latin1(label))
+
+	pdf.SetFont("Helvetica", "", 9)
+	addressWidth := footerIconSize + footerIconGap + pdf.GetStringWidth(latin1(address))
+
+	width = math.Max(labelWidth, addressWidth)
+	return pageWidth - marginRight - width, width
 }
 
 // drawBand fills a full-width horizontal band in the dark brand colour.

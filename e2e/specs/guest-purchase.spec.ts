@@ -192,6 +192,17 @@ test.describe("Guest purchase, end to end", () => {
     }
     expect(mail.Attachments).toHaveLength(2); // unchanged by the inline images
 
+    // FR-023b / SC-020: the mark is drawn at a FIXED size and never grows the
+    // header band. Asserted on the ATTRIBUTES, which is the half Outlook's Word
+    // engine obeys — a body that set only the CSS would render the mark at its
+    // full asset width for every Outlook recipient.
+    //
+    // The e-ticket footer's equivalent assertions are NOT here and must not be
+    // added: production PDFs are compressed, so the text a page draws never
+    // appears in the downloaded bytes (research R-025). That coverage lives at the
+    // Go tier, through RenderTicketsPDFPlain.
+    expect(mail.HTML).toContain('width="108" height="61"');
+
     // FR-024b / SC-014: times render in Asia/Jakarta with a WIB suffix. The API
     // runs under TZ=UTC (playwright.config.ts), so this passes only if the code
     // converts — which is the whole point of pinning the zone there.
@@ -927,9 +938,12 @@ test.describe("Guest purchase, end to end", () => {
     await guest.payWithQris();
     await guest.expectAwaitingPayment();
 
-    const order = await orderRow(orderNumber);
-    const grossAmount = String(Math.trunc(Number(order.total_amount)));
-    expect(await settleOrder(orderNumber, grossAmount)).toBe(200);
+    // settleOrder takes the order number alone. The gateway callback carries no
+    // amount — buildNotification emits ri/nti/td/tft/tt and a status, and the API
+    // settles against the order's own frozen total — so the gross amount this
+    // used to compute and pass was discarded by JS and type-checked as an arity
+    // error. Removed rather than plumbed through: there is nothing to plumb it to.
+    expect(await settleOrder(orderNumber)).toBe(200);
 
     await guest.expectConfirmation();
     const codes = await waitFor(

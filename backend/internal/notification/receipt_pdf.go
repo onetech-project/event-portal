@@ -340,7 +340,7 @@ func receiptFooter(pdf *gofpdf.Fpdf, brand Branding, top float64) {
 	const bodyTop, bodyBottom = 2.0 / 12, 10.0 / 12
 	textCentre := textY + lineHeight/2
 	iconY := textCentre - iconSize*(bodyTop+bodyBottom)/2
-	drawEnvelope(pdf, marginLeft, iconY, iconSize)
+	drawEnvelope(pdf, marginLeft, iconY, iconSize, pdfSlate, [3]int{255, 255, 255})
 
 	setColor(pdf, pdfInk)
 	pdf.SetFont("Helvetica", "", 9)
@@ -353,7 +353,7 @@ func receiptFooter(pdf *gofpdf.Fpdf, brand Branding, top float64) {
 }
 
 // drawEnvelope draws the customer-service icon with vector primitives: a filled
-// rounded body with a light V-flap (FR-015a).
+// rounded body with a contrasting V-flap (FR-015a).
 //
 // Vector rather than a font glyph or a PNG, for reasons worth keeping:
 // ZapfDingbats (which gofpdf does ship, envelope at 0x29) draws a thin OUTLINE
@@ -365,15 +365,21 @@ func receiptFooter(pdf *gofpdf.Fpdf, brand Branding, top float64) {
 // omitted" by construction — there is no asset that can be missing — so no dead
 // fallback branch is written.
 //
+// body and flap are passed rather than fixed because this icon now serves two
+// very different grounds (spec 016 FR-022d): the receipt draws it slate-on-white,
+// and the e-ticket footer draws it on the dark brand band, where slate has too
+// little contrast. Parameters rather than a second function — a forked copy would
+// drift the first time either is adjusted.
+//
 // size is the icon's box in mm; u is one design unit within it.
-func drawEnvelope(pdf *gofpdf.Fpdf, x, y, size float64) {
+func drawEnvelope(pdf *gofpdf.Fpdf, x, y, size float64, body, flap [3]int) {
 	u := size / 12
 
-	pdf.SetFillColor(pdfSlate[0], pdfSlate[1], pdfSlate[2])
+	pdf.SetFillColor(body[0], body[1], body[2])
 	pdf.RoundedRect(x+1*u, y+2*u, 10*u, 8*u, 1.2*u, "1234", "F")
 
 	// The flap. Round cap and join so the V reads cleanly at this size.
-	pdf.SetDrawColor(255, 255, 255)
+	pdf.SetDrawColor(flap[0], flap[1], flap[2])
 	pdf.SetLineWidth(1.4 * u)
 	pdf.SetLineCapStyle("round")
 	pdf.SetLineJoinStyle("round")

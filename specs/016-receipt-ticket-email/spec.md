@@ -112,6 +112,84 @@ Reopened later the same day, after the earlier currency answer proved incomplete
   does the most damage. The documents now differ from the site in the **prefix only**
   (`IDR` vs `Rp`), not in the separators (FR-037, FR-037a).
 
+### Session 2026-08-19 (brand refresh + reported attachment count)
+
+Opened by a report that the email arrives carrying **four** attachments — the two
+documents plus the logo and the location pin — and by a new brand asset supplied in two
+variants.
+
+- **Q**: The logo and the pin are extra MIME parts. Should they be removed, given a buyer
+  is promised exactly two attachments? → **A**: No — both stay exactly as they are. The
+  report was a reading of the wrong instrument. Mailpit classifies the parts correctly (its
+  API returns `Attachments` = the two PDFs and `Inline` = the two images, and its list
+  endpoint reports `Attachments: 2`), but its message view renders one combined file strip
+  from `Attachments + OtherParts + Inline` because it is a MIME debugger and exists to
+  expose every part. Verified against the running service and against the shipped UI
+  bundle. Gmail and Yopmail were checked by hand and list two attachments. FR-001, FR-023a,
+  FR-025 and SC-001 are unchanged, and the mechanism is confirmed rather than amended.
+- **Q**: Could the email body use SVG instead of a raster inline part? → **A**: No.
+  Gmail strips `<svg>` elements from HTML mail, and Outlook on Windows renders through the
+  Word engine, which has no SVG support at all; wrapping it as
+  `<img src="data:image/svg+xml;…">` fails both again, since FR-023a already records that
+  Gmail strips `data:` URIs from `img` sources. SVG works only in Apple Mail, iOS Mail and
+  Thunderbird. FR-025's allowance of "inline SVG **or** an inline image part" was therefore
+  unsafe as written and is narrowed to the inline image part (FR-025).
+- **Q**: Figma 683-148's footer prints `https://www.jive-promotion.com/` and
+  `help@manjo.co.id`, where the shipped defaults are `https://www.jive.co.id` and
+  `help@manjo.com`. Which values do the documents carry? → **A**: Both are adopted from the
+  design as real platform configuration, not mock content. The support address is one
+  platform-wide value (FR-035), so it changes on every surface that prints it, not on the
+  e-ticket alone. Both remain environment-overridable (FR-035a).
+- **Q**: The new lockup carries fine print the old mark did not — "SPONSORED BY" and
+  "-2° MINUS TWO" — which at today's ~98–108 px footprint renders around 2–3 px tall and is
+  unreadable. How large should the mark be drawn? → **A**: Enlarge it and grow the bands to
+  suit: roughly 250–300 px wide in the email body, with the site header and the e-ticket
+  header band scaled to match. A sponsor credit that cannot be read defeats the reason a
+  sponsor lockup replaced a plain wordmark. This is a layout change on three surfaces, not
+  an asset swap (FR-023b).
+- **Q**: With the envelope icon added, how is the e-ticket footer's customer-service block
+  aligned? → **A**: The block is right-POSITIONED — its right edge meets the right margin —
+  but its contents are **left-aligned** with one another, so the label, the icon and the
+  address share a starting edge. This amends FR-022a, which required both lines flush right;
+  frame 683:247 places the block at `x=432, width=123` with both children at `x=0`, and the
+  flush right edge there is a coincidence of string length rather than a rule (FR-022a).
+- **Q**: Frame 683:148's header still draws the OLD mark — a 71×40 image at the old asset's
+  1.78:1 ratio — while the instruction is to update every logo call. Which mark does the
+  e-ticket carry? → **A**: The new lockup, everywhere. The frame predates the asset, so the
+  instruction supersedes it. One mark on all three surfaces; the old `jive-logo.png` is
+  retired from the frontend and from the backend's embed so there is no second asset to
+  drift (FR-023c).
+
+Recorded from the same review, without needing a question — each was an unambiguous
+finding rather than a decision:
+
+- The **receipt carries no brand mark at all**. `drawBrandMark` is called only from the
+  e-ticket page renderer; the receipt renderer draws no header band and no logo. FR-023a
+  and FR-035 both speak of the mark appearing across "all three surfaces", which the
+  receipt has never satisfied. Left outstanding deliberately rather than widened into this
+  change — see the Governance notes.
+- The frontend's `favicon.ico` is still the unmodified Next.js scaffold icon and the
+  document title is still "Event Ticketing". Neither is a logo call, so neither is in
+  scope here; recorded so the gap is not mistaken for something this change introduced.
+
+- **Q**: How large should the new sponsor lockup be drawn, given its secondary line
+  (`SPONSORED BY` / `-2° MINUS TWO`) is unreadable at the retired mark's size? → **A**:
+  Enlarge it and grow the header bands to suit — ~280px in the email, ~200px on the site
+  header, 55mm on the e-ticket.
+  **~~SUPERSEDED~~ later the same day** — see the entry below. Retained because the
+  reversal's reasoning only makes sense against what it replaced.
+- **Q**: (Reopened after the enlargement was implemented and seen.) Should the mark be sized
+  for legibility, or capped so no container grows? → **A**: **Capped by height.** Keep every
+  container at its previous height and fit the mark inside it — the site header bar stays
+  97px, the email header band 113px, the e-ticket header band 21mm. The width follows from
+  the asset's own ratio.
+
+  This reverses the answer above. Seen rendered, the enlargement cost a third of the
+  e-ticket's header, doubled the email's header band from 113px to 211px, and gave the site
+  header a fifth of the viewport before any content showed — all to make legible a sponsor
+  credit nobody reads off a ticket or a navigation bar. Capping by height has the further
+  property that swapping the asset can no longer change any layout (FR-023b).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Buyer receives a filable receipt alongside the tickets (Priority: P1)
@@ -180,6 +258,11 @@ design: every section is present, in order, populated from the real order.
    the total payment appears last and in the brand accent.
 5. **Given** a paid order, **When** the body and the receipt are compared, **Then** the
    buyer name, email and phone are identical on both, masked identically.
+6. **Given** a delivered email, **When** the recipient's client lists what arrived, **Then**
+   it shows the two documents and nothing else, and the header mark and the location pin
+   render as images in the body rather than as files to open (FR-001, FR-023a, FR-025).
+7. **Given** a delivered email, **When** the header band is read at 100% zoom, **Then** the
+   brand mark's secondary line is legible without magnification (FR-023b).
 
 ---
 
@@ -329,15 +412,36 @@ byte the codes issued the first time.
 - **FR-022**: Each e-ticket page MUST carry the header band with the brand mark and the
   footer band with the event website and the customer-service contact.
 - **FR-022a**: The e-ticket footer's two blocks MUST sit at opposite edges of the band —
-  the site on the left, the customer-service contact right-aligned against the right
-  margin — rather than both starting from the left.
+  the site block against the left margin, the customer-service block against the right —
+  rather than both starting from the left. Within the customer-service block the lines MUST
+  be **left-aligned with one another**: the "Customer Service" label, the envelope icon and
+  the address share one starting edge, and it is the BLOCK, not each line, that is
+  positioned against the right margin.
+  (Amended 2026-08-19. This previously required both lines flush against the right margin.
+  Frame 683:247 places the block at `x=432, width=123` with both children at `x=0`, so the
+  flush right edge in the mock is a coincidence of that particular address's length rather
+  than a rule. Right-aligning each line independently would slide the envelope icon
+  horizontally with every change of address length and break its alignment under the
+  label — which is why the difference only became visible once the icon was added.)
 - **FR-022b**: The accent rule beside the QR panel MUST be `#334155` and MUST be rounded on
   its RIGHT corners only — top-right and bottom-right. It is flush against the left page
   edge, so rounding its left corners would round a corner that is not visible and leave the
   rule looking detached from the edge.
 - **FR-022c**: The e-ticket header band MUST carry the real logo image, embedded in the
   document (FR-023a's asset, embedded directly rather than by content ID, since a PDF has
-  no MIME parts). A missing or unreadable asset falls back to the text wordmark.
+  no MIME parts). A missing or unreadable asset falls back to the text wordmark. The band
+  MUST be sized to the mark rather than the mark to the band (FR-023b), and the page's
+  absolutely positioned content below it moves down accordingly.
+- **FR-022d**: The customer-service address in the e-ticket footer MUST be preceded by an
+  envelope icon, matching the receipt's treatment (FR-015a) and sitting on the address's own
+  line rather than above it (FR-015b). The icon MUST be drawn with vector primitives in the
+  band's own foreground colour rather than shipped as a raster or substituted with a font
+  glyph, and an icon that cannot be drawn MUST be omitted rather than rendered as a
+  missing-character box.
+- **FR-022e**: The e-ticket footer's acceptance is behavioural, not pixel-matching: for any
+  configured support address, short or long, the label, the envelope icon and the address
+  still share one left edge and the block still sits against the right margin. A footer that
+  lines up only for the mock's own address does not meet FR-022a.
 
 #### Email body
 
@@ -349,6 +453,43 @@ byte the codes issued the first time.
   remote fetch from a receipt is a tracking signal); a `data:` URI MUST NOT be used (Gmail
   strips them from `img` sources). If the logo asset is missing or unreadable the body
   MUST fall back to the text wordmark rather than failing the send.
+  **Confirmed unchanged on 2026-08-19**: a report that the email arrives with four
+  attachments was traced to Mailpit's message view, which renders one combined file strip
+  from `Attachments + OtherParts + Inline` because it is a MIME debugger. Its API and its
+  own badge counts classify the parts correctly, and real clients list the two documents
+  alone. The content-ID mechanism stands as specified.
+- **FR-023b**: The brand mark MUST be drawn large enough for the lockup's secondary line —
+  "SPONSORED BY" and "-2° MINUS TWO" — to be legible: approximately 250–300 px wide in the
+  email body, and proportionally scaled on the site header and the e-ticket header band. The
+  header bands on those surfaces MUST grow to accommodate it. Reducing the mark to the
+  previous ~98–108 px footprint renders that line at roughly 2–3 px tall and does NOT
+  satisfy this requirement — a sponsor credit nobody can read is the one outcome a sponsor
+  lockup exists to prevent.
+
+  **REVERSED 2026-08-19**, after the enlargement was implemented and seen. The mark
+  MUST instead be **capped by the height of the container it sits in**, with its width
+  following from its own aspect ratio, so that no container — the site header bar, the
+  email header band, or the e-ticket header band — ever grows to accommodate it. The
+  legibility goal is abandoned deliberately: a sponsor credit is not read off a ticket
+  or a navigation bar, and making it readable cost a third of the e-ticket's header, a
+  doubled email header band, and a site header taking a fifth of the viewport before any
+  content showed. Capping by height also makes a future asset swap incapable of changing
+  any layout.
+
+  The mark's own aspect ratio MUST be preserved.
+  (Corrected 2026-08-19, during planning: the supplied files are 1.49:1, but that is the
+  FILE, not the mark — both carry symmetric transparent padding, and the artwork inside is
+  1.757:1, effectively the retired mark's 1.77:1. Nothing is therefore forced to change by
+  ratio; the growth in this requirement is driven by legibility alone. Derivatives MUST be
+  trimmed to the artwork so that padding is a layout decision made in the layout rather than
+  baked into the asset.)
+- **FR-023c**: One brand asset MUST serve every surface. The mark ships in a light-on-dark
+  (WHITE) and a dark-on-light (BLACK) variant; every current placement — site header, email
+  header band, e-ticket header band — sits on the dark brand band, so all three use the
+  WHITE variant, and the BLACK variant is carried for light surfaces that do not yet exist.
+  The retired mark MUST be removed from both the frontend's public assets and the backend's
+  embedded assets, so no second logo can drift out of step. Where a linked design still
+  draws the retired mark, the asset supersedes the design.
 - **FR-024**: The body MUST show an order panel containing the order status as a badge, the
   order number, the order date, and the payment method.
 - **FR-024c**: The payment method shown in the order panel MUST be upper case, per
@@ -360,9 +501,13 @@ byte the codes issued the first time.
   `04 Jul 2026 06:56 WIB`, following the convention the site's own date displays already
   use.
 - **FR-025**: The body MUST show the event name with its venue and full address, preceded
-  by a location-pin icon as the design shows. The icon MUST be inline SVG or an inline
-  image part — never a remote image, and never an emoji character, which renders
-  inconsistently across clients and platforms.
+  by a location-pin icon as the design shows. The icon MUST be an inline image part
+  referenced by content ID — never a remote image, never an emoji character (which renders
+  inconsistently across clients and platforms), and never inline SVG or an SVG `data:` URI.
+  (Amended 2026-08-19: the original wording also permitted inline SVG. Gmail strips `<svg>`
+  from HTML mail and Outlook on Windows renders through the Word engine, which cannot draw
+  SVG at all, so that allowance would have failed the two largest client families. SVG
+  renders only in Apple Mail, iOS Mail and Thunderbird.)
 - **FR-026**: The body MUST itemize the ticket lines — each with its name, its admission
   date, its unit price and quantity, and its line total — followed by each frozen fee line
   and then the total payment, which is visually emphasised.
@@ -427,6 +572,12 @@ byte the codes issued the first time.
 - **FR-035**: The brand mark, event website address, customer-service address, and platform
   attribution shown across all three surfaces MUST come from a single platform-wide
   configuration. They are identical on every order regardless of which event was bought.
+- **FR-035a**: The configured brand values MUST match the linked designs: the site address
+  is `https://www.jive-promotion.com/` and the customer-service address is
+  `help@manjo.co.id`. Both remain environment-overridable so an operator can correct either
+  without a rebuild. The customer-service address is a single platform-wide value shared by
+  every surface that prints it, so changing it changes them together — that is the intent of
+  FR-035, not a side effect of it.
 - **FR-036**: Only the event's own recorded details — name, venue, address — vary per order
   on those surfaces. This feature MUST NOT introduce per-event branding, and MUST NOT add
   stored data of any kind.
@@ -516,6 +667,15 @@ byte the codes issued the first time.
   viewport widths — the rendered document is never wider than the viewport.
 - **SC-014**: Every displayed time on all three surfaces carries a `WIB` suffix and shows
   the Asia/Jakarta wall clock, for an order settled from any server timezone.
+- **SC-019**: Every surface that shows the brand mark shows the same mark, and the retired
+  mark appears on no surface and is shipped with none of them. Verified by comparing the
+  three placements against one another and by the retired mark being referenced nowhere.
+- **SC-020**: The lockup's secondary line reads at 100% zoom on all three surfaces without
+  magnification — in the delivered email, on the site header, and on a printed e-ticket page
+  at A4 (FR-023b).
+- **SC-021**: In the e-ticket footer, the "Customer Service" label, the envelope icon and
+  the support address share one left edge, for any configured support address, and the block
+  as a whole stays against the right margin (FR-022a, FR-022d).
 - **SC-010**: No regression in delivery: the share of paid orders reaching delivered status
   is unchanged from before this feature, and a failure to build either document leaves the
   order undelivered with resend armed rather than sending a partial email.
@@ -568,14 +728,19 @@ byte the codes issued the first time.
 - Per-ticket-type admission windows, as introduced for per-ticket event dates.
 - The existing single delivery path shared by the automatic post-payment send, the
   guest-facing resend, and the admin resend — so all three inherit this change at once.
-- Platform-wide brand assets per FR-035, supplied as configuration. The **logo image is now
-  a hard dependency**, not an optional ornament: FR-023a requires the real mark on all three
-  surfaces. The asset does not exist in the repository today and must be obtained (it is
-  present in the Figma file as a raster node in the email header) before this feature can
-  meet its own acceptance criteria. The text-wordmark fallback remains, but only as a
-  failure path — shipping with it is not meeting FR-023a.
-- A location-pin icon and an envelope icon (FR-025, FR-015a), likewise not in the
-  repository today.
+- Platform-wide brand assets per FR-035, supplied as configuration. The **logo image is a
+  hard dependency**, not an optional ornament: FR-023a requires the real mark on the surfaces
+  that carry one. The text-wordmark fallback remains, but only as a failure path — shipping
+  with it is not meeting FR-023a.
+  **Satisfied as of 2026-08-19**: the mark was supplied in both variants
+  (`LOGO JIVE MINUS TWO_WHITE.png`, `LOGO JIVE MINUS TWO_BLACK.png`, 6400×4290, ~276 KB
+  each). Both are far larger than any placement needs, so per-surface derivatives are
+  produced from them; the originals are the source of truth, not the shipped files. Their
+  names carry spaces, which become `%20` in a public URL and are awkward in a `//go:embed`
+  directive, so the shipped derivatives are named canonically.
+- A location-pin icon and an envelope icon (FR-025, FR-015a, FR-022d). Both now exist: the
+  pin is an authored raster in the backend's embedded assets, and the envelope is drawn with
+  vector primitives, which is what lets it be recoloured for the e-ticket's dark band.
 
 ## Governance notes
 
@@ -583,14 +748,28 @@ byte the codes issued the first time.
   as a single PDF together with the receipt" is **refined, not reversed**: the receipt moves
   from body-only to body plus a detachable document, and the ticket PDF stays exactly one
   document per order. Amended as constitution 4.1.0.
-- **Outstanding as of the 2026-08-12 design review**: FR-001 and SC-001 now read "exactly
-  two **document** attachments", because FR-023a's inline logo adds a third MIME part that
-  several clients — and Mailpit's own API — report as an attachment. Three artifacts still
-  say "exactly two attachments" and MUST be corrected in the same change that adds the
-  logo, or the first inline image will make them contradict this spec and fail the suite:
-  the constitution's ticket-generation bullet, `PRD.md` §1.4, and the `toHaveLength(2)`
-  assertion in `e2e/specs/guest-purchase.spec.ts`. The e2e assertion should count parts
-  whose disposition is `attachment`, not every part.
+- **RESOLVED as of 2026-08-19** (raised at the 2026-08-12 design review): FR-001 and SC-001
+  read "exactly two **document** attachments" because FR-023a's inline images add MIME parts
+  that some tooling reports alongside the documents. All three dependent artifacts were
+  re-checked and already agree: the constitution's ticket-generation bullet and `PRD.md` §1.4
+  both say "two document attachments", and `e2e/specs/guest-purchase.spec.ts` asserts against
+  Mailpit's `Attachments` array, which the API populates with documents only — the inline
+  parts arrive in a separate `Inline` array. Verified against the running service. The note
+  about Mailpit's *API* reporting inline parts as attachments was mistaken: it is Mailpit's
+  message *view* that merges them into one file strip, and that is the display a buyer never
+  sees.
+- **Outstanding, deliberately not fixed here**: FR-023a and FR-035 both describe the brand
+  mark as appearing across "all three surfaces", but the receipt renderer draws no header
+  band and no mark — `drawBrandMark` is called only from the e-ticket page renderer. Either
+  the receipt gains the band or those two requirements narrow to the two surfaces that
+  actually carry a mark. Widening the 2026-08-19 brand refresh to settle it would have
+  redesigned a document nobody asked to change, so it is recorded rather than resolved.
+- **Outstanding, out of scope**: `frontend/app/favicon.ico` is still the unmodified Next.js
+  scaffold icon (a black disc with a triangle) and the document title is still
+  "Event Ticketing". Neither is a logo *call*, so the 2026-08-19 instruction to update every
+  logo call does not reach them, and the sponsor lockup would in any case need a glyph-only
+  crop to survive 32×32 — an asset the brand has not supplied. Recorded so the scaffold icon
+  is a known debt rather than something the brand pass missed.
 - End-to-end acceptance coverage is an acceptance gate. This change alters a covered flow
   (the guest purchase journey's delivery step), so the suite MUST be extended in the same
   change to assert the two-attachment outcome and the per-ticket page count.
