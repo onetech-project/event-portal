@@ -147,7 +147,24 @@ func TestAdminCreateEventReturns201(t *testing.T) {
 	assert.NotEmpty(t, body["id"])
 }
 
-func TestAdminListEventsReturnsAnArray(t *testing.T) {
+// The admin event list is paginated (spec 021), so `data` is a page object
+// rather than a bare array.
+type eventPageBody struct {
+	Items      []map[string]any `json:"items"`
+	Page       int              `json:"page"`
+	PageSize   int              `json:"page_size"`
+	Total      int64            `json:"total"`
+	TotalPages int              `json:"total_pages"`
+}
+
+func decodeEventPage(t *testing.T, rec *httptest.ResponseRecorder) eventPageBody {
+	t.Helper()
+	var body eventPageBody
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
+	return body
+}
+
+func TestAdminListEventsReturnsAPageWithItsTotal(t *testing.T) {
 	e, pool := newAdminAPI(t)
 	testsupport.SeedEvent(t, pool, "one", "DRAFT")
 	testsupport.SeedEvent(t, pool, "two", "PUBLISHED")
@@ -155,10 +172,129 @@ func TestAdminListEventsReturnsAnArray(t *testing.T) {
 	rec := do(t, e, http.MethodGet, "/api/v1/admin/events", "")
 
 	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeEventPage(t, rec)
+	assert.Len(t, body.Items, 2)
+	assert.EqualValues(t, 2, body.Total)
+	assert.Equal(t, 1, body.Page)
+	assert.Equal(t, 20, body.PageSize)
+	assert.Equal(t, 1, body.TotalPages)
+}
+
+func TestAdminListEventsBoundsThePageToWhatWasAsked(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	for _, slug := range []string{"a", "b", "c"} {
+		testsupport.SeedEvent(t, pool, slug, "PUBLISHED")
+	}
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events?page=2&page_size=2", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeEventPage(t, rec)
+	assert.Len(t, body.Items, 1, "three events at two per page leaves one on page 2")
+	assert.EqualValues(t, 3, body.Total)
+	assert.Equal(t, 2, body.TotalPages)
+}
+
+func TestAdminListEventsClampsAPageBeyondTheEnd(t *testing.T) {
+	// FR-013: a stale bookmark lands on the last page, not on an error and not on
+	// an empty table.
+	e, pool := newAdminAPI(t)
+	for _, slug := range []string{"a", "b", "c"} {
+		testsupport.SeedEvent(t, pool, slug, "PUBLISHED")
+	}
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events?page=999&page_size=2", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeEventPage(t, rec)
+	assert.Equal(t, 2, body.Page, "the served page is the last one, not the one asked for")
+	assert.Len(t, body.Items, 1)
+}
+
+func TestAdminListEventsAcceptsAnythingAPersonCouldType(t *testing.T) {
+	// SC-007: no page or size value produces an error.
+	e, pool := newAdminAPI(t)
+	testsupport.SeedEvent(t, pool, "only", "PUBLISHED")
+
+	for _, query := range []string{
+		"?page=0", "?page=-3", "?page=abc", "?page=",
+		"?page_size=0", "?page_size=abc", "?page_size=-1", "?page_size=5000",
+		"?page=abc&page_size=abc",
+	} {
+		rec := do(t, e, http.MethodGet, "/api/v1/admin/events"+query, "")
+		require.Equal(t, http.StatusOK, rec.Code, "query %q", query)
+
+		body := decodeEventPage(t, rec)
+		assert.GreaterOrEqual(t, body.Page, 1, "query %q", query)
+		assert.LessOrEqual(t, body.PageSize, 100, "query %q must be capped", query)
+	}
+}
+
+func TestAdminListEventsCapsAnOversizedPage(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	testsupport.SeedEvent(t, pool, "only", "PUBLISHED")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events?page_size=5000", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 100, decodeEventPage(t, rec).PageSize)
+}
+
+// --- Event options (spec 021) ---------------------------------------------
+//
+// The selector read behind the event filter on the admin order and attendee
+// lists. It exists because those dropdowns cannot be fed from one page of the
+// paginated event list without silently losing every event past the first page.
+
+func TestAdminEventOptionsListsEveryEventNotJustAPage(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	for _, slug := range []string{"a", "b", "c", "d", "e"} {
+		testsupport.SeedEvent(t, pool, slug, "PUBLISHED")
+	}
+
+	// Even asking for a tiny page must not narrow this read — it does not page.
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events/options?page_size=1&page=3", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
 	var body []map[string]any
 	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
-	assert.Len(t, body, 2)
+	assert.Len(t, body, 5)
 }
+
+func TestAdminEventOptionsCarriesOnlyIdAndName(t *testing.T) {
+	e, pool := newAdminAPI(t)
+	testsupport.SeedEvent(t, pool, "solo", "DRAFT")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events/options", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body []map[string]any
+	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, rec.Body.Bytes()), &body))
+	require.Len(t, body, 1)
+	assert.ElementsMatch(t, []string{"id", "name"}, keysOf(body[0]))
+}
+
+func TestAdminEventOptionsIsNotShadowedByTheEventIdRoute(t *testing.T) {
+	// Route order is load-bearing: registered after /admin/events/:id, "options"
+	// parses as an event id and this answers 400 instead of listing anything.
+	e, pool := newAdminAPI(t)
+	testsupport.SeedEvent(t, pool, "solo", "PUBLISHED")
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events/options", "")
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a 400 here means /admin/events/:id matched first")
+}
+
+func TestAdminEventOptionsReturnsAnEmptyArrayNotNull(t *testing.T) {
+	e, _ := newAdminAPI(t)
+
+	rec := do(t, e, http.MethodGet, "/api/v1/admin/events/options", "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, string(testsupport.UnwrapData(t, rec.Body.Bytes())))
+}
+
 
 func TestAdminGetEventIncludesItsTicketTypes(t *testing.T) {
 	e, pool := newAdminAPI(t)

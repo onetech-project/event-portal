@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,9 @@ import {
 } from "@/components/ui/table";
 import { ApiError } from "@/lib/api-client";
 import { formatCurrency } from "@/lib/format";
+import { Pagination } from "@/components/ui/pagination";
 import { useAdminFees, useCreateFee, useDeleteFee, useUpdateFee } from "@/lib/queries";
+import { useListParams } from "@/lib/use-list-params";
 import type { FeeAdminView } from "@/lib/types";
 
 /**
@@ -35,9 +37,19 @@ import type { FeeAdminView } from "@/lib/types";
  * their fee lines were frozen at booking.
  */
 export default function AdminFeesPage() {
-  const { data: fees, isPending, error } = useAdminFees();
+  const list = useListParams();
+  const { data: fees, isPending, error } = useAdminFees(list.params);
   const [editing, setEditing] = useState<FeeAdminView | null>(null);
   const remove = useDeleteFee();
+
+  // Deleting the last fee on the last page must not strand an operator on an
+  // empty table: the server clamps to the last page that still has rows, and
+  // this adopts what it served.
+  const servedPage = fees?.page;
+  const { syncServedPage } = list;
+  useEffect(() => {
+    if (servedPage !== undefined) syncServedPage(servedPage);
+  }, [servedPage, syncServedPage]);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -56,7 +68,7 @@ export default function AdminFeesPage() {
           <CardContent>
             {isPending ? (
               <Loading label="Loading fees…" />
-            ) : fees === undefined || fees.length === 0 ? (
+            ) : fees === undefined || fees.items.length === 0 ? (
               <EmptyState>No fees yet — orders are charged the ticket subtotal only.</EmptyState>
             ) : (
               <Table>
@@ -70,7 +82,7 @@ export default function AdminFeesPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {fees.map((fee) => (
+                  {fees.items.map((fee) => (
                     <TableRow key={fee.id}>
                       <TableCell className="font-medium">{fee.name}</TableCell>
                       <TableCell>
@@ -100,6 +112,17 @@ export default function AdminFeesPage() {
                 </TableBody>
               </Table>
             )}
+
+            {fees ? (
+              <Pagination
+                page={fees.page}
+                pageSize={fees.page_size}
+                total={fees.total}
+                totalPages={fees.total_pages}
+                onPageChange={list.setPage}
+                onPageSizeChange={list.setPageSize}
+              />
+            ) : null}
           </CardContent>
         </Card>
 

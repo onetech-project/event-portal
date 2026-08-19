@@ -14,6 +14,7 @@ import (
 	"github.com/manjo/ticketing/backend/internal/event"
 	"github.com/manjo/ticketing/backend/internal/order"
 	"github.com/manjo/ticketing/backend/internal/testsupport"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
@@ -43,10 +44,11 @@ func TestAdminListEventsIncludesEveryStatus(t *testing.T) {
 	testsupport.SeedEvent(t, pool, "draft-one", "DRAFT")
 	testsupport.SeedEvent(t, pool, "done-one", "COMPLETED")
 
-	events, err := svc.ListEvents(context.Background())
+	page, err := svc.ListEvents(context.Background(), httpx.NewPageRequest(1, 20))
 
 	require.NoError(t, err)
-	assert.Len(t, events, 3, "the admin list is not filtered by status, unlike the guest one")
+	assert.Len(t, page.Items, 3, "the admin list is not filtered by status, unlike the guest one")
+	assert.EqualValues(t, 3, page.Total)
 }
 
 func TestCreateEventPersistsTheSubmittedFields(t *testing.T) {

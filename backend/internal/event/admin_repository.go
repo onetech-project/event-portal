@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/internal/event/eventsql"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 const uniqueViolation = "23505"
@@ -49,9 +50,21 @@ type AdminTicketTypeParams struct {
 
 // --- Admin event reads ----------------------------------------------------
 
-// ListEvents returns every event regardless of status.
-func (r *Repository) ListEvents(ctx context.Context) ([]EventAdminView, error) {
-	rows, err := r.queries.ListEvents(ctx)
+// CountEvents reports how many events exist, for the paged admin read.
+func (r *Repository) CountEvents(ctx context.Context) (int64, error) {
+	total, err := r.queries.CountEvents(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count events: %w", err)
+	}
+	return total, nil
+}
+
+// ListEvents returns one page of events, regardless of status.
+func (r *Repository) ListEvents(ctx context.Context, page httpx.PageRequest) ([]EventAdminView, error) {
+	rows, err := r.queries.ListEvents(ctx, eventsql.ListEventsParams{
+		RowLimit:  int32(page.Limit()),
+		RowOffset: int32(page.Offset()),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}
@@ -59,6 +72,21 @@ func (r *Repository) ListEvents(ctx context.Context) ([]EventAdminView, error) {
 	out := make([]EventAdminView, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, toAdminView(row))
+	}
+	return out, nil
+}
+
+// ListEventOptions returns every event as an id/name pair, for filter selectors.
+// Unpaginated by design — see EventOption.
+func (r *Repository) ListEventOptions(ctx context.Context) ([]EventOption, error) {
+	rows, err := r.queries.ListEventOptions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list event options: %w", err)
+	}
+
+	out := make([]EventOption, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, EventOption{ID: row.ID, Name: row.Name})
 	}
 	return out, nil
 }

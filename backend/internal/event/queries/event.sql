@@ -82,10 +82,29 @@ RETURNING quota;
 
 -- Admin event CRUD ---------------------------------------------------------
 
+-- name: CountEvents :one
+-- Pairs with ListEvents below. The admin event table is paginated (spec 021) and
+-- the count runs first, because clamping an out-of-range page to the last one
+-- needs the total before the slice is taken.
+SELECT count(*) FROM events;
+
 -- name: ListEvents :many
+-- `id` last makes the ordering total. Events sharing a start_date is the normal
+-- case, not an edge one, and without a tiebreaker two OFFSET reads may order
+-- them differently — duplicating one onto page 2 and hiding another entirely.
 SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
 FROM events
-ORDER BY start_date DESC;
+ORDER BY start_date DESC, id DESC
+LIMIT sqlc.arg(row_limit)::int OFFSET sqlc.arg(row_offset)::int;
+
+-- name: ListEventOptions :many
+-- Every event as an id/name pair, for the filter dropdowns on the admin order
+-- and attendee lists. Deliberately NOT paginated: a filter that could only name
+-- the first page of events would be a filter that quietly lies (spec 021
+-- research R6). Two columns is what keeps that affordable.
+SELECT id, name
+FROM events
+ORDER BY name, id;
 
 -- name: GetEventByID :one
 SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale

@@ -4,6 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { adminFetch, ApiError, apiFetch } from "./api-client";
 import type {
+  EventOption,
+  ListParams,
+  Page,
   AttendeeSummary,
   AvailabilityDecision,
   BookResponse,
@@ -45,20 +48,61 @@ export const queryKeys = {
   ticket: (code: string) => ["tickets", code] as const,
   order: (orderNumber: string) => ["orders", orderNumber] as const,
   genders: ["genders"] as const,
-  adminEvents: ["admin", "events"] as const,
+  // Paged list keys carry their page and size. Omitting them would serve page 1's
+  // rows for page 2 out of the client cache, with the server never consulted.
+  adminEvents: (params?: ListParams) =>
+    ["admin", "events", params?.page ?? null, params?.pageSize ?? null] as const,
+  /** The whole catalogue in selector form — not a page, so it has no paging key. */
+  adminEventOptions: ["admin", "events", "options"] as const,
   adminEvent: (id: string) => ["admin", "events", id] as const,
   adminTicketTypes: (eventId: string) => ["admin", "ticket-types", eventId] as const,
   adminPackages: (eventId: string) => ["admin", "packages", eventId] as const,
-  adminFees: ["admin", "fees"] as const,
-  adminOrders: (status?: string, eventId?: string) =>
-    ["admin", "orders", status ?? null, eventId ?? null] as const,
-  adminAttendees: (orderId?: string, eventId?: string) =>
-    ["admin", "attendees", orderId ?? null, eventId ?? null] as const,
+  adminFees: (params?: ListParams) =>
+    ["admin", "fees", params?.page ?? null, params?.pageSize ?? null] as const,
+  adminOrders: (status?: string, eventId?: string, params?: ListParams) =>
+    [
+      "admin",
+      "orders",
+      status ?? null,
+      eventId ?? null,
+      params?.page ?? null,
+      params?.pageSize ?? null,
+    ] as const,
+  adminAttendees: (orderId?: string, eventId?: string, params?: ListParams) =>
+    [
+      "admin",
+      "attendees",
+      orderId ?? null,
+      eventId ?? null,
+      params?.page ?? null,
+      params?.pageSize ?? null,
+    ] as const,
   adminOrderNotifications: (orderId: string) =>
     ["admin", "payment", orderId, "notifications"] as const,
   adminOrderHolds: (orderId: string) =>
     ["admin", "payment", orderId, "holds"] as const,
 };
+
+/**
+ * Adds paging to an outgoing list request.
+ *
+ * Always explicit, never left to the server's default: the client's default and
+ * the server's are two separate constants, and a request that relies on them
+ * agreeing breaks quietly the day one is retuned.
+ */
+function appendPaging(params: URLSearchParams, paging?: ListParams): void {
+  if (!paging) return;
+  params.set("page", String(paging.page));
+  params.set("page_size", String(paging.pageSize));
+}
+
+/** The same, for endpoints with no filters of their own. */
+function pageQuery(paging?: ListParams): string {
+  const params = new URLSearchParams();
+  appendPaging(params, paging);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
 
 // --- Guest ----------------------------------------------------------------
 
@@ -282,10 +326,26 @@ export function useAdminLogin() {
 
 // --- Admin: events --------------------------------------------------------
 
-export function useAdminEvents() {
+export function useAdminEvents(params?: ListParams) {
   return useQuery({
-    queryKey: queryKeys.adminEvents,
-    queryFn: () => adminFetch<EventAdminView[]>("/admin/events"),
+    queryKey: queryKeys.adminEvents(params),
+    queryFn: () =>
+      adminFetch<Page<EventAdminView>>(`/admin/events${pageQuery(params)}`),
+  });
+}
+
+/**
+ * Every event as an id/name pair, for the filter dropdowns on Orders and
+ * Attendees.
+ *
+ * Separate from useAdminEvents on purpose: that list is paginated, and a filter
+ * built from one page of it would name only the first events while silently
+ * hiding the rest.
+ */
+export function useAdminEventOptions() {
+  return useQuery({
+    queryKey: queryKeys.adminEventOptions,
+    queryFn: () => adminFetch<EventOption[]>("/admin/events/options"),
   });
 }
 
@@ -302,7 +362,7 @@ export function useCreateEvent() {
   return useMutation({
     mutationFn: (body: unknown) =>
       adminFetch<EventAdminView>("/admin/events", { method: "POST", body }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminEvents }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", "events"] }),
   });
 }
 
@@ -312,7 +372,7 @@ export function useUpdateEvent(id: string) {
     mutationFn: (body: unknown) =>
       adminFetch<EventAdminView>(`/admin/events/${id}`, { method: "PUT", body }),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: queryKeys.adminEvents });
+      void client.invalidateQueries({ queryKey: ["admin", "events"] });
       void client.invalidateQueries({ queryKey: queryKeys.adminEvent(id) });
     },
   });
@@ -322,7 +382,7 @@ export function useDeleteEvent() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => adminFetch<void>(`/admin/events/${id}`, { method: "DELETE" }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminEvents }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", "events"] }),
   });
 }
 
@@ -489,28 +549,30 @@ function invalidateTicketTypes(
 
 // --- Admin: read-only views ----------------------------------------------
 
-export function useAdminOrders(status?: string, eventId?: string) {
+export function useAdminOrders(status?: string, eventId?: string, paging?: ListParams) {
   return useQuery({
-    queryKey: queryKeys.adminOrders(status, eventId),
+    queryKey: queryKeys.adminOrders(status, eventId, paging),
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
       if (eventId) params.set("event_id", eventId);
+      appendPaging(params, paging);
       const query = params.toString();
-      return adminFetch<OrderSummary[]>(`/admin/orders${query ? `?${query}` : ""}`);
+      return adminFetch<Page<OrderSummary>>(`/admin/orders${query ? `?${query}` : ""}`);
     },
   });
 }
 
-export function useAdminAttendees(orderId?: string, eventId?: string) {
+export function useAdminAttendees(orderId?: string, eventId?: string, paging?: ListParams) {
   return useQuery({
-    queryKey: queryKeys.adminAttendees(orderId, eventId),
+    queryKey: queryKeys.adminAttendees(orderId, eventId, paging),
     queryFn: () => {
       const params = new URLSearchParams();
       if (orderId) params.set("order_id", orderId);
       if (eventId) params.set("event_id", eventId);
+      appendPaging(params, paging);
       const query = params.toString();
-      return adminFetch<AttendeeSummary[]>(`/admin/attendees${query ? `?${query}` : ""}`);
+      return adminFetch<Page<AttendeeSummary>>(`/admin/attendees${query ? `?${query}` : ""}`);
     },
   });
 }
@@ -548,10 +610,10 @@ export function useResendTicketEmail() {
 
 // --- Admin: fee master (clarified 2026-08-05) ------------------------------
 
-export function useAdminFees() {
+export function useAdminFees(params?: ListParams) {
   return useQuery({
-    queryKey: queryKeys.adminFees,
-    queryFn: () => adminFetch<FeeAdminView[]>("/admin/fees"),
+    queryKey: queryKeys.adminFees(params),
+    queryFn: () => adminFetch<Page<FeeAdminView>>(`/admin/fees${pageQuery(params)}`),
   });
 }
 
@@ -560,7 +622,7 @@ export function useCreateFee() {
   return useMutation({
     mutationFn: (body: unknown) =>
       adminFetch<FeeAdminView>("/admin/fees", { method: "POST", body }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminFees }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", "fees"] }),
   });
 }
 
@@ -572,7 +634,7 @@ export function useUpdateFee(id: string) {
         method: "PUT",
         body,
       }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminFees }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", "fees"] }),
   });
 }
 
@@ -583,7 +645,7 @@ export function useDeleteFee() {
       adminFetch<{ message: string }>(`/admin/fees/${encodeURIComponent(id)}`, {
         method: "DELETE",
       }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.adminFees }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", "fees"] }),
   });
 }
 

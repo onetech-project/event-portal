@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { OrderPaymentPanel } from "@/components/admin/order-payment-panel";
 import { Badge } from "@/components/ui/badge";
@@ -25,14 +25,21 @@ import {
 } from "@/components/ui/table";
 import { ApiError } from "@/lib/api-client";
 import { formatCurrency, formatDateTime } from "@/lib/format";
-import { useAdminEvents, useAdminOrders, useResendTicketEmail } from "@/lib/queries";
+import { Pagination } from "@/components/ui/pagination";
+import { useListParams } from "@/lib/use-list-params";
+import { useAdminEventOptions, useAdminOrders, useResendTicketEmail } from "@/lib/queries";
 
 const STATUSES = ["PENDING", "PAID", "CANCELLED", "EXPIRED"] as const;
 const ALL = "__all__";
 
 export default function AdminOrdersPage() {
-  const [status, setStatus] = useState(ALL);
-  const [eventId, setEventId] = useState(ALL);
+  // Filters live in the URL alongside the page, not in component state: a link
+  // shared from page 3 of a filtered list has to reopen on page 3 of that same
+  // filtered list, or the position is preserved and its meaning is lost.
+  const list = useListParams();
+  const status = list.filters.status ?? ALL;
+  const eventId = list.filters.event_id ?? ALL;
+
   // The order whose payment story is open, if any. Reached by order number from
   // this list, because that is what a guest hands support when they call.
   const [inspecting, setInspecting] = useState<{
@@ -41,7 +48,7 @@ export default function AdminOrdersPage() {
     status: string;
   } | null>(null);
 
-  const { data: events } = useAdminEvents();
+  const { data: events } = useAdminEventOptions();
   const {
     data: orders,
     isPending,
@@ -49,7 +56,17 @@ export default function AdminOrdersPage() {
   } = useAdminOrders(
     status === ALL ? undefined : status,
     eventId === ALL ? undefined : eventId,
+    list.params,
   );
+
+  // The server clamps an out-of-range page to the last one; adopting what it
+  // actually served is what makes a stale bookmark correct itself in the address
+  // bar rather than showing a position the rows did not come from.
+  const servedPage = orders?.page;
+  const { syncServedPage } = list;
+  useEffect(() => {
+    if (servedPage !== undefined) syncServedPage(servedPage);
+  }, [servedPage, syncServedPage]);
 
   const resend = useResendTicketEmail();
   const resendError = resend.error instanceof ApiError ? resend.error : null;
@@ -63,7 +80,9 @@ export default function AdminOrdersPage() {
           <Field label="Status">
             <Select
               value={status}
-              onValueChange={(value) => setStatus(value ?? ALL)}
+              onValueChange={(value) =>
+                list.setFilter("status", !value || value === ALL ? undefined : value)
+              }
             >
               <SelectTrigger aria-label="Status">
                 <SelectValue />
@@ -82,7 +101,9 @@ export default function AdminOrdersPage() {
           <Field label="Event">
             <Select
               value={eventId}
-              onValueChange={(value) => setEventId(value ?? ALL)}
+              onValueChange={(value) =>
+                list.setFilter("event_id", !value || value === ALL ? undefined : value)
+              }
             >
               <SelectTrigger aria-label="Event">
                 <SelectValue />
@@ -116,9 +137,9 @@ export default function AdminOrdersPage() {
 
       {isPending ? <Loading /> : null}
       {error ? <StatusAlert>{error.message}</StatusAlert> : null}
-      {orders?.length === 0 ? <EmptyState>No orders match.</EmptyState> : null}
+      {orders?.items.length === 0 ? <EmptyState>No orders match.</EmptyState> : null}
 
-      {orders && orders.length > 0 ? (
+      {orders && orders.items.length > 0 ? (
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
@@ -132,7 +153,7 @@ export default function AdminOrdersPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {orders.map((order) => (
+              {orders.items.map((order) => (
                 <TableRow key={order.id}>
                   <TableCell className="font-mono text-xs">{order.order_number}</TableCell>
                   <TableCell>
@@ -175,6 +196,17 @@ export default function AdminOrdersPage() {
             </TableBody>
           </Table>
         </div>
+      ) : null}
+
+      {orders ? (
+        <Pagination
+          page={orders.page}
+          pageSize={orders.page_size}
+          total={orders.total}
+          totalPages={orders.total_pages}
+          onPageChange={list.setPage}
+          onPageSizeChange={list.setPageSize}
+        />
       ) : null}
 
       {inspecting ? (

@@ -407,11 +407,17 @@ function GroupTitle({ group }: { group: SlotGroup }) {
     <CardTitle
       // data-slot is what [data-slot="card-title"] styling and queries key off.
       data-slot="card-title"
-      // flex-1 so the heading fills the width its header leaves it. Without it
-      // the CardTitle is only as wide as its text, so `ml-auto` would pin the
-      // badge to the end of the NAME rather than to the edge of the card — a
-      // different place on every card, which is the opposite of what a
-      // right-aligned badge is for.
+      // lg:w-full so the heading claims the whole header row from lg up. Its
+      // header is flex-wrap-reverse, so that pushes the first card's delivery
+      // notice onto a second line which wrap-reverse renders ABOVE — which is
+      // what puts the notice top-right of the header (Figma 206-1804). It is
+      // deliberately not flex-1: that would grow the heading but leave the
+      // notice on the same line, beside the ticket-count badge.
+      //
+      // Below lg no width applies, so the heading is only as wide as its text
+      // and this badge sits at the end of the NAME rather than at the card
+      // edge. That is how the brand refresh shipped it, not an oversight
+      // carried over — the narrow layout stacks rather than aligning to edges.
       className="flex flex-wrap gap-1 items-center gap-y-1 text-lg font-bold lg:w-full"
     >
       {/* min-w-0 with wrap-break-word so a bundle named as one unbroken token wraps

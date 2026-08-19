@@ -19,6 +19,9 @@ import (
 // /admin/events/:id/ticket-types route exists.
 func (h *Handler) RegisterAdminRoutes(g *echo.Group) {
 	g.GET("/admin/events", h.adminListEvents)
+	// Before the /:id route, or Echo matches "options" as an event id and the
+	// selector read answers 400 for a malformed UUID instead of listing events.
+	g.GET("/admin/events/options", h.adminListEventOptions)
 	g.POST("/admin/events", h.adminCreateEvent)
 	g.GET("/admin/events/:id", h.adminGetEvent)
 	g.PUT("/admin/events/:id", h.adminUpdateEvent)
@@ -34,11 +37,21 @@ func (h *Handler) RegisterAdminRoutes(g *echo.Group) {
 // --- Events ---------------------------------------------------------------
 
 func (h *Handler) adminListEvents(c echo.Context) error {
-	events, err := h.svc.ListEvents(c.Request().Context())
+	events, err := h.svc.ListEvents(c.Request().Context(), httpx.BindPage(c))
 	if err != nil {
 		return err
 	}
 	return httpx.Respond(c, http.StatusOK, events)
+}
+
+// adminListEventOptions answers the filter dropdowns on the admin order and
+// attendee lists. Unpaginated on purpose: see EventOption.
+func (h *Handler) adminListEventOptions(c echo.Context) error {
+	options, err := h.svc.ListEventOptions(c.Request().Context())
+	if err != nil {
+		return err
+	}
+	return httpx.Respond(c, http.StatusOK, options)
 }
 
 func (h *Handler) adminCreateEvent(c echo.Context) error {

@@ -38,6 +38,22 @@ func (q *Queries) CheckAndDeductQuota(ctx context.Context, arg CheckAndDeductQuo
 	return quota, err
 }
 
+const countEvents = `-- name: CountEvents :one
+
+SELECT count(*) FROM events
+`
+
+// Admin event CRUD ---------------------------------------------------------
+// Pairs with ListEvents below. The admin event table is paginated (spec 021) and
+// the count runs first, because clamping an out-of-range page to the last one
+// needs the total before the slice is taken.
+func (q *Queries) CountEvents(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countEvents)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countPackagesByEventID = `-- name: CountPackagesByEventID :one
 SELECT COUNT(*)::bigint AS total FROM packages WHERE event_id = $1
 `
@@ -871,16 +887,58 @@ func (q *Queries) ListEventIDsByTicketTypeIDs(ctx context.Context, ids []uuid.UU
 	return items, nil
 }
 
-const listEvents = `-- name: ListEvents :many
-
-SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
+const listEventOptions = `-- name: ListEventOptions :many
+SELECT id, name
 FROM events
-ORDER BY start_date DESC
+ORDER BY name, id
 `
 
-// Admin event CRUD ---------------------------------------------------------
-func (q *Queries) ListEvents(ctx context.Context) ([]Event, error) {
-	rows, err := q.db.Query(ctx, listEvents)
+type ListEventOptionsRow struct {
+	ID   uuid.UUID
+	Name string
+}
+
+// Every event as an id/name pair, for the filter dropdowns on the admin order
+// and attendee lists. Deliberately NOT paginated: a filter that could only name
+// the first page of events would be a filter that quietly lies (spec 021
+// research R6). Two columns is what keeps that affordable.
+func (q *Queries) ListEventOptions(ctx context.Context) ([]ListEventOptionsRow, error) {
+	rows, err := q.db.Query(ctx, listEventOptions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListEventOptionsRow{}
+	for rows.Next() {
+		var i ListEventOptionsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEvents = `-- name: ListEvents :many
+SELECT id, name, slug, description, venue, address, start_date, end_date, banner_url, status, created_at, updated_at, scale
+FROM events
+ORDER BY start_date DESC, id DESC
+LIMIT $2::int OFFSET $1::int
+`
+
+type ListEventsParams struct {
+	RowOffset int32
+	RowLimit  int32
+}
+
+// `id` last makes the ordering total. Events sharing a start_date is the normal
+// case, not an edge one, and without a tiebreaker two OFFSET reads may order
+// them differently — duplicating one onto page 2 and hiding another entirely.
+func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]Event, error) {
+	rows, err := q.db.Query(ctx, listEvents, arg.RowOffset, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

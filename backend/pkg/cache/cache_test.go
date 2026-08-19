@@ -23,6 +23,9 @@ func newTestCache(t *testing.T) (*Redis, *miniredis.Miniredis) {
 	return c, srv
 }
 
+// firstPage is what every pre-paging test implicitly asked for.
+var firstPage = Paging{Page: 1, Size: 20}
+
 func TestKeyGrammar(t *testing.T) {
 	eventID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
 	status := "PAID"
@@ -47,14 +50,14 @@ func TestKeyGrammar(t *testing.T) {
 		},
 		{
 			name:       "filtered admin list renders its fingerprint",
-			key:        OrdersAdminKey(&status, &eventID),
-			wantPrefix: "list:orders_admin:st=PAID:ev=" + eventID.String() + ":g",
+			key:        OrdersAdminKey(&status, &eventID, firstPage),
+			wantPrefix: "list:orders_admin:st=PAID:ev=" + eventID.String() + ":p=1:n=20:g",
 			wantGenKey: "gen:orders",
 		},
 		{
 			name:       "absent filters render as _, never as empty",
-			key:        OrdersAdminKey(nil, nil),
-			wantPrefix: "list:orders_admin:st=_:ev=_:g",
+			key:        OrdersAdminKey(nil, nil, firstPage),
+			wantPrefix: "list:orders_admin:st=_:ev=_:p=1:n=20:g",
 			wantGenKey: "gen:orders",
 		},
 	}
@@ -77,16 +80,16 @@ func TestFingerprintsAreInjective(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, k := range []Key{
-		OrdersAdminKey(nil, nil),
-		OrdersAdminKey(&paid, nil),
-		OrdersAdminKey(&pending, nil),
-		OrdersAdminKey(nil, &a),
-		OrdersAdminKey(&paid, &a),
-		OrdersAdminKey(&paid, &b),
-		AttendeesAdminKey(nil, nil),
-		AttendeesAdminKey(&a, nil),
-		AttendeesAdminKey(nil, &a),
-		AttendeesAdminKey(&a, &b),
+		OrdersAdminKey(nil, nil, firstPage),
+		OrdersAdminKey(&paid, nil, firstPage),
+		OrdersAdminKey(&pending, nil, firstPage),
+		OrdersAdminKey(nil, &a, firstPage),
+		OrdersAdminKey(&paid, &a, firstPage),
+		OrdersAdminKey(&paid, &b, firstPage),
+		AttendeesAdminKey(nil, nil, firstPage),
+		AttendeesAdminKey(&a, nil, firstPage),
+		AttendeesAdminKey(nil, &a, firstPage),
+		AttendeesAdminKey(&a, &b, firstPage),
 	} {
 		p := k.EntryPrefix()
 		require.False(t, seen[p], "collision on %s", p)
@@ -101,8 +104,8 @@ func TestFingerprintsAreStable(t *testing.T) {
 	status := "PAID"
 	for i := 0; i < 50; i++ {
 		require.Equal(t,
-			OrdersAdminKey(&status, &id).EntryPrefix(),
-			OrdersAdminKey(&status, &id).EntryPrefix())
+			OrdersAdminKey(&status, &id, firstPage).EntryPrefix(),
+			OrdersAdminKey(&status, &id, firstPage).EntryPrefix())
 	}
 }
 
@@ -182,11 +185,11 @@ func TestOneBumpInvalidatesEveryFilterVariant(t *testing.T) {
 	id := uuid.New()
 	paid := "PAID"
 	variants := []Key{
-		OrdersAdminKey(nil, nil),
-		OrdersAdminKey(&paid, nil),
-		OrdersAdminKey(nil, &id),
-		OrdersAdminKey(&paid, &id),
-		AttendeesAdminKey(nil, &id),
+		OrdersAdminKey(nil, nil, firstPage),
+		OrdersAdminKey(&paid, nil, firstPage),
+		OrdersAdminKey(nil, &id, firstPage),
+		OrdersAdminKey(&paid, &id, firstPage),
+		AttendeesAdminKey(nil, &id, firstPage),
 	}
 	for _, k := range variants {
 		require.NoError(t, c.Set(ctx, k, []byte(`["warm"]`)))

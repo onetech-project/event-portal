@@ -3,6 +3,8 @@ import { expect, test } from "@playwright/test";
 import {
   adminLogin,
   adminOrders,
+  adminOrdersPage,
+  bookAsAnotherGuest,
   createSellableEvent,
   isoHoursFromNow,
   updateEvent,
@@ -429,6 +431,265 @@ test.describe("Admin console", () => {
     await expect(page.getByText(/stub-eri-/)).toHaveCount(0);
   });
 
+});
+
+/**
+ * Pagination across the admin console (spec 021).
+ *
+ * These run at a deliberately small `page_size`. The alternative — seeding
+ * twenty-odd orders to overflow the default page — would take minutes per
+ * scenario, and the shortcut that makes it fast (inserting rows straight into
+ * the database) is exactly the one Principle VIII forbids: direct writes do not
+ * invalidate the cache, so a paging test seeded that way could pass against a
+ * stale cache and prove nothing at all. Every order below is booked through the
+ * real API.
+ */
+test.describe("Admin console pagination", () => {
+  /**
+   * Books n real orders against one event and returns their order numbers.
+   *
+   * Paced to the shipped booking throttle rather than around it. Booking is
+   * limited to 0.33/s with a burst of 5 (Principle IX), and that allowance is
+   * per client and process-local — so every scenario in a local run draws on the
+   * same bucket, and a scenario that simply looped would be refused because of
+   * what an unrelated one spent. Waiting for the refill is what Principle VIII
+   * means by isolating throttle-sensitive scenarios; disabling the limit for the
+   * main API would stop exercising what actually ships.
+   */
+  async function bookOrders(
+    eventId: string,
+    ticketTypeId: string,
+    n: number,
+  ): Promise<string[]> {
+    const numbers: string[] = [];
+    for (let i = 0; i < n; i++) {
+      numbers.push(await bookOnce(eventId, ticketTypeId));
+    }
+    return numbers;
+  }
+
+  async function bookOnce(eventId: string, ticketTypeId: string): Promise<string> {
+    // 0.33/s refills a token every ~3s; six attempts covers a fully drained
+    // bucket without hiding a genuine failure, which still throws.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const { order_id } = await bookAsAnotherGuest(eventId, ticketTypeId, 1);
+        return order_id;
+      } catch (err) {
+        const throttled = err instanceof Error && err.message.includes("429");
+        if (!throttled || attempt >= 6) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 3_200));
+      }
+    }
+  }
+
+  test("walking pages two at a time repeats nothing and skips nothing", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-disjoint",
+      quota: 20,
+    });
+    const booked = await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2`);
+    await expect(page.getByRole("navigation", { name: /pagination/i })).toBeVisible();
+
+    // Walk forward with the real Next button, collecting what each page shows.
+    const seen: string[] = [];
+    const { totalPages } = await admin.currentPage();
+    // Three orders at two a page: a full page then a partial one.
+    expect(totalPages).toBe(2);
+
+    for (let n = 1; n <= totalPages; n++) {
+      expect((await admin.currentPage()).page).toBe(n);
+      seen.push(...(await admin.visibleRowKeys()));
+      if (n < totalPages) {
+        await admin.goToNextPage();
+        await expect.poll(async () => (await admin.currentPage()).page).toBe(n + 1);
+      }
+    }
+
+    // The property worth having: each order exactly once across the whole walk.
+    // A tie in the ordering would show one twice here and hide another.
+    expect(seen).toHaveLength(3);
+    expect(new Set(seen).size).toBe(3);
+    expect([...seen].sort()).toEqual([...booked].sort());
+    expect(await admin.reportedTotal()).toBe(3);
+  });
+
+  test("the last page offers no way further forward", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-last",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2&page=1`);
+    expect(await admin.canGoBack()).toBe(false);
+    expect(await admin.canGoForward()).toBe(true);
+
+    await admin.goToNextPage();
+    await expect
+      .poll(async () => (await admin.currentPage()).page, { message: "reached page 2" })
+      .toBe(2);
+    expect(await admin.canGoForward()).toBe(false);
+    expect(await admin.canGoBack()).toBe(true);
+  });
+
+  test("changing a filter returns to the first page", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-filter",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2&page=2`);
+    expect((await admin.currentPage()).page).toBe(2);
+
+    // Every booked order is PENDING, so filtering to PAID empties the list — and
+    // page 3 of an empty list is not a place to leave an operator.
+    await page.getByLabel("Status").click();
+    await page.getByRole("option", { name: "PAID" }).click();
+
+    await expect.poll(() => page.url()).not.toContain("page=2");
+    await expect(page.getByText(/no orders match/i)).toBeVisible();
+  });
+
+  test("an out-of-range page in the address lands on the last page", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-clamp",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    // The shape of a bookmark taken before rows were deleted.
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2&page=999`);
+
+    await expect
+      .poll(async () => (await admin.currentPage()).page, {
+        message: "the last page, not an error and not an empty table",
+      })
+      .toBe(2);
+    expect(await admin.visibleRowKeys()).toHaveLength(1);
+    // And the address corrects itself, so it no longer claims page 999.
+    await expect.poll(() => page.url()).toContain("page=2");
+  });
+
+  test("a copied address reopens the same page with the same filter", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-shared",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2&page=2`);
+
+    const onPageTwo = await admin.visibleRowKeys();
+    const shared = page.url();
+
+    // What a colleague opening the link sees.
+    await page.goto("/admin/events");
+    await page.goto(shared);
+
+    expect((await admin.currentPage()).page).toBe(2);
+    expect(await admin.visibleRowKeys()).toEqual(onPageTwo);
+  });
+
+  test("the event filter still lists every event once the event list is paginated", async ({
+    page,
+  }) => {
+    // The regression pagination introduces if the filter is fed from one page of
+    // the admin event list: events past the first page silently stop being
+    // filterable, with nothing to indicate they exist.
+    const slugs = Array.from({ length: 4 }, (_, i) => `uat-paging-opt-${i}`);
+    for (const slug of slugs) {
+      await createSellableEvent(token, { slug, name: `Filterable ${slug}` });
+    }
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    // One event per page in the events table — the filter must not follow suit.
+    await page.goto("/admin/orders?page_size=1");
+    await page.getByLabel("Event").click();
+
+    for (const slug of slugs) {
+      await expect(page.getByRole("option", { name: `Filterable ${slug}` })).toBeVisible();
+    }
+  });
+
+  test("resizing a page keeps the row an operator was reading", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-resize",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await page.goto(`/admin/orders?event_id=${event.id}&page_size=2&page=2`);
+
+    const firstRowOfPageTwo = (await admin.visibleRowKeys())[0];
+
+    await admin.setPageSize(20);
+
+    // Everything fits on one page now, and the row that was on screen still is.
+    await expect.poll(async () => (await admin.currentPage()).totalPages).toBe(1);
+    expect(await admin.visibleRowKeys()).toContain(firstRowOfPageTwo);
+  });
+
+  test("every list menu paginates the same way", async ({ page }) => {
+    // SC-005: one interaction to learn, not four.
+    await createSellableEvent(token, { slug: "uat-paging-menus", quota: 5 });
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    for (const path of ["/admin/events", "/admin/orders", "/admin/attendees", "/admin/fees"]) {
+      await page.goto(path);
+      // Fees and attendees may be empty, in which case the control correctly
+      // renders nothing; what must never happen is a page that lists rows and
+      // offers no way to move through them.
+      const rows = await page.locator("tbody tr").count();
+      const cards = await page.locator('[data-slot="card"]').count();
+      if (rows > 0 || (path === "/admin/events" && cards > 0)) {
+        await expect(
+          page.getByRole("navigation", { name: /pagination/i }),
+          `${path} lists rows but offers no paging control`,
+        ).toBeVisible();
+      }
+    }
+  });
+
+  test("the API reports the total matching the filter, not the table", async () => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-paging-total",
+      quota: 20,
+    });
+    await bookOrders(event.id, ticketType.id, 3);
+
+    const paged = await adminOrdersPage(token, {
+      eventId: event.id,
+      page: 1,
+      pageSize: 2,
+    });
+
+    expect(paged.items).toHaveLength(2);
+    expect(paged.total).toBe(3);
+    expect(paged.total_pages).toBe(2);
+    expect(paged.page).toBe(1);
+  });
 });
 
 /**

@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { EventStatusField } from "@/components/admin/event-status-field";
@@ -15,12 +15,23 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError } from "@/lib/api-client";
 import { formatDateTime, toApiDateTime } from "@/lib/format";
+import { Pagination } from "@/components/ui/pagination";
 import { useAdminEvents, useCreateEvent } from "@/lib/queries";
+import { useListParams } from "@/lib/use-list-params";
 import { eventFormSchema, type EventForm } from "@/lib/schemas";
 
 export default function AdminEventsPage() {
-  const { data: events, isPending, error } = useAdminEvents();
+  const list = useListParams();
+  const { data: events, isPending, error } = useAdminEvents(list.params);
   const [showForm, setShowForm] = useState(false);
+
+  // Deleting the last event on the last page would otherwise leave an operator
+  // looking at an empty table; the server clamps and this adopts what it served.
+  const servedPage = events?.page;
+  const { syncServedPage } = list;
+  useEffect(() => {
+    if (servedPage !== undefined) syncServedPage(servedPage);
+  }, [servedPage, syncServedPage]);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -39,12 +50,12 @@ export default function AdminEventsPage() {
 
       {isPending ? <Loading /> : null}
       {error ? <StatusAlert>{error.message}</StatusAlert> : null}
-      {events?.length === 0 ? (
+      {events?.items.length === 0 ? (
         <EmptyState>No events yet. Create one to start selling.</EmptyState>
       ) : null}
 
       <div className="space-y-3">
-        {events?.map((event) => (
+        {events?.items.map((event) => (
           <Card key={event.id}>
             <CardContent className="flex flex-wrap items-center justify-between gap-4">
               <div>
@@ -67,6 +78,17 @@ export default function AdminEventsPage() {
           </Card>
         ))}
       </div>
+
+      {events ? (
+        <Pagination
+          page={events.page}
+          pageSize={events.page_size}
+          total={events.total}
+          totalPages={events.total_pages}
+          onPageChange={list.setPage}
+          onPageSizeChange={list.setPageSize}
+        />
+      ) : null}
     </main>
   );
 }

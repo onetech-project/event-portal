@@ -396,17 +396,107 @@ export async function publicTicketTypes(
   return data;
 }
 
+/**
+ * One page of an admin list, as every paginated admin endpoint returns it inside
+ * the standard envelope's `data` (spec 021).
+ */
+export type PagedResponse<T> = {
+  items: T[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+};
+
+export type Paging = { page?: number; pageSize?: number };
+
+/** Adds paging to a query string, omitting what was not asked for. */
+function withPaging(params: URLSearchParams, paging: Paging = {}): URLSearchParams {
+  if (paging.page !== undefined) params.set("page", String(paging.page));
+  if (paging.pageSize !== undefined) params.set("page_size", String(paging.pageSize));
+  return params;
+}
+
+/**
+ * Fetches one page of any admin list, returning the whole envelope payload so a
+ * spec can assert on the total and the page count, not just the rows.
+ */
+export async function adminListPage<T>(
+  token: string,
+  path: string,
+  params: URLSearchParams,
+): Promise<PagedResponse<T>> {
+  const query = params.toString();
+  const { data } = await request<PagedResponse<T>>(`${path}${query ? `?${query}` : ""}`, {
+    token,
+  });
+  return data;
+}
+
+export type AdminOrderRow = { order_number: string; status: string; buyer_name: string };
+
+/**
+ * One page of the admin order list. Returns the rows, which is what nearly every
+ * caller wants; reach for `adminOrdersPage` when the total or the page count is
+ * the thing under test.
+ */
 export async function adminOrders(
   token: string,
-  filter: { status?: string; eventId?: string } = {},
-): Promise<Array<{ order_number: string; status: string; buyer_name: string }>> {
+  filter: { status?: string; eventId?: string } & Paging = {},
+): Promise<AdminOrderRow[]> {
+  return (await adminOrdersPage(token, filter)).items;
+}
+
+/** One page of the admin order list, with its paging metadata intact. */
+export async function adminOrdersPage(
+  token: string,
+  filter: { status?: string; eventId?: string } & Paging = {},
+): Promise<PagedResponse<AdminOrderRow>> {
   const params = new URLSearchParams();
   if (filter.status) params.set("status", filter.status);
   if (filter.eventId) params.set("event_id", filter.eventId);
-  const query = params.toString();
+  withPaging(params, filter);
 
-  const { data } = await request<Array<{ order_number: string; status: string; buyer_name: string }>>(
-    `/admin/orders${query ? `?${query}` : ""}`,
+  return adminListPage<AdminOrderRow>(token, "/admin/orders", params);
+}
+
+export type AdminAttendeeRow = {
+  name: string;
+  email: string;
+  ticket_type_name: string;
+  order_number: string;
+};
+
+/** One page of the admin attendee list, with its paging metadata intact. */
+export async function adminAttendeesPage(
+  token: string,
+  filter: { orderId?: string; eventId?: string } & Paging = {},
+): Promise<PagedResponse<AdminAttendeeRow>> {
+  const params = new URLSearchParams();
+  if (filter.orderId) params.set("order_id", filter.orderId);
+  if (filter.eventId) params.set("event_id", filter.eventId);
+  withPaging(params, filter);
+
+  return adminListPage<AdminAttendeeRow>(token, "/admin/attendees", params);
+}
+
+/** One page of the admin event list, with its paging metadata intact. */
+export async function adminEventsPage(
+  token: string,
+  paging: Paging = {},
+): Promise<PagedResponse<{ id: string; name: string; slug: string }>> {
+  return adminListPage(token, "/admin/events", withPaging(new URLSearchParams(), paging));
+}
+
+/**
+ * Every event as an id/name pair — the selector read the filter dropdowns use.
+ * Deliberately unpaginated, so a filter can always name every event.
+ */
+export async function adminEventOptions(
+  token: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const { data } = await request<Array<{ id: string; name: string }>>(
+    "/admin/events/options",
     { token },
   );
   return data;

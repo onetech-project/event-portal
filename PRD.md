@@ -68,6 +68,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 **Admin APIs (JWT Protected)**
 *   `POST /api/v1/admin/login`
 *   `CRUD /api/v1/admin/events`
+*   `GET /api/v1/admin/events/options`
 *   `CRUD /api/v1/admin/ticket-types`
 *   `CRUD /api/v1/admin/packages`
 *   `GET /api/v1/admin/packages/:id/availability`
@@ -75,6 +76,8 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   `POST /api/v1/admin/orders/:id/resend-email`
 *   `GET /api/v1/admin/attendees`
 *   `POST /api/v1/admin/tickets/validate`
+
+The four admin **list** reads — `GET /api/v1/admin/events`, `/admin/orders`, `/admin/attendees` and `/admin/fees` — are paginated: they take `page` and `page_size` and return one page plus the total matching the current filters, rather than the whole table. Paging parameters are corrected rather than refused, so no address a person can type produces an error; the filters keep their existing validation. `GET /api/v1/admin/events/options` exists precisely because that pagination would otherwise truncate the event filter on the order and attendee lists to one page of events — it returns every event as an id/name pair and is deliberately not paginated.
 
 `GET /api/v1/packages/:event_slug` returns packages whose `available_units` and `purchasable` are both derived per request from the remaining quota of their constituent ticket types — a package stores no inventory of its own, so neither field is ever cached or persisted. `POST /api/v1/ticket/book` accepts a line referencing **either** a `ticket_type_id` or a `package_id`, never both.
 

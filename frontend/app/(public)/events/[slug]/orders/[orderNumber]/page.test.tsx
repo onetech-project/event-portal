@@ -1068,10 +1068,14 @@ describe("order page — the card heading", () => {
     expect(title).toHaveTextContent("2-Day Bundle");
     // `truncate` is what used to hide the tail; the wrap is what replaced it.
     expect(title).not.toHaveClass("truncate");
-    // flex-1 is load-bearing, not decoration: it is what makes the heading fill
-    // the width its header leaves it, and therefore what gives the badge's
-    // ml-auto a card edge to sit against rather than the end of the name.
-    expect(title).toHaveClass("flex", "flex-1", "flex-wrap");
+    expect(title).toHaveClass("flex", "flex-wrap");
+    // lg:w-full is load-bearing, not decoration, and it is specifically NOT
+    // flex-1. The header is flex-wrap-reverse with two children — this heading
+    // and the delivery notice — so a heading that claims the whole row pushes
+    // the notice onto a second line, which wrap-reverse then renders ABOVE it.
+    // That is what puts the notice top-right of the header (Figma 206-1804).
+    // flex-1 would grow the heading and leave the notice beside it instead.
+    expect(title).toHaveClass("lg:w-full");
   });
 
   it("offers no tooltip, because nothing is hidden to reveal", async () => {

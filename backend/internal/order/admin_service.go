@@ -12,6 +12,7 @@ import (
 	"github.com/manjo/ticketing/backend/internal/order/ordersql"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/cache"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
 
@@ -76,15 +77,27 @@ type PackageDisplay struct {
 }
 
 // OrderFilter narrows the admin order list. A nil field means "no filter".
+//
+// Page is the slice of the filtered result to return (spec 021). It is applied
+// after the filters, so the reported total means "matching what was asked for",
+// not "in the table".
 type OrderFilter struct {
 	Status  *string
 	EventID *uuid.UUID
+	Page    httpx.PageRequest
 }
 
 // AttendeeFilter narrows the admin attendee list. A nil field means "no filter".
 type AttendeeFilter struct {
 	OrderID *uuid.UUID
 	EventID *uuid.UUID
+	Page    httpx.PageRequest
+}
+
+// paging renders a filter's page as the cache-key component. Kept here so the
+// two admin lists cannot drift apart on how they build it.
+func paging(p httpx.PageRequest) cache.Paging {
+	return cache.Paging{Page: p.Page, Size: p.Size}
 }
 
 // AdminService serves the read-only admin views over orders and attendees.
@@ -109,34 +122,58 @@ func (s *AdminService) WithCache(c cache.Lists) *AdminService {
 	return s
 }
 
-// ListOrders returns orders matching the filter, newest first.
+// ListOrders returns one page of orders matching the filter, newest first.
 //
-// Cached per filter combination, all sharing the single orders scope — so one
-// order changing status invalidates every variant that could contain it with one
-// INCR, rather than requiring the writer to know which filters are warm (FR-010).
-func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) ([]OrderSummary, error) {
-	return cache.Through(ctx, s.cache, cache.OrdersAdminKey(filter.Status, filter.EventID),
-		func(ctx context.Context) ([]OrderSummary, error) {
+// Cached per filter combination AND per page, all sharing the single orders
+// scope — so one order changing status invalidates every variant that could
+// contain it with one INCR, rather than requiring the writer to know which
+// filters or which pages are warm (FR-010, spec 021).
+//
+// The whole page is cached, count included, so a hit reports the same total the
+// database would have rather than pairing this page's rows with some other
+// read's count.
+func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) (httpx.Page[OrderSummary], error) {
+	filter.Page = filter.Page.Normalize()
+	key := cache.OrdersAdminKey(filter.Status, filter.EventID, paging(filter.Page))
+	return cache.Through(ctx, s.cache, key,
+		func(ctx context.Context) (httpx.Page[OrderSummary], error) {
 			return s.listOrders(ctx, filter)
 		})
 }
 
-func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) ([]OrderSummary, error) {
+func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) (httpx.Page[OrderSummary], error) {
 	ticketTypeIDs, scoped, err := s.ticketTypeScope(ctx, filter.EventID)
 	if err != nil {
-		return nil, err
+		return httpx.Page[OrderSummary]{}, err
 	}
 	if scoped && len(ticketTypeIDs) == 0 {
-		// The event has no ticket types, so no order can reference it.
-		return []OrderSummary{}, nil
+		// The event has no ticket types, so no order can reference it. An empty
+		// page with total 0 — never an unfiltered count.
+		return httpx.EmptyPage[OrderSummary](filter.Page), nil
+	}
+
+	// Count first: an out-of-range page must resolve to the last one, and a page
+	// read past the end comes back empty with nothing to clamp against.
+	total, err := s.repo.queries.CountOrdersAdmin(ctx, ordersql.CountOrdersAdminParams{
+		Status:        filter.Status,
+		TicketTypeIds: ticketTypeIDs,
+	})
+	if err != nil {
+		return httpx.Page[OrderSummary]{}, fmt.Errorf("count orders: %w", err)
+	}
+	page := filter.Page.ClampTo(total)
+	if total == 0 {
+		return httpx.EmptyPage[OrderSummary](filter.Page), nil
 	}
 
 	rows, err := s.repo.queries.ListOrdersAdmin(ctx, ordersql.ListOrdersAdminParams{
 		Status:        filter.Status,
 		TicketTypeIds: ticketTypeIDs,
+		RowLimit:      int32(page.Limit()),
+		RowOffset:     int32(page.Offset()),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list orders: %w", err)
+		return httpx.Page[OrderSummary]{}, fmt.Errorf("list orders: %w", err)
 	}
 
 	out := make([]OrderSummary, 0, len(rows))
@@ -151,38 +188,57 @@ func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) ([]Or
 			CreatedAt:   row.CreatedAt,
 		})
 	}
-	return out, nil
+	return httpx.NewPage(out, page, total), nil
 }
 
-// ListAttendees returns attendees matching the filter, with their ticket type
-// names resolved through the event domain in one batched lookup.
-func (s *AdminService) ListAttendees(ctx context.Context, filter AttendeeFilter) ([]AttendeeSummary, error) {
-	return cache.Through(ctx, s.cache, cache.AttendeesAdminKey(filter.OrderID, filter.EventID),
-		func(ctx context.Context) ([]AttendeeSummary, error) {
+// ListAttendees returns one page of attendees matching the filter, with their
+// ticket type names resolved through the event domain in one batched lookup.
+//
+// Paging makes that lookup strictly cheaper than it was: it now resolves the
+// names on one page rather than on every attendee in the system.
+func (s *AdminService) ListAttendees(ctx context.Context, filter AttendeeFilter) (httpx.Page[AttendeeSummary], error) {
+	filter.Page = filter.Page.Normalize()
+	key := cache.AttendeesAdminKey(filter.OrderID, filter.EventID, paging(filter.Page))
+	return cache.Through(ctx, s.cache, key,
+		func(ctx context.Context) (httpx.Page[AttendeeSummary], error) {
 			return s.listAttendees(ctx, filter)
 		})
 }
 
-func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter) ([]AttendeeSummary, error) {
+func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter) (httpx.Page[AttendeeSummary], error) {
 	ticketTypeIDs, scoped, err := s.ticketTypeScope(ctx, filter.EventID)
 	if err != nil {
-		return nil, err
+		return httpx.Page[AttendeeSummary]{}, err
 	}
 	if scoped && len(ticketTypeIDs) == 0 {
-		return []AttendeeSummary{}, nil
+		return httpx.EmptyPage[AttendeeSummary](filter.Page), nil
+	}
+
+	total, err := s.repo.queries.CountAttendeesAdmin(ctx, ordersql.CountAttendeesAdminParams{
+		OrderID:       toNullUUID(filter.OrderID),
+		TicketTypeIds: ticketTypeIDs,
+	})
+	if err != nil {
+		return httpx.Page[AttendeeSummary]{}, fmt.Errorf("count attendees: %w", err)
+	}
+	page := filter.Page.ClampTo(total)
+	if total == 0 {
+		return httpx.EmptyPage[AttendeeSummary](filter.Page), nil
 	}
 
 	rows, err := s.repo.queries.ListAttendeesAdmin(ctx, ordersql.ListAttendeesAdminParams{
 		OrderID:       toNullUUID(filter.OrderID),
 		TicketTypeIds: ticketTypeIDs,
+		RowLimit:      int32(page.Limit()),
+		RowOffset:     int32(page.Offset()),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list attendees: %w", err)
+		return httpx.Page[AttendeeSummary]{}, fmt.Errorf("list attendees: %w", err)
 	}
 
 	names, err := s.ticketTypeNames(ctx, rows)
 	if err != nil {
-		return nil, err
+		return httpx.Page[AttendeeSummary]{}, err
 	}
 
 	out := make([]AttendeeSummary, 0, len(rows))
@@ -194,7 +250,7 @@ func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter)
 			OrderNumber:    row.OrderNumber,
 		})
 	}
-	return out, nil
+	return httpx.NewPage(out, page, total), nil
 }
 
 // ticketTypeScope translates an optional event filter into the ticket type ids
@@ -242,16 +298,31 @@ func toNullUUID(id *uuid.UUID) uuid.NullUUID {
 // --- Fee master administration (clarified 2026-08-05) -----------------------
 
 // Fees returns every fee master row for the admin panel.
-func (s *AdminService) Fees(ctx context.Context) ([]FeeAdminView, error) {
-	rows, err := s.repo.ListFees(ctx)
+// Fees returns one page of the fee master rows.
+//
+// Deliberately uncached, and it must stay that way: `fees` is not in the cache's
+// closed family registry, and Constitution Principle VII's surface list would
+// need amending before it could be (spec 021 research R5).
+func (s *AdminService) Fees(ctx context.Context, page httpx.PageRequest) (httpx.Page[FeeAdminView], error) {
+	page = page.Normalize()
+	total, err := s.repo.CountFees(ctx)
 	if err != nil {
-		return nil, err
+		return httpx.Page[FeeAdminView]{}, err
+	}
+	if total == 0 {
+		return httpx.EmptyPage[FeeAdminView](page), nil
+	}
+	page = page.ClampTo(total)
+
+	rows, err := s.repo.ListFees(ctx, page)
+	if err != nil {
+		return httpx.Page[FeeAdminView]{}, err
 	}
 	out := make([]FeeAdminView, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, toFeeAdminView(row))
 	}
-	return out, nil
+	return httpx.NewPage(out, page, total), nil
 }
 
 // CreateFee adds a fee master row. It affects only future bookings — existing

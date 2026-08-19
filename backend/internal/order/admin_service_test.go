@@ -108,26 +108,26 @@ func TestAdminListOrdersReturnsTheContractFields(t *testing.T) {
 	ord := testsupport.SeedOrder(t, f.pool, "ORD-ADM1", "PAID")
 	testsupport.SeedOrderItem(t, f.pool, ord.ID, f.reg.ID, 2)
 
-	orders, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
 
 	require.NoError(t, err)
-	require.Len(t, orders, 1)
-	assert.Equal(t, "ORD-ADM1", orders[0].OrderNumber)
-	assert.Equal(t, "PAID", orders[0].Status)
-	assert.Equal(t, "Test Buyer", orders[0].BuyerName)
-	assert.Equal(t, "buyer@example.com", orders[0].BuyerEmail)
-	assert.Equal(t, "250000.00", orders[0].TotalAmount.String())
-	assert.NotNil(t, orders[0].CreatedAt)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "ORD-ADM1", page.Items[0].OrderNumber)
+	assert.Equal(t, "PAID", page.Items[0].Status)
+	assert.Equal(t, "Test Buyer", page.Items[0].BuyerName)
+	assert.Equal(t, "buyer@example.com", page.Items[0].BuyerEmail)
+	assert.Equal(t, "250000.00", page.Items[0].TotalAmount.String())
+	assert.NotNil(t, page.Items[0].CreatedAt)
 }
 
 func TestAdminListOrdersReturnsAnEmptySliceNotNil(t *testing.T) {
 	f := newAdminOrderFixture(t)
 
-	orders, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
 
 	require.NoError(t, err)
-	assert.NotNil(t, orders, "an empty list must serialize as [] not null")
-	assert.Empty(t, orders)
+	assert.NotNil(t, page.Items, "an empty list must serialize as [] not null")
+	assert.Empty(t, page.Items)
 }
 
 func TestAdminListOrdersFiltersByStatus(t *testing.T) {
@@ -137,11 +137,11 @@ func TestAdminListOrdersFiltersByStatus(t *testing.T) {
 	testsupport.SeedOrder(t, f.pool, "ORD-CANC", "CANCELLED")
 
 	paid := "PAID"
-	orders, err := f.svc.ListOrders(context.Background(), order.OrderFilter{Status: &paid})
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{Status: &paid})
 
 	require.NoError(t, err)
-	require.Len(t, orders, 1)
-	assert.Equal(t, "ORD-PAID", orders[0].OrderNumber)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "ORD-PAID", page.Items[0].OrderNumber)
 }
 
 func TestAdminListOrdersFiltersByEvent(t *testing.T) {
@@ -154,11 +154,11 @@ func TestAdminListOrdersFiltersByEvent(t *testing.T) {
 	theirs := testsupport.SeedOrder(t, f.pool, "ORD-THEIRS", "PAID")
 	testsupport.SeedOrderItem(t, f.pool, theirs.ID, otherType.ID, 1)
 
-	orders, err := f.svc.ListOrders(context.Background(), order.OrderFilter{EventID: &f.event.ID})
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{EventID: &f.event.ID})
 
 	require.NoError(t, err)
-	require.Len(t, orders, 1)
-	assert.Equal(t, "ORD-MINE", orders[0].OrderNumber)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "ORD-MINE", page.Items[0].OrderNumber)
 }
 
 func TestAdminListOrdersCombinesFilters(t *testing.T) {
@@ -171,12 +171,12 @@ func TestAdminListOrdersCombinesFilters(t *testing.T) {
 	testsupport.SeedOrderItem(t, f.pool, pendingOrder.ID, f.reg.ID, 1)
 
 	paid := "PAID"
-	orders, err := f.svc.ListOrders(context.Background(),
+	page, err := f.svc.ListOrders(context.Background(),
 		order.OrderFilter{Status: &paid, EventID: &f.event.ID})
 
 	require.NoError(t, err)
-	require.Len(t, orders, 1)
-	assert.Equal(t, "ORD-CP", orders[0].OrderNumber)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "ORD-CP", page.Items[0].OrderNumber)
 }
 
 func TestAdminListOrdersForAnEventWithNoTicketTypesReturnsNothing(t *testing.T) {
@@ -185,10 +185,10 @@ func TestAdminListOrdersForAnEventWithNoTicketTypesReturnsNothing(t *testing.T) 
 	ord := testsupport.SeedOrder(t, f.pool, "ORD-X", "PAID")
 	testsupport.SeedOrderItem(t, f.pool, ord.ID, f.reg.ID, 1)
 
-	orders, err := f.svc.ListOrders(context.Background(), order.OrderFilter{EventID: &empty.ID})
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{EventID: &empty.ID})
 
 	require.NoError(t, err)
-	assert.Empty(t, orders)
+	assert.Empty(t, page.Items)
 }
 
 // --- Attendees ------------------------------------------------------------
@@ -199,13 +199,13 @@ func TestAdminListAttendeesResolvesTheTicketTypeName(t *testing.T) {
 	testsupport.SeedAttendee(t, f.pool, ord.ID, f.reg.ID, "Andi", "andi@example.com")
 	testsupport.SeedAttendee(t, f.pool, ord.ID, f.vip.ID, "Sari", "sari@example.com")
 
-	attendees, err := f.svc.ListAttendees(context.Background(), order.AttendeeFilter{})
+	page, err := f.svc.ListAttendees(context.Background(), order.AttendeeFilter{})
 
 	require.NoError(t, err)
-	require.Len(t, attendees, 2)
+	require.Len(t, page.Items, 2)
 
 	byName := map[string]order.AttendeeSummary{}
-	for _, a := range attendees {
+	for _, a := range page.Items {
 		byName[a.Name] = a
 	}
 
@@ -222,12 +222,12 @@ func TestAdminListAttendeesFiltersByOrder(t *testing.T) {
 	testsupport.SeedAttendee(t, f.pool, first.ID, f.reg.ID, "Andi", "andi@example.com")
 	testsupport.SeedAttendee(t, f.pool, second.ID, f.reg.ID, "Sari", "sari@example.com")
 
-	attendees, err := f.svc.ListAttendees(context.Background(),
+	page, err := f.svc.ListAttendees(context.Background(),
 		order.AttendeeFilter{OrderID: &first.ID})
 
 	require.NoError(t, err)
-	require.Len(t, attendees, 1)
-	assert.Equal(t, "Andi", attendees[0].Name)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "Andi", page.Items[0].Name)
 }
 
 func TestAdminListAttendeesFiltersByEvent(t *testing.T) {
@@ -238,20 +238,20 @@ func TestAdminListAttendeesFiltersByEvent(t *testing.T) {
 	testsupport.SeedAttendee(t, f.pool, ord.ID, f.reg.ID, "Mine", "mine@example.com")
 	testsupport.SeedAttendee(t, f.pool, ord.ID, otherType.ID, "Theirs", "theirs@example.com")
 
-	attendees, err := f.svc.ListAttendees(context.Background(),
+	page, err := f.svc.ListAttendees(context.Background(),
 		order.AttendeeFilter{EventID: &f.event.ID})
 
 	require.NoError(t, err)
-	require.Len(t, attendees, 1)
-	assert.Equal(t, "Mine", attendees[0].Name)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "Mine", page.Items[0].Name)
 }
 
 func TestAdminListAttendeesReturnsAnEmptySliceNotNil(t *testing.T) {
 	f := newAdminOrderFixture(t)
 
-	attendees, err := f.svc.ListAttendees(context.Background(), order.AttendeeFilter{})
+	page, err := f.svc.ListAttendees(context.Background(), order.AttendeeFilter{})
 
 	require.NoError(t, err)
-	assert.NotNil(t, attendees)
-	assert.Empty(t, attendees)
+	assert.NotNil(t, page.Items)
+	assert.Empty(t, page.Items)
 }

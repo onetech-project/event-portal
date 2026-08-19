@@ -8,7 +8,7 @@
  * around with brittle CSS paths.
  */
 
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 /** One holder's details. The first form is the buyer (Constitution 3.0.0). */
 export type Holder = {
@@ -333,5 +333,65 @@ export class AdminConsole {
 
   async openEvent(eventId: string): Promise<void> {
     await this.page.goto(`/admin/events/${eventId}`);
+  }
+
+  // --- Pagination (spec 021) -----------------------------------------------
+  //
+  // Every admin list shares one control, so these work on all of them. The
+  // scenarios drive the real buttons rather than the address bar wherever they
+  // can, because what is under test is what an operator can actually do.
+
+  /** The paging control, scoped so a page with one list has one match. */
+  private pagination(): Locator {
+    return this.page.getByRole("navigation", { name: /pagination/i });
+  }
+
+  async goToNextPage(): Promise<void> {
+    await this.pagination().getByRole("button", { name: /next page/i }).click();
+  }
+
+  async goToPreviousPage(): Promise<void> {
+    await this.pagination().getByRole("button", { name: /previous page/i }).click();
+  }
+
+  async goToPage(n: number): Promise<void> {
+    await this.pagination().getByRole("button", { name: `Page ${n}` }).click();
+  }
+
+  async setPageSize(size: number): Promise<void> {
+    await this.pagination().getByLabel(/rows per page/i).click();
+    await this.page.getByRole("option", { name: String(size) }).click();
+  }
+
+  /** Whether a further page exists in that direction, as the controls report it. */
+  async canGoForward(): Promise<boolean> {
+    return this.pagination().getByRole("button", { name: /next page/i }).isEnabled();
+  }
+
+  async canGoBack(): Promise<boolean> {
+    return this.pagination().getByRole("button", { name: /previous page/i }).isEnabled();
+  }
+
+  /** "Page 3 of 7" → { page: 3, totalPages: 7 }. */
+  async currentPage(): Promise<{ page: number; totalPages: number }> {
+    const text = (await this.pagination().getByText(/page \d+ of \d+/i).innerText()).trim();
+    const [, page, totalPages] = /page (\d+) of (\d+)/i.exec(text) ?? [];
+    return { page: Number(page), totalPages: Number(totalPages) };
+  }
+
+  /** The total the list reports for the current filters, from "Showing X–Y of Z". */
+  async reportedTotal(): Promise<number> {
+    const text = await this.pagination().getByText(/showing/i).innerText();
+    const [, total] = /of (\d+)/.exec(text) ?? [];
+    return Number(total);
+  }
+
+  /**
+   * The first cell of every visible row — the identifier a paging walk collects
+   * to prove it saw each record exactly once.
+   */
+  async visibleRowKeys(): Promise<string[]> {
+    const cells = this.page.locator("tbody tr td:first-child");
+    return (await cells.allInnerTexts()).map((t) => t.trim());
   }
 }

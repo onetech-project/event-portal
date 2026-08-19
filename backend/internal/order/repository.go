@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/manjo/ticketing/backend/internal/order/ordersql"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // Sentinel errors this domain reports to its service layer.
@@ -828,8 +829,11 @@ func (r *Repository) ListOrderFeesByOrderID(ctx context.Context, orderID uuid.UU
 }
 
 // ListFees returns every fee master row for the admin panel.
-func (r *Repository) ListFees(ctx context.Context) ([]FeeRow, error) {
-	rows, err := r.queries.ListFees(ctx)
+func (r *Repository) ListFees(ctx context.Context, page httpx.PageRequest) ([]FeeRow, error) {
+	rows, err := r.queries.ListFees(ctx, ordersql.ListFeesParams{
+		RowLimit:  int32(page.Limit()),
+		RowOffset: int32(page.Offset()),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list fees: %w", err)
 	}
@@ -838,6 +842,15 @@ func (r *Repository) ListFees(ctx context.Context) ([]FeeRow, error) {
 		out = append(out, toFeeRow(row.ID, row.Name, row.FeeType, row.Value, row.Position, row.IsActive, row.CreatedAt, row.UpdatedAt))
 	}
 	return out, nil
+}
+
+// CountFees reports how many fee master rows exist, for the paged admin read.
+func (r *Repository) CountFees(ctx context.Context) (int64, error) {
+	total, err := r.queries.CountFees(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count fees: %w", err)
+	}
+	return total, nil
 }
 
 // CreateFee inserts a fee master row. ErrFeeNameTaken on a duplicate name.

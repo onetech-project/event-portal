@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 
 import {
   adminLogin,
+  adminOrdersPage,
+  bookAsAnotherGuest,
   createEvent,
   createSellableEvent,
   createTicketType,
@@ -210,6 +212,66 @@ test.describe("Read cache stays invisible to users", () => {
     expect((await publicTicketTypes(event.slug))[0].quota_remaining).toBe(4);
   });
 
+  /**
+   * Spec 021. Paging multiplies the number of cache entries per list: one per
+   * page per filter combination. The property that keeps that safe is that page
+   * and size join the key's FINGERPRINT and not its scope, so one committed
+   * write still orphans every page with a single generation bump.
+   *
+   * Written against the API rather than the browser because the assertion is
+   * about which entry answers, and the page an entry belongs to is not something
+   * a rendered table reveals.
+   */
+  test("a write invalidates the page it belongs to, not just the first one", async () => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-cache-paged",
+      quota: 20,
+    });
+
+    // Three orders, so two pages at two a page. Paced to the shipped booking
+    // throttle: the allowance is per client and shared by every scenario in the
+    // run, so a bare loop would be refused for what an unrelated one spent.
+    for (let i = 0; i < 3; i++) {
+      await bookPaced(event.id, ticketType.id);
+    }
+
+    // Warm both pages.
+    const firstBefore = await adminOrdersPage(token, {
+      eventId: event.id,
+      page: 1,
+      pageSize: 2,
+    });
+    const secondBefore = await adminOrdersPage(token, {
+      eventId: event.id,
+      page: 2,
+      pageSize: 2,
+    });
+    expect(firstBefore.total).toBe(3);
+    expect(secondBefore.items).toHaveLength(1);
+
+    // A fourth order. It lands on page 2, which is the page a scope-blind
+    // invalidation would leave stale while page 1 looked perfectly fresh.
+    await bookPaced(event.id, ticketType.id);
+
+    const secondAfter = await adminOrdersPage(token, {
+      eventId: event.id,
+      page: 2,
+      pageSize: 2,
+    });
+    expect(secondAfter.total).toBe(4);
+    expect(secondAfter.items).toHaveLength(2);
+
+    // And page 1 agrees about the total, so the two pages cannot disagree about
+    // how big the list is.
+    const firstAfter = await adminOrdersPage(token, {
+      eventId: event.id,
+      page: 1,
+      pageSize: 2,
+    });
+    expect(firstAfter.total).toBe(4);
+    expect(firstAfter.total_pages).toBe(2);
+  });
+
   test("health reports the cache", async () => {
     const reported = await health();
     // With Redis up this is "ok"; the degraded branch is covered by the Go unit
@@ -217,3 +279,21 @@ test.describe("Read cache stays invisible to users", () => {
     expect(["ok", "degraded"]).toContain(reported.status);
   });
 });
+
+/**
+ * Books one order, waiting out the shipped booking throttle rather than
+ * disabling it. Booking refills at 0.33/s (Principle IX) and the bucket is
+ * shared by everything running against this API instance.
+ */
+async function bookPaced(eventId: string, ticketTypeId: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await bookAsAnotherGuest(eventId, ticketTypeId, 1);
+      return;
+    } catch (err) {
+      const throttled = err instanceof Error && err.message.includes("429");
+      if (!throttled || attempt >= 6) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 3_200));
+    }
+  }
+}

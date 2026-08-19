@@ -13,6 +13,7 @@ import (
 	"github.com/manjo/ticketing/backend/internal/order"
 	"github.com/manjo/ticketing/backend/internal/testsupport"
 	"github.com/manjo/ticketing/backend/pkg/cache"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 )
 
 // The admin lists are filtered by status and event, so several cached variants
@@ -59,9 +60,13 @@ func newAdminCacheFixture(t *testing.T) adminCacheFixture {
 	}
 }
 
+// firstPage is the page a bare OrderFilter{} normalises to, and therefore the
+// entry those reads warm.
+var firstPage = cache.Paging{Page: 1, Size: httpx.DefaultPageSize}
+
 func (f adminCacheFixture) orderVariantCached(t *testing.T, status *string, eventID *uuid.UUID) bool {
 	t.Helper()
-	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(status, eventID))
+	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(status, eventID, firstPage))
 	require.NoError(t, err)
 	return ok
 }
@@ -77,7 +82,7 @@ func TestAdminOrderListIsCachedPerFilterCombination(t *testing.T) {
 
 	first, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
-	require.Len(t, first, 1)
+	require.Len(t, first.Items, 1)
 
 	second, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
@@ -107,12 +112,12 @@ func TestAdminOrderFilterVariantsAreCachedSeparately(t *testing.T) {
 
 	all, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
-	require.Len(t, all, 2)
+	require.Len(t, all.Items, 2)
 
 	onlyPaid, err := f.admin.ListOrders(ctx, order.OrderFilter{Status: &statusPaid})
 	require.NoError(t, err)
-	require.Len(t, onlyPaid, 1, "the status filter must not be served the unfiltered entry")
-	require.Equal(t, "ORD-PAID", onlyPaid[0].OrderNumber)
+	require.Len(t, onlyPaid.Items, 1, "the status filter must not be served the unfiltered entry")
+	require.Equal(t, "ORD-PAID", onlyPaid.Items[0].OrderNumber)
 }
 
 // FR-010: one order changing must invalidate EVERY warm variant that could
@@ -163,14 +168,14 @@ func TestOneOrderChangeInvalidatesEveryWarmFilterVariant(t *testing.T) {
 	}
 
 	// Attendee lists share the same scope and go with them.
-	_, ok, err := f.cache.Get(ctx, cache.AttendeesAdminKey(nil, &ev.ID))
+	_, ok, err := f.cache.Get(ctx, cache.AttendeesAdminKey(nil, &ev.ID, firstPage))
 	require.NoError(t, err)
 	require.False(t, ok, "attendee variants share the orders scope")
 
 	// And the next read of the unfiltered variant shows the new order.
 	after, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
-	require.Len(t, after, 1)
+	require.Len(t, after.Items, 1)
 }
 
 // Booking writes attendee slots, so the admin attendee list must refresh
@@ -185,7 +190,7 @@ func TestBookingRefreshesTheAdminAttendeeList(t *testing.T) {
 
 	warm, err := f.admin.ListAttendees(ctx, order.AttendeeFilter{})
 	require.NoError(t, err)
-	require.Empty(t, warm)
+	require.Empty(t, warm.Items)
 
 	_, err = f.orders.Book(ctx, order.BookRequest{
 		EventID: ev.ID,
@@ -195,7 +200,7 @@ func TestBookingRefreshesTheAdminAttendeeList(t *testing.T) {
 
 	after, err := f.admin.ListAttendees(ctx, order.AttendeeFilter{})
 	require.NoError(t, err)
-	require.Len(t, after, 2, "the two new attendee slots must be visible immediately")
+	require.Len(t, after.Items, 2, "the two new attendee slots must be visible immediately")
 }
 
 // An empty result is a legitimate cached value: an event with no orders must not
@@ -206,13 +211,13 @@ func TestEmptyAdminListIsCachedNotRepeatedlyQueried(t *testing.T) {
 
 	first, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
-	require.Empty(t, first)
+	require.Empty(t, first.Items)
 
 	require.True(t, f.orderVariantCached(t, nil, nil),
 		"an empty list is a value worth caching, not a miss to repeat")
 
 	second, err := f.admin.ListOrders(ctx, order.OrderFilter{})
 	require.NoError(t, err)
-	require.Empty(t, second)
-	require.NotNil(t, second, "an empty list must not come back as null")
+	require.Empty(t, second.Items)
+	require.NotNil(t, second.Items, "an empty list must not come back as null")
 }

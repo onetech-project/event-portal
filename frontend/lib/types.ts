@@ -513,3 +513,45 @@ export type GuidelineBlock = {
   icon: string | null;
   position: number;
 };
+
+// --- Pagination (spec 021) --------------------------------------------------
+
+/**
+ * One page of an admin list, as returned inside the standard envelope's `data`.
+ *
+ * `page` and `page_size` are what the server actually served, not what was
+ * asked for: an out-of-range page is corrected to the last one rather than
+ * refused, so a caller that echoes its own request would display a position the
+ * rows do not come from.
+ */
+export type Page<T> = {
+  items: T[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+};
+
+/** Page sizes the admin console offers. The server caps at the largest of these. */
+export const PAGE_SIZES = [20, 50, 100] as const;
+
+/** Applied when no page size has been chosen. */
+export const DEFAULT_PAGE_SIZE = 20;
+
+/** Paging state a list page holds, and sends on every list request. */
+export type ListParams = {
+  page: number;
+  pageSize: number;
+};
+
+/**
+ * An event reduced to what a filter dropdown needs.
+ *
+ * Deliberately its own read rather than a projection of the paginated admin
+ * event list: a filter that could only name the first page of events would be a
+ * filter that quietly lies (spec 021 research R6).
+ */
+export type EventOption = {
+  id: string;
+  name: string;
+};

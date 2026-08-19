@@ -12,21 +12,55 @@ import (
 	"github.com/manjo/ticketing/backend/pkg/apperr"
 	"github.com/manjo/ticketing/backend/pkg/cache"
 	"github.com/manjo/ticketing/backend/pkg/db"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 	"github.com/manjo/ticketing/backend/pkg/money"
 	"github.com/manjo/ticketing/backend/pkg/sanitize"
 )
 
 // --- Events ---------------------------------------------------------------
 
-// ListEvents returns every event, in any status, for the admin dashboard.
+// ListEvents returns one page of events, in any status, for the admin dashboard.
 //
 // Shares the events scope with the guest catalogue: the same writes invalidate
-// both, so the admin table can never lag behind an edit the admin just made.
-func (s *Service) ListEvents(ctx context.Context) ([]EventAdminView, error) {
-	return cache.Through(ctx, s.cache, cache.EventsAdminKey(),
-		func(ctx context.Context) ([]EventAdminView, error) {
-			return s.repo.ListEvents(ctx)
+// both — and every page of both — so the admin table can never lag behind an edit
+// the admin just made.
+func (s *Service) ListEvents(ctx context.Context, page httpx.PageRequest) (httpx.Page[EventAdminView], error) {
+	page = page.Normalize()
+	key := cache.EventsAdminKey(cache.Paging{Page: page.Page, Size: page.Size})
+	return cache.Through(ctx, s.cache, key,
+		func(ctx context.Context) (httpx.Page[EventAdminView], error) {
+			return s.listEvents(ctx, page)
 		})
+}
+
+func (s *Service) listEvents(ctx context.Context, page httpx.PageRequest) (httpx.Page[EventAdminView], error) {
+	// Count first: clamping an out-of-range page to the last one needs the total,
+	// and a page read past the end comes back empty with nothing to clamp against.
+	total, err := s.repo.CountEvents(ctx)
+	if err != nil {
+		return httpx.Page[EventAdminView]{}, err
+	}
+	if total == 0 {
+		return httpx.EmptyPage[EventAdminView](page), nil
+	}
+	page = page.ClampTo(total)
+
+	rows, err := s.repo.ListEvents(ctx, page)
+	if err != nil {
+		return httpx.Page[EventAdminView]{}, err
+	}
+	return httpx.NewPage(rows, page, total), nil
+}
+
+// ListEventOptions returns every event as an id/name pair, for the filter
+// dropdowns on the admin order and attendee lists.
+//
+// Deliberately uncached. It is two columns over a table that is small by
+// construction, and leaving it out of the cache settles any question about
+// whether a selector projection sits inside Constitution Principle VII's closed
+// surface list — it simply is not cached at all (spec 021 research R6).
+func (s *Service) ListEventOptions(ctx context.Context) ([]EventOption, error) {
+	return s.repo.ListEventOptions(ctx)
 }
 
 // GetEventDetail returns one event with its ticket types and their derived sold

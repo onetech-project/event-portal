@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -46,6 +47,36 @@ var Families = []Family{
 	FamilyPackagesByEvent,
 }
 
+// --- Paging -----------------------------------------------------------------
+
+// Paging is the slice of a list an entry holds. It joins the key's FINGERPRINT
+// and deliberately touches neither Family nor Scope:
+//
+//   - not Family, because Family is the Prometheus label and a page number there
+//     would make the label set unbounded;
+//   - not Scope, because a write must be able to orphan every page of every
+//     filter variant with one INCR, without knowing which pages were ever warm.
+//
+// That placement is also what keeps paging inside Constitution Principle VII's
+// closed surface list: a page is a filtered variant of a list already on it, not
+// a new surface (spec 021 research R5).
+type Paging struct {
+	Page int
+	Size int
+}
+
+// fingerprint renders the page in the same fixed-order, builder-based style as
+// every other fingerprint component, so the same request always produces the
+// same key and two different requests never collide.
+func (p Paging) fingerprint() string {
+	var b strings.Builder
+	b.WriteString("p=")
+	b.WriteString(strconv.Itoa(p.Page))
+	b.WriteString(":n=")
+	b.WriteString(strconv.Itoa(p.Size))
+	return b.String()
+}
+
 // --- Key constructors -------------------------------------------------------
 //
 // One per surface. Fingerprints are rendered in a FIXED order — never from map
@@ -57,9 +88,9 @@ func EventsPublicKey() Key {
 	return Key{Family: FamilyEventsPublic, Scope: Events()}
 }
 
-// EventsAdminKey is the admin event table. No parameters.
-func EventsAdminKey() Key {
-	return Key{Family: FamilyEventsAdmin, Scope: Events()}
+// EventsAdminKey is one page of the admin event table.
+func EventsAdminKey(pg Paging) Key {
+	return Key{Family: FamilyEventsAdmin, Scope: Events(), Fingerprint: pg.fingerprint()}
 }
 
 // TicketTypesPublicKey is one event's guest-facing ticket list.
@@ -87,25 +118,32 @@ func PackagesByEventKey(eventID uuid.UUID) Key {
 	return Key{Family: FamilyPackagesByEvent, Scope: Event(eventID)}
 }
 
-// OrdersAdminKey is one filter combination of the admin order list. Every
-// variant shares the orders scope, so a single order change invalidates all of
-// them with one INCR — which is the whole reason the generation counter exists.
-func OrdersAdminKey(status *string, eventID *uuid.UUID) Key {
+// OrdersAdminKey is one page of one filter combination of the admin order list.
+// Every variant shares the orders scope, so a single order change invalidates all
+// of them with one INCR — which is the whole reason the generation counter
+// exists, and what lets paging multiply the entry count without multiplying the
+// invalidation work.
+func OrdersAdminKey(status *string, eventID *uuid.UUID, pg Paging) Key {
 	var b strings.Builder
 	b.WriteString("st=")
 	b.WriteString(optString(status))
 	b.WriteString(":ev=")
 	b.WriteString(optUUID(eventID))
+	b.WriteString(":")
+	b.WriteString(pg.fingerprint())
 	return Key{Family: FamilyOrdersAdmin, Scope: Orders(), Fingerprint: b.String()}
 }
 
-// AttendeesAdminKey is one filter combination of the admin attendee list.
-func AttendeesAdminKey(orderID, eventID *uuid.UUID) Key {
+// AttendeesAdminKey is one page of one filter combination of the admin attendee
+// list.
+func AttendeesAdminKey(orderID, eventID *uuid.UUID, pg Paging) Key {
 	var b strings.Builder
 	b.WriteString("or=")
 	b.WriteString(optUUID(orderID))
 	b.WriteString(":ev=")
 	b.WriteString(optUUID(eventID))
+	b.WriteString(":")
+	b.WriteString(pg.fingerprint())
 	return Key{Family: FamilyAttendeesAdmin, Scope: Orders(), Fingerprint: b.String()}
 }
 

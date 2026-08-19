@@ -203,6 +203,32 @@ GROUP BY package_id;
 
 -- Admin read-only views ----------------------------------------------------
 
+-- Spec 021: the admin lists are paginated. Each list read is a PAIR — a count
+-- and a page — and the pair MUST share one WHERE clause verbatim. The count runs
+-- first because clamping an out-of-range page to the last one needs the total
+-- before the slice is taken, and a page read past the end comes back empty with
+-- nothing to clamp against (spec 021 research R3).
+--
+-- Every ORDER BY here ends in a primary key. That is not decoration: without a
+-- total order, PostgreSQL may return rows tied on the leading key in different
+-- relative orders for two different OFFSETs, which shows an operator a duplicate
+-- on page 2 while hiding a different record entirely (spec 021 research R4).
+
+-- name: CountOrdersAdmin :one
+-- Pairs with ListOrdersAdmin below. Keep the two WHERE clauses identical.
+SELECT count(*)
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE (sqlc.narg(status)::text IS NULL OR os.name = sqlc.narg(status)::text)
+  AND (
+        sqlc.narg(ticket_type_ids)::uuid[] IS NULL
+        OR EXISTS (
+            SELECT 1 FROM order_items oi
+            WHERE oi.order_id = o.id
+              AND oi.ticket_type_id = ANY(sqlc.narg(ticket_type_ids)::uuid[])
+        )
+      );
+
 -- name: ListOrdersAdmin :many
 -- The `status` filter parameter is still the NAME the admin UI sends; it is
 -- matched against the joined master row rather than a column on orders.
@@ -220,9 +246,24 @@ WHERE (sqlc.narg(status)::text IS NULL OR os.name = sqlc.narg(status)::text)
               AND oi.ticket_type_id = ANY(sqlc.narg(ticket_type_ids)::uuid[])
         )
       )
-ORDER BY o.created_at DESC;
+ORDER BY o.created_at DESC, o.id DESC
+LIMIT sqlc.arg(row_limit)::int OFFSET sqlc.arg(row_offset)::int;
+
+-- name: CountAttendeesAdmin :one
+-- Pairs with ListAttendeesAdmin below. Keep the two WHERE clauses identical.
+SELECT count(*)
+FROM attendees a
+JOIN orders o ON o.id = a.order_id
+WHERE (sqlc.narg(order_id)::uuid IS NULL OR a.order_id = sqlc.narg(order_id)::uuid)
+  AND (
+        sqlc.narg(ticket_type_ids)::uuid[] IS NULL
+        OR a.ticket_type_id = ANY(sqlc.narg(ticket_type_ids)::uuid[])
+      );
 
 -- name: ListAttendeesAdmin :many
+-- a.id breaks the tie that `created_at, name` leaves open constantly: one
+-- order's attendees all share created_at, and two people with the same name in
+-- one order is ordinary rather than exotic.
 SELECT a.id, a.order_id, a.ticket_type_id, a.name, a.email, o.order_number
 FROM attendees a
 JOIN orders o ON o.id = a.order_id
@@ -231,7 +272,8 @@ WHERE (sqlc.narg(order_id)::uuid IS NULL OR a.order_id = sqlc.narg(order_id)::uu
         sqlc.narg(ticket_type_ids)::uuid[] IS NULL
         OR a.ticket_type_id = ANY(sqlc.narg(ticket_type_ids)::uuid[])
       )
-ORDER BY o.created_at DESC, a.name ASC;
+ORDER BY o.created_at DESC, a.name ASC, a.id ASC
+LIMIT sqlc.arg(row_limit)::int OFFSET sqlc.arg(row_offset)::int;
 
 -- Spec 008: two-phase booking ------------------------------------------------
 
@@ -355,11 +397,17 @@ FROM fees
 WHERE is_active
 ORDER BY position, name;
 
+-- name: CountFees :one
+-- Pairs with ListFees below.
+SELECT count(*) FROM fees;
+
 -- name: ListFees :many
--- Admin read: every fee, active or not.
+-- Admin read: every fee, active or not. `id` last for the same total-ordering
+-- reason as the lists above — two fees may share a position and a name.
 SELECT id, name, fee_type, value, position, is_active, created_at, updated_at
 FROM fees
-ORDER BY position, name;
+ORDER BY position, name, id
+LIMIT sqlc.arg(row_limit)::int OFFSET sqlc.arg(row_offset)::int;
 
 -- name: CreateFee :one
 INSERT INTO fees (name, fee_type, value, position, is_active)

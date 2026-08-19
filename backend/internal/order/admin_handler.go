@@ -37,7 +37,7 @@ func (h *AdminHandler) RegisterAdminRoutes(g *echo.Group) {
 }
 
 func (h *AdminHandler) listFees(c echo.Context) error {
-	fees, err := h.svc.Fees(c.Request().Context())
+	fees, err := h.svc.Fees(c.Request().Context(), httpx.BindPage(c))
 	if err != nil {
 		return err
 	}
@@ -99,6 +99,10 @@ func (h *AdminHandler) listOrders(c echo.Context) error {
 		return err
 	}
 	filter.EventID = eventID
+	// Paging is corrected rather than refused, unlike the filters above: a bad
+	// status names something that does not exist, while a bad page names a
+	// position that drifted (spec 021 research R8).
+	filter.Page = httpx.BindPage(c)
 
 	orders, err := h.svc.ListOrders(c.Request().Context(), filter)
 	if err != nil {
@@ -118,7 +122,7 @@ func (h *AdminHandler) listAttendees(c echo.Context) error {
 	}
 
 	attendees, err := h.svc.ListAttendees(c.Request().Context(),
-		AttendeeFilter{OrderID: orderID, EventID: eventID})
+		AttendeeFilter{OrderID: orderID, EventID: eventID, Page: httpx.BindPage(c)})
 	if err != nil {
 		return err
 	}

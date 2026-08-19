@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect } from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
@@ -20,19 +20,32 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useAdminAttendees, useAdminEvents } from "@/lib/queries";
+import { Pagination } from "@/components/ui/pagination";
+import { useAdminAttendees, useAdminEventOptions } from "@/lib/queries";
+import { useListParams } from "@/lib/use-list-params";
 
 const ALL = "__all__";
 
 export default function AdminAttendeesPage() {
-  const [eventId, setEventId] = useState(ALL);
+  // Page, size and the event filter all live in the URL, so a shared address
+  // reopens this exact view rather than page N of some other result set.
+  const list = useListParams();
+  const eventId = list.filters.event_id ?? ALL;
 
-  const { data: events } = useAdminEvents();
+  const { data: events } = useAdminEventOptions();
   const {
     data: attendees,
     isPending,
     error,
-  } = useAdminAttendees(undefined, eventId === ALL ? undefined : eventId);
+  } = useAdminAttendees(undefined, eventId === ALL ? undefined : eventId, list.params);
+
+  // Adopt the page the server actually served, so an out-of-range bookmark
+  // corrects itself instead of displaying a position the rows did not come from.
+  const servedPage = attendees?.page;
+  const { syncServedPage } = list;
+  useEffect(() => {
+    if (servedPage !== undefined) syncServedPage(servedPage);
+  }, [servedPage, syncServedPage]);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -46,7 +59,9 @@ export default function AdminAttendeesPage() {
           <Field label="Event">
             <Select
               value={eventId}
-              onValueChange={(value) => setEventId(value ?? ALL)}
+              onValueChange={(value) =>
+                list.setFilter("event_id", !value || value === ALL ? undefined : value)
+              }
             >
               <SelectTrigger aria-label="Event">
                 <SelectValue />
@@ -66,9 +81,9 @@ export default function AdminAttendeesPage() {
 
       {isPending ? <Loading /> : null}
       {error ? <StatusAlert>{error.message}</StatusAlert> : null}
-      {attendees?.length === 0 ? <EmptyState>No attendees match.</EmptyState> : null}
+      {attendees?.items.length === 0 ? <EmptyState>No attendees match.</EmptyState> : null}
 
-      {attendees && attendees.length > 0 ? (
+      {attendees && attendees.items.length > 0 ? (
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
@@ -80,7 +95,7 @@ export default function AdminAttendeesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {attendees.map((attendee) => (
+              {attendees.items.map((attendee) => (
                 <TableRow key={`${attendee.order_number}-${attendee.email}-${attendee.name}`}>
                   <TableCell>{attendee.name}</TableCell>
                   <TableCell className="text-muted-foreground">{attendee.email}</TableCell>
@@ -93,6 +108,17 @@ export default function AdminAttendeesPage() {
             </TableBody>
           </Table>
         </div>
+      ) : null}
+
+      {attendees ? (
+        <Pagination
+          page={attendees.page}
+          pageSize={attendees.page_size}
+          total={attendees.total}
+          totalPages={attendees.total_pages}
+          onPageChange={list.setPage}
+          onPageSizeChange={list.setPageSize}
+        />
       ) : null}
     </main>
   );

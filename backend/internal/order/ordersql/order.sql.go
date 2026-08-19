@@ -14,6 +14,83 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const countAttendeesAdmin = `-- name: CountAttendeesAdmin :one
+SELECT count(*)
+FROM attendees a
+JOIN orders o ON o.id = a.order_id
+WHERE ($1::uuid IS NULL OR a.order_id = $1::uuid)
+  AND (
+        $2::uuid[] IS NULL
+        OR a.ticket_type_id = ANY($2::uuid[])
+      )
+`
+
+type CountAttendeesAdminParams struct {
+	OrderID       uuid.NullUUID
+	TicketTypeIds []uuid.UUID
+}
+
+// Pairs with ListAttendeesAdmin below. Keep the two WHERE clauses identical.
+func (q *Queries) CountAttendeesAdmin(ctx context.Context, arg CountAttendeesAdminParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countAttendeesAdmin, arg.OrderID, arg.TicketTypeIds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countFees = `-- name: CountFees :one
+SELECT count(*) FROM fees
+`
+
+// Pairs with ListFees below.
+func (q *Queries) CountFees(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countFees)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countOrdersAdmin = `-- name: CountOrdersAdmin :one
+
+
+SELECT count(*)
+FROM orders o
+JOIN order_statuses os ON os.id = o.status_id
+WHERE ($1::text IS NULL OR os.name = $1::text)
+  AND (
+        $2::uuid[] IS NULL
+        OR EXISTS (
+            SELECT 1 FROM order_items oi
+            WHERE oi.order_id = o.id
+              AND oi.ticket_type_id = ANY($2::uuid[])
+        )
+      )
+`
+
+type CountOrdersAdminParams struct {
+	Status        *string
+	TicketTypeIds []uuid.UUID
+}
+
+// Admin read-only views ----------------------------------------------------
+// Spec 021: the admin lists are paginated. Each list read is a PAIR — a count
+// and a page — and the pair MUST share one WHERE clause verbatim. The count runs
+// first because clamping an out-of-range page to the last one needs the total
+// before the slice is taken, and a page read past the end comes back empty with
+// nothing to clamp against (spec 021 research R3).
+//
+// Every ORDER BY here ends in a primary key. That is not decoration: without a
+// total order, PostgreSQL may return rows tied on the leading key in different
+// relative orders for two different OFFSETs, which shows an operator a duplicate
+// on page 2 while hiding a different record entirely (spec 021 research R4).
+// Pairs with ListOrdersAdmin below. Keep the two WHERE clauses identical.
+func (q *Queries) CountOrdersAdmin(ctx context.Context, arg CountOrdersAdminParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrdersAdmin, arg.Status, arg.TicketTypeIds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAttendeeSlot = `-- name: CreateAttendeeSlot :one
 INSERT INTO attendees (order_id, ticket_type_id, package_id, package_unit)
 VALUES ($1, $2, $3, $4)
@@ -683,12 +760,15 @@ WHERE ($1::uuid IS NULL OR a.order_id = $1::uuid)
         $2::uuid[] IS NULL
         OR a.ticket_type_id = ANY($2::uuid[])
       )
-ORDER BY o.created_at DESC, a.name ASC
+ORDER BY o.created_at DESC, a.name ASC, a.id ASC
+LIMIT $4::int OFFSET $3::int
 `
 
 type ListAttendeesAdminParams struct {
 	OrderID       uuid.NullUUID
 	TicketTypeIds []uuid.UUID
+	RowOffset     int32
+	RowLimit      int32
 }
 
 type ListAttendeesAdminRow struct {
@@ -700,8 +780,16 @@ type ListAttendeesAdminRow struct {
 	OrderNumber  string
 }
 
+// a.id breaks the tie that `created_at, name` leaves open constantly: one
+// order's attendees all share created_at, and two people with the same name in
+// one order is ordinary rather than exotic.
 func (q *Queries) ListAttendeesAdmin(ctx context.Context, arg ListAttendeesAdminParams) ([]ListAttendeesAdminRow, error) {
-	rows, err := q.db.Query(ctx, listAttendeesAdmin, arg.OrderID, arg.TicketTypeIds)
+	rows, err := q.db.Query(ctx, listAttendeesAdmin,
+		arg.OrderID,
+		arg.TicketTypeIds,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -773,12 +861,19 @@ func (q *Queries) ListAttendeesByOrderID(ctx context.Context, orderID uuid.UUID)
 const listFees = `-- name: ListFees :many
 SELECT id, name, fee_type, value, position, is_active, created_at, updated_at
 FROM fees
-ORDER BY position, name
+ORDER BY position, name, id
+LIMIT $2::int OFFSET $1::int
 `
 
-// Admin read: every fee, active or not.
-func (q *Queries) ListFees(ctx context.Context) ([]Fee, error) {
-	rows, err := q.db.Query(ctx, listFees)
+type ListFeesParams struct {
+	RowOffset int32
+	RowLimit  int32
+}
+
+// Admin read: every fee, active or not. `id` last for the same total-ordering
+// reason as the lists above — two fees may share a position and a name.
+func (q *Queries) ListFees(ctx context.Context, arg ListFeesParams) ([]Fee, error) {
+	rows, err := q.db.Query(ctx, listFees, arg.RowOffset, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -888,7 +983,6 @@ func (q *Queries) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID
 }
 
 const listOrdersAdmin = `-- name: ListOrdersAdmin :many
-
 SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
        os.name AS status,
        o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at
@@ -903,12 +997,15 @@ WHERE ($1::text IS NULL OR os.name = $1::text)
               AND oi.ticket_type_id = ANY($2::uuid[])
         )
       )
-ORDER BY o.created_at DESC
+ORDER BY o.created_at DESC, o.id DESC
+LIMIT $4::int OFFSET $3::int
 `
 
 type ListOrdersAdminParams struct {
 	Status        *string
 	TicketTypeIds []uuid.UUID
+	RowOffset     int32
+	RowLimit      int32
 }
 
 type ListOrdersAdminRow struct {
@@ -926,11 +1023,15 @@ type ListOrdersAdminRow struct {
 	UpdatedAt       *time.Time
 }
 
-// Admin read-only views ----------------------------------------------------
 // The `status` filter parameter is still the NAME the admin UI sends; it is
 // matched against the joined master row rather than a column on orders.
 func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams) ([]ListOrdersAdminRow, error) {
-	rows, err := q.db.Query(ctx, listOrdersAdmin, arg.Status, arg.TicketTypeIds)
+	rows, err := q.db.Query(ctx, listOrdersAdmin,
+		arg.Status,
+		arg.TicketTypeIds,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

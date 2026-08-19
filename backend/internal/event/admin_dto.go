@@ -310,3 +310,16 @@ type PackageAvailabilityComponent struct {
 	QuantityPerUnit int32  `json:"quantity_per_unit"`
 	UnitsSupported  int32  `json:"units_supported"`
 }
+
+// EventOption is an event reduced to what a filter dropdown needs
+// (GET /api/v1/admin/events/options).
+//
+// It exists because the admin event list is paginated (spec 021). The order and
+// attendee lists filter by event, and a dropdown fed from one page of that list
+// would silently offer only the first twenty events — a filter that cannot name
+// what an operator is looking for, with no error to notice. Two columns keep
+// this read cheap enough to stay unpaginated.
+type EventOption struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}

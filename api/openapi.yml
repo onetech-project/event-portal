@@ -745,10 +745,18 @@ paths:
       summary: List events
       operationId: adminListEvents
       security: [{ adminAuth: [] }]
-      description: Every event regardless of status, unlike the public list.
+      description: |
+        Every event regardless of status, unlike the public list — one page at a time.
+
+        This is the operator's browsing table. It is NOT the read a filter dropdown should use:
+        one page of it would name only the first events and silently hide the rest. Use
+        `GET /api/v1/admin/events/options` for selectors.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
-          description: All events.
+          description: One page of events, newest start date first.
           content:
             application/json:
               schema:
@@ -757,9 +765,15 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/EventAdminView'
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            required: [items]
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/EventAdminView'
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -799,6 +813,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/v1/admin/events/options:
+    get:
+      tags: [Admin - Events]
+      summary: Every event as an id/name pair, for filter selectors
+      operationId: adminListEventOptions
+      security: [{ adminAuth: [] }]
+      description: |
+        The full catalogue in selector form, ordered by name. Deliberately **not** paginated: the
+        order and attendee lists filter by event, and a dropdown fed from one page of
+        `GET /api/v1/admin/events` would offer only the first events with nothing to indicate the
+        rest existed. Two columns is what keeps staying unpaginated cheap.
+
+        Route order matters in the implementation: this must be registered before
+        `/api/v1/admin/events/{id}`, or `options` is parsed as an event UUID.
+      responses:
+        '200':
+          description: Every event, as id and name.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/EventOption'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /api/v1/admin/events/{id}:
     parameters:
@@ -1575,7 +1620,14 @@ paths:
       summary: List orders
       operationId: adminListOrders
       security: [{ adminAuth: [] }]
-      description: Both filters are optional and combine.
+      description: |
+        Both filters are optional and combine, and both are applied BEFORE paging — so `total`
+        counts what the filter matches, not what the table holds.
+
+        Note the deliberate asymmetry with the paging parameters: a malformed `status` or
+        `event_id` is a 400, because the caller named something that does not exist, while a
+        malformed or out-of-range `page` is corrected, because the caller named a position that
+        drifted.
       parameters:
         - name: status
           in: query
@@ -1586,12 +1638,17 @@ paths:
         - name: event_id
           in: query
           required: false
+          description: |
+            Resolved to the event's ticket types before matching. An event with no ticket types
+            yields `total: 0`, not an unfiltered count.
           schema:
             type: string
             format: uuid
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
-          description: Matching orders.
+          description: One page of matching orders, newest first.
           content:
             application/json:
               schema:
@@ -1600,9 +1657,15 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/OrderSummary'
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            required: [items]
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/OrderSummary'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -1614,7 +1677,9 @@ paths:
       summary: List attendees
       operationId: adminListAttendees
       security: [{ adminAuth: [] }]
-      description: Ticket holders with their submitted details. Both filters are optional.
+      description: |
+        Ticket holders with their submitted details. Both filters are optional, and both are
+        applied before paging.
       parameters:
         - name: order_id
           in: query
@@ -1629,9 +1694,11 @@ paths:
           schema:
             type: string
             format: uuid
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
-          description: Matching attendees.
+          description: One page of matching attendees.
           content:
             application/json:
               schema:
@@ -1640,9 +1707,15 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/AttendeeSummary'
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            required: [items]
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/AttendeeSummary'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -1687,9 +1760,13 @@ paths:
       summary: List fees
       operationId: adminListFees
       security: [{ adminAuth: [] }]
+      description: One page of the fee master rows, in display order.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
-          description: All fees.
+          description: One page of fees.
           content:
             application/json:
               schema:
@@ -1698,9 +1775,15 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/FeeAdminView'
+                        allOf:
+                          - $ref: '#/components/schemas/PageMeta'
+                          - type: object
+                            required: [items]
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/FeeAdminView'
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -2043,6 +2126,32 @@ components:
       schema:
         type: string
       example: ORD-20261201-0001
+    Page:
+      name: page
+      in: query
+      required: false
+      description: |
+        1-based page number. Corrected rather than refused: zero, negative, non-numeric and
+        absent all resolve to page 1, and a page past the last resolves to the last page. Read
+        the returned `page` to see which one was actually served — a stale bookmark self-corrects
+        instead of erroring.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      description: |
+        Rows per page. Values above the maximum are reduced to it; values below 1, non-numeric
+        values and absent all take the default. Never refused. The cap is enforced server-side:
+        no request can demand an unbounded page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
     BlockId:
       name: blockId
       in: path
@@ -2112,6 +2221,47 @@ components:
             $ref: '#/components/schemas/Error'
 
   schemas:
+
+    PageMeta:
+      type: object
+      description: |
+        Where a page sits in its list. Carried alongside `items` in `data` on every paginated
+        admin list. `page` and `page_size` are what the server SERVED, which may differ from
+        what was requested — see the `page` parameter.
+      required: [page, page_size, total, total_pages]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          example: 2
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Rows matching the current filters, ignoring paging.
+          example: 137
+        total_pages:
+          type: integer
+          minimum: 0
+          description: Zero when `total` is zero — never "page 1 of 0".
+          example: 7
+
+    EventOption:
+      type: object
+      description: An event reduced to what a filter dropdown needs.
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Jazz Night 2026
 
     Envelope:
       type: object
