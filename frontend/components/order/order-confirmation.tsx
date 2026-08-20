@@ -49,8 +49,14 @@ export function OrderConfirmation({
 
           <Receipt order={order} />
 
+          {/* The label names where it goes. This button led to the site home
+              until the destination moved to the event page; the wording did not
+              follow it, leaving a control that read "Back to home" and did not
+              go there — the mismatch spec 019 FR-004 forbids on the
+              end-of-journey dialog, for the same reason. "Back to the event" is
+              what every other link to this destination reads. */}
           <Button render={<Link href={`/events/${event}`} />} variant="outline" size="lg">
-            Back to home
+            Back to the event
           </Button>
         </CardContent>
       </Card>

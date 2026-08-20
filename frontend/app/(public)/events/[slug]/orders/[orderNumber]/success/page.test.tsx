@@ -189,10 +189,13 @@ describe("confirmation — a paid order", () => {
     expect(await screen.findByText(/email confirmation has been sent/i)).toBeInTheDocument();
 
     // Button renders its anchor with role="button", as elsewhere in the app.
-    expect(screen.getByRole("button", { name: /back to home/i })).toHaveAttribute(
+    // It leads to the event, not the site home, and its label says so — a
+    // control naming a destination it does not have is what this pins.
+    expect(screen.getByRole("button", { name: /back to the event/i })).toHaveAttribute(
       "href",
-      "/",
+      `/events/${PAID.event.slug}`,
     );
+    expect(screen.queryByRole("button", { name: /back to home/i })).not.toBeInTheDocument();
   });
 });
 
