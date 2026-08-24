@@ -149,6 +149,7 @@ exist (documented destructive step).
 | Agreement only while PENDING + unexpired | order.RecordAgreement | 410 `ORDER_EXPIRED` |
 | Checkout refused until agreement recorded | order.Checkout | 409 `TERMS_NOT_RECORDED` |
 | Visitor details: name ≤255, valid email, phone 7–20 digits, dob past date, gender enum; every slot covered | order.Checkout (body carries all forms — Option B) | 400 field errors |
+| A gender no longer active in the master list, on the slot that already carries it (spec 011 FR-031, 2026-08-19) | order.Checkout, after the slots are matched | accepted; refused on any other slot |
 | Checkout only while PENDING + unexpired; idempotent when payment already started | order.Checkout | 409 `PAYMENT_ALREADY_STARTED` / 410 `ORDER_EXPIRED` |
 | QR refresh only while payment started + PENDING + unexpired | payment.ReissueQR | 409 / 410 |
 | WYSIWYG HTML sanitized on write | event service (bluemonday UGC) | silently cleaned |

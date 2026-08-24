@@ -545,6 +545,16 @@ export async function createFee(
   return data;
 }
 
+export type PublicOrderSlot = {
+  id: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  /** Date-only, YYYY-MM-DD. */
+  dob: string | null;
+  gender: string | null;
+};
+
 export type PublicOrder = {
   order_id: string;
   status: string;
@@ -552,6 +562,10 @@ export type PublicOrder = {
   subtotal: string | null;
   fees: Array<{ name: string; amount: string }>;
   payment: { amount: string } | null;
+  /** False until a payment code has actually been stamped (spec 011 FR-030). */
+  payment_started: boolean;
+  /** Holder details as stored; null in every field until checkout saves them. */
+  slots: PublicOrderSlot[];
 };
 
 /**

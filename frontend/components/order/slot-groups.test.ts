@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { groupOrderSlots } from "./slot-groups";
+import { groupOrderSlots, isoToDob } from "./slot-groups";
 import type { TicketOrderSlot } from "@/lib/types";
 
 function slot(overrides: Partial<TicketOrderSlot> & { id: string }): TicketOrderSlot {
@@ -151,5 +151,110 @@ describe("groupOrderSlots", () => {
 
     expect(groups.map((g) => g.slotIds)).toEqual([["s1"], ["b1", "b2"]]);
     expect(groups.map((g) => g.title)).toEqual(["Regular", "2-Day Bundle"]);
+  });
+});
+
+/**
+ * Spec 011 FR-030 (clarified 2026-08-19). The card's starting values travel with
+ * the group, so the form does not have to go back to the raw slot list to find
+ * them — and so a bundle unit, which is many slots and one card, has a single
+ * answer for what its fields hold.
+ */
+describe("groupOrderSlots — the seed each card starts from", () => {
+  const FILLED = {
+    name: "Heather Higgins",
+    email: "heather@example.com",
+    phone: "144650550532",
+    dob: "1990-10-09",
+    gender: "FEMALE",
+  };
+
+  it("carries a standalone slot's stored details onto its own group", () => {
+    const [group] = groupOrderSlots([slot({ id: "s1", ...FILLED })]);
+
+    expect(group.seed).toEqual({
+      name: "Heather Higgins",
+      email: "heather@example.com",
+      phone: "144650550532",
+      dob: "09/10/1990",
+      gender: "FEMALE",
+    });
+  });
+
+  it("renders an unfilled slot as empty strings rather than leaking null into the form", () => {
+    const [group] = groupOrderSlots([slot({ id: "s1" })]);
+
+    // FR-030's last clause: a slot with nothing saved is indistinguishable from
+    // one the guest has not touched, which is what an empty input holds.
+    expect(group.seed).toEqual({ name: "", email: "", phone: "", dob: "", gender: "" });
+  });
+
+  it("seeds a bundle unit's single card from the unit's slots", () => {
+    const [group] = groupOrderSlots([
+      slot({ id: "b1", package_name: "2-Day Bundle", package_id: PKG, package_unit: 1, ...FILLED }),
+      slot({ id: "b2", package_name: "2-Day Bundle", package_id: PKG, package_unit: 1, ...FILLED }),
+    ]);
+
+    // One card for two slots (spec 010), and one answer for what it holds. The
+    // submit-time fan-out writes a unit's slots identically, so they cannot
+    // disagree and no tie-break is specified.
+    expect(group.slotIds).toEqual(["b1", "b2"]);
+    expect(group.seed.name).toBe("Heather Higgins");
+    expect(group.seed.dob).toBe("09/10/1990");
+  });
+
+  it("seeds each purchased unit of the same bundle independently", () => {
+    const groups = groupOrderSlots([
+      slot({ id: "u1", package_name: "2-Day Bundle", package_id: PKG, package_unit: 1, ...FILLED }),
+      slot({
+        id: "u2",
+        package_name: "2-Day Bundle",
+        package_id: PKG,
+        package_unit: 2,
+        ...FILLED,
+        name: "Second Holder",
+      }),
+    ]);
+
+    expect(groups.map((group) => group.seed.name)).toEqual([
+      "Heather Higgins",
+      "Second Holder",
+    ]);
+  });
+
+  it("seeds a pre-010 bundle slot, which still renders one card per slot", () => {
+    const groups = groupOrderSlots([
+      slot({ id: "legacy", package_name: "Old Bundle", package_id: PKG, package_unit: null, ...FILLED }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].packageBadge).toBe("Old Bundle");
+    expect(groups[0].seed.name).toBe("Heather Higgins");
+  });
+});
+
+describe("isoToDob", () => {
+  it("converts the wire's date-only value to the field's format", () => {
+    expect(isoToDob("1990-10-09")).toBe("09/10/1990");
+  });
+
+  it("round-trips a date the form would submit back unchanged", () => {
+    // The pair that matters: a restored date submitted untouched must store the
+    // date it came from. dobToIso is the other half, in visitor-form.tsx.
+    const iso = "2000-01-31";
+    const [day, month, year] = isoToDob(iso).split("/");
+    expect(`${year}-${month}-${day}`).toBe(iso);
+  });
+
+  it("keeps a four-digit year that is not in the recent past", () => {
+    // Real stored data: the reported order carried 1010-10-10.
+    expect(isoToDob("1010-10-10")).toBe("10/10/1010");
+  });
+
+  it("returns empty for null and for anything that is not a plain ISO date", () => {
+    expect(isoToDob(null)).toBe("");
+    expect(isoToDob("")).toBe("");
+    expect(isoToDob("09/10/1990")).toBe("");
+    expect(isoToDob("1990-10-09T00:00:00Z")).toBe("");
   });
 });

@@ -608,3 +608,167 @@ func TestCheckoutOrderRefusesAnExpiredHold(t *testing.T) {
 	assert.Equal(t, 410001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
 	assert.Equal(t, 0, f.gateway.callCount())
 }
+
+// --- T085: restoring saved holder details (spec 011 FR-030, FR-031) ---------
+
+// deactivateGender retires a gender the way the master list is meant to be
+// retired — by clearing its flag, never by deleting a row other records point
+// at. There is no admin API for the gender list (research R22), so this is the
+// only way to reach the state, and it is master data rather than order, ticket
+// or payment state.
+func deactivateGender(t *testing.T, f checkoutFixture, name string) {
+	t.Helper()
+	var was bool
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`UPDATE genders SET is_active = false WHERE name = $1
+		 RETURNING (SELECT g.is_active FROM genders g WHERE g.name = $1)`, name).Scan(&was),
+		"the gender to retire must exist")
+
+	// Master data outlives a test: the fixture truncates orders and their
+	// attendees, but the gender list is seeded by migration and is never reset.
+	// Without this the retirement leaks into every later test, every one of which
+	// then fails validating a gender the list no longer offers — and the leak
+	// outlives the process, so the next run starts broken too.
+	//
+	// Restores what was there rather than asserting "true", so this stays correct
+	// if the seed ever ships an entry that starts retired.
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.Background(),
+			`UPDATE genders SET is_active = $2 WHERE name = $1`, name, was)
+		require.NoError(t, err)
+	})
+}
+
+// checkoutFailingAtGateway runs a checkout whose forms commit and whose gateway
+// leg then fails — the state spec 011 FR-030 exists for. Returns with the
+// gateway restored, so the caller can retry.
+func checkoutFailingAtGateway(t *testing.T, f checkoutFixture, orderNumber string, forms order.CheckoutFormsRequest) {
+	t.Helper()
+	f.gateway.err = errors.New("gateway refused the session")
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
+	require.Error(t, err, "the gateway leg must fail for this arrangement to mean anything")
+	f.gateway.err = nil
+}
+
+// The premise the whole restore rests on: TX-D commits before the gateway is
+// called and a failure compensates nothing, so the details really are saved —
+// which is what the API's own error message tells the guest. If this ever stops
+// being true, the screen has nothing to restore and FR-030 is unimplementable.
+func TestCheckoutOrderKeepsTheFormsWhenTheGatewayFails(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	checkoutFailingAtGateway(t, f, orderNumber, formsFor(slotIDs))
+
+	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", stored.Status, "a failed session open compensates nothing")
+	assert.Nil(t, stored.PaymentQRString, "no code was issued, so payment never started")
+
+	slots, err := f.repo.ListAttendeeSlotsByOrderID(context.Background(), stored.ID)
+	require.NoError(t, err)
+	for _, slot := range slots {
+		require.NotNil(t, slot.Name, "every slot keeps the details the guest typed")
+		require.NotNil(t, slot.Gender)
+	}
+}
+
+// FR-031. The guest never chose the retirement and cannot see that their stored
+// answer is now unofferable; refusing their unchanged form would strand them.
+func TestCheckoutOrderAcceptsARetiredGenderOnTheSlotThatAlreadyHeldIt(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	forms := formsFor(slotIDs)
+	for i := range forms.Attendees {
+		forms.Attendees[i].Gender = "FEMALE"
+	}
+	checkoutFailingAtGateway(t, f, orderNumber, forms)
+
+	deactivateGender(t, f, "FEMALE")
+
+	// The guest returns to a restored form and continues without touching it.
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
+	require.NoError(t, err, "a retired gender its own slot already carried must still be accepted")
+
+	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
+	require.NoError(t, err)
+	slots, err := f.repo.ListAttendeeSlotsByOrderID(context.Background(), stored.ID)
+	require.NoError(t, err)
+	for _, slot := range slots {
+		require.NotNil(t, slot.Gender)
+		// Resolved from the full master list. Against the active-only map this
+		// is where the write went wrong: gender_id came back as the zero value,
+		// an invalid foreign key rather than a refusal.
+		assert.Equal(t, "FEMALE", *slot.Gender)
+	}
+}
+
+// The other half of FR-031: the widening is per slot, not an amnesty. Otherwise
+// a submission could put a retired gender on a fresh slot, undoing the master
+// list's retirement one order at a time.
+func TestCheckoutOrderRefusesARetiredGenderOnASlotThatNeverHeldIt(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	saved := formsFor(slotIDs)
+	for i := range saved.Attendees {
+		saved.Attendees[i].Gender = "MALE"
+	}
+	checkoutFailingAtGateway(t, f, orderNumber, saved)
+
+	deactivateGender(t, f, "FEMALE")
+
+	// The slots hold MALE; FEMALE is retired and was never on them.
+	retried := formsFor(slotIDs)
+	for i := range retried.Attendees {
+		retried.Attendees[i].Gender = "FEMALE"
+	}
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, retried)
+	require.Error(t, err)
+
+	var appErr *apperr.Error
+	require.True(t, errors.As(err, &appErr))
+	assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
+	fields, ok := appErr.Data.(map[string]string)
+	require.True(t, ok, "the refusal carries a field→message map")
+	assert.Equal(t, "Select a valid gender.", fields["attendees[0].gender"],
+		"one rule about one field: the same message the ordinary refusal uses")
+}
+
+// A name that was never in the master list is refused exactly as before —
+// FR-031 widens what a slot may re-submit, not what a gender may be.
+func TestCheckoutOrderStillRefusesAGenderThatIsNotInTheMasterList(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	forms := formsFor(slotIDs)
+	forms.Attendees[0].Gender = "NOT_A_GENDER"
+
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
+	require.Error(t, err)
+
+	var appErr *apperr.Error
+	require.True(t, errors.As(err, &appErr))
+	assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code))
+}
+
+// Error precedence, pinned because FR-031 was implemented in a way that could
+// easily have changed it. Loading the slots before validating would have given
+// the per-slot rule its context in one pass — and would have turned this 400
+// into a 404, an observable change to an endpoint this work has no business
+// touching (research R34).
+func TestCheckoutOrderValidatesTheFormsBeforeLookingTheOrderUp(t *testing.T) {
+	f := newCheckoutFixture(t)
+
+	forms := formsFor([]uuid.UUID{uuid.New()})
+	forms.Attendees[0].Email = "not-an-email"
+
+	_, err := f.svc.CheckoutOrder(context.Background(), "ORD-00000000-NOSUCH", forms)
+	require.Error(t, err)
+
+	var appErr *apperr.Error
+	require.True(t, errors.As(err, &appErr))
+	assert.Equal(t, 400001, apperr.Numeric(appErr.HTTPStatus, appErr.Code),
+		"a malformed payload is refused before the order number is even resolved")
+}

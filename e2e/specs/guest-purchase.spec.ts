@@ -41,6 +41,7 @@ import {
   PaymentStatus,
   deliverNotification,
   expireOrder,
+  failNextGatewaySession,
   settleOrder,
 } from "../support/payment";
 
@@ -794,6 +795,163 @@ test.describe("Guest purchase, end to end", () => {
   // Manjo notifications carry no signature, no digest, and no field that could
   // authenticate them, so the bearer token is the entire mechanism. Presenting
   // the wrong one is the only way in.
+  /**
+   * Spec 011 FR-030 – FR-033 (clarified 2026-08-19). The defect scenario.
+   *
+   * When the gateway leg of checkout fails, the API answers with "Your details
+   * are saved — please try again." It is telling the truth: TX-D commits every
+   * holder's details before CreateTransaction is ever called, and the failure
+   * compensates nothing. The guest was then returned to a screen with every
+   * field blank, which is the promise being broken.
+   *
+   * This is the ONLY arrangement that reaches that state. A successful checkout
+   * cannot stand in for it — `payment_started` flips true and the forms address
+   * forwards to /checkout — and an order nobody has submitted must still show
+   * empty cards, so simply loading the forms proves nothing either. Against
+   * unfixed code the reload assertion below goes red; every other assertion here
+   * passes on both sides, which is exactly why the reload one has to exist.
+   *
+   * Throttle note (constitution v4.2.0, Principle VIII): this is the first
+   * scenario to call POST /ticket/checkout/:order_id twice for one order, and
+   * RATE_LIMIT_CHECKOUT defaults to rate 0.2/s with burst 3. It books its own
+   * event and order so it never shares an allowance with another scenario, and
+   * two of three is inside the burst with the throttle enabled.
+   */
+  test("a payment that fails leaves the holder forms filled on the way back", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-restore-forms",
+      quota: 4,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 2);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    // Two cards, two distinguishable holders: a restore that filled every card
+    // from the same slot would pass a single-holder check.
+    const first: Holder = { ...defaultHolder, name: "Restored Ayu", email: "ayu@example.com" };
+    const second: Holder = {
+      name: "Restored Bagus",
+      email: "bagus@example.com",
+      phone: "081234509876",
+      gender: "Female",
+      dob: "02/03/1990",
+    };
+    await guest.fillHolder(0, first);
+    await guest.fillHolder(1, second);
+
+    // The gateway refuses the next session open. The refusal returns before the
+    // stub records the reference, so the retry further down is not a duplicate.
+    expect(await failNextGatewaySession()).toBe(200);
+
+    const submit = page.getByRole("button", { name: /continue to payment/i });
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    // The API's own words, rendered verbatim by the form.
+    await expect(
+      page.getByText(
+        /We could not start the payment with the provider\. Your details are saved/i,
+      ),
+    ).toBeVisible();
+
+    // Saved, and payment genuinely never started: no compensation ran, so the
+    // order keeps its status and its hold.
+    const afterFailure = await publicOrder(orderNumber);
+    expect(afterFailure.status).toBe("PENDING");
+    expect(afterFailure.payment_started).toBe(false);
+    expect(afterFailure.slots.map((slot) => slot.name).sort()).toEqual([
+      "Restored Ayu",
+      "Restored Bagus",
+    ]);
+    // Still held — a failed open must not release the seats.
+    expect(await quotaOf(ticketType.id)).toBe(2);
+
+    // THE ASSERTION. Reload the forms address and find the work still there.
+    await page.reload();
+    const form = page.locator('form[aria-label="Visitor registration"]');
+    await expect(form).toBeVisible();
+
+    // Paired positives, so a screen that failed to render its cards cannot
+    // satisfy the checks below by having nothing to disagree with.
+    await expect(
+      page.getByText("The invoice and e-ticket will be sent via email"),
+    ).toBeVisible();
+    await expect(form.getByLabel(/full name/i)).toHaveCount(2);
+
+    await expect(form.getByLabel(/full name/i).nth(0)).toHaveValue(first.name);
+    await expect(form.getByLabel(/email address/i).nth(0)).toHaveValue(first.email);
+    await expect(form.getByLabel(/phone number/i).nth(0)).toHaveValue(first.phone);
+    await expect(form.getByPlaceholder("DD/MM/YYYY").nth(0)).toHaveValue(first.dob);
+    await expect(form.getByLabel(/full name/i).nth(1)).toHaveValue(second.name);
+    await expect(form.getByLabel(/email address/i).nth(1)).toHaveValue(second.email);
+    await expect(form.getByPlaceholder("DD/MM/YYYY").nth(1)).toHaveValue(second.dob);
+
+    // Gender is a custom select: the trigger shows the human label, followed by
+    // the chevron glyph — hence a prefix match rather than an exact one. It is
+    // ANCHORED on purpose: "Male" is a substring of "Female", so an unanchored
+    // check would pass on the wrong restored value.
+    await expect(
+      page.getByRole("combobox", { name: "Gender" }).nth(0),
+    ).toHaveText(new RegExp(`^${first.gender}`));
+    await expect(
+      page.getByRole("combobox", { name: "Gender" }).nth(1),
+    ).toHaveText(new RegExp(`^${second.gender}`));
+
+    // FR-033: nothing announces the restore. The delivery chip asserted above
+    // stays the only notice on the forms.
+    await expect(page.getByText(/restored|previously entered/i)).toHaveCount(0);
+
+    // Enabled on arrival (FR-009 unchanged), and it goes through untouched.
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await page.waitForURL(/\/checkout$/, { timeout: 30_000 });
+
+    const afterRetry = await publicOrder(orderNumber);
+    expect(afterRetry.payment_started).toBe(true);
+    expect(afterRetry.slots.map((slot) => slot.name).sort()).toEqual([
+      "Restored Ayu",
+      "Restored Bagus",
+    ]);
+  });
+
+  /**
+   * The other half of FR-030, and the reason the scenario above cannot simply
+   * assert "the fields have values": an order nobody has submitted has nothing
+   * to restore, and must still open with empty cards. Without this pair, a
+   * prefill that fired unconditionally would look correct.
+   */
+  test("an order whose forms were never submitted still opens empty", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-restore-empty",
+      quota: 4,
+    });
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 2);
+    const orderNumber = await guest.agreeToTermsAndBook();
+
+    expect((await publicOrder(orderNumber)).slots.every((slot) => slot.name === null)).toBe(
+      true,
+    );
+
+    await page.reload();
+    const form = page.locator('form[aria-label="Visitor registration"]');
+    await expect(form.getByLabel(/full name/i)).toHaveCount(2);
+    for (const index of [0, 1]) {
+      await expect(form.getByLabel(/full name/i).nth(index)).toHaveValue("");
+      await expect(form.getByLabel(/email address/i).nth(index)).toHaveValue("");
+      await expect(form.getByPlaceholder("DD/MM/YYYY").nth(index)).toHaveValue("");
+    }
+    await expect(
+      page.getByRole("button", { name: /continue to payment/i }),
+    ).toBeDisabled();
+  });
+
   test("a callback with a bad token is rejected and changes nothing", async ({ page }) => {
     const { event, ticketType } = await createSellableEvent(token, {
       slug: "uat-bad-token",

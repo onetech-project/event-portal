@@ -119,7 +119,7 @@ inspection.
 | 2 | Homepage & detail | ✅ `GET /event` grid + content-only detail (API); grid/verify-card/detail UI covered by vitest |
 | 3 | Booking + hold | ✅ `POST /ticket/book` → PENDING, `payment_qr_string` NULL, buyer NULL, `terms_agreed_at` set, hold = BOOKING_HOLD, quota 10→8, 2 empty slots; no-terms event → `409001`; over-quota → `400002` |
 | 4 | Hold expiry | ✅ order → EXPIRED within one sweep; quota 8→10; FR-009 log carries order identity + `restored_quota` `ttID:+2` |
-| 5 | Visitor forms | ✅ revisit shows empty slots (Option B); bad forms → `400001` with per-field map (`attendees[0].dob` …); a lapsed hold during form entry → `410001` |
+| 5 | Visitor forms | ✅ revisit **before any checkout attempt** shows empty slots (Option B); a revisit after one shows the stored details (spec 011 FR-030, 2026-08-19); bad forms → `400001` with per-field map (`attendees[0].dob` …); a lapsed hold during form entry → `410001` |
 | 6 | Payment window + QR | ✅ checkout → QR + 14-min window + `qr_refresh_after_seconds:420`; `qris.png` renders (image/png); `refresh-qr` re-issues `-R1` ref with deadline unchanged; SSE streamed `PENDING` → `PAID` frames; webhook (signed) settled the order |
 | 7 | Email + resend | ✅ exactly one email w/ 1 PDF attachment on settle; `email_sent=t`; valid-signature webhook replay → 200, no second email; tampered signature → `401001`; `POST /ticket/resend-email` `{order_id}` → 202 + second email; immediate repeat → `429001` (per-order bucket); unpaid order → same 202, zero mail |
 | 8 | Concurrency | ✅ two parallel books for the last ticket: one `201`, one `400002`; quota never negative (ends 0) |

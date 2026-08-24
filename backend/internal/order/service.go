@@ -363,19 +363,32 @@ func (s *Service) Genders(ctx context.Context) ([]GenderOption, error) {
 	return out, nil
 }
 
-// activeGenders loads the gender master list as a NAME → id map: Validate
-// checks membership by name (the wire value), and the checkout fill loop
-// resolves the same map into the gender_id it stores (spec 011, FR-018).
-func (s *Service) activeGenders(ctx context.Context) (map[string]int16, error) {
-	records, err := s.repo.ListActiveGenders(ctx)
+// genderMaps loads the gender master list for checkout: every NAME → its id,
+// plus the set of names still offered to new forms.
+//
+// Two maps rather than one because checkout now asks two different questions
+// (spec 011 FR-031, clarified 2026-08-19). "Does this name exist" is a shape
+// check and uses `known`, which includes retired entries — a slot keeps whatever
+// gender it was saved with, so a restored form can legitimately submit one.
+// "May THIS slot use it" is a separate rule applied once the slots are loaded.
+//
+// `known` is also what resolves the stored gender_id (FR-018): the active-only
+// map yields the zero value for a retired name, which writes an invalid foreign
+// key rather than refusing.
+func (s *Service) genderMaps(ctx context.Context) (known map[string]int16, active map[string]struct{}, err error) {
+	records, err := s.repo.ListGenders(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	valid := make(map[string]int16, len(records))
+	known = make(map[string]int16, len(records))
+	active = make(map[string]struct{}, len(records))
 	for _, r := range records {
-		valid[r.Name] = r.ID
+		known[r.Name] = r.ID
+		if r.IsActive {
+			active[r.Name] = struct{}{}
+		}
 	}
-	return valid, nil
+	return known, active, nil
 }
 
 // A gateway failure after TX-D leaves the order PENDING with its forms saved
@@ -383,11 +396,11 @@ func (s *Service) activeGenders(ctx context.Context) (map[string]int16, error) {
 // re-runs. No compensation: quota was committed at booking and stays held by
 // the live order.
 func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req CheckoutFormsRequest) (CheckoutQRResponse, error) {
-	validGenders, err := s.activeGenders(ctx)
+	knownGenders, activeGenders, err := s.genderMaps(ctx)
 	if err != nil {
 		return CheckoutQRResponse{}, err
 	}
-	if err := req.Validate(validGenders); err != nil {
+	if err := req.Validate(knownGenders); err != nil {
 		return CheckoutQRResponse{}, err
 	}
 
@@ -426,6 +439,9 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 	if err := validateBundleUnitConsistency(req.Attendees, slots); err != nil {
 		return CheckoutQRResponse{}, err
 	}
+	if err := validateRetiredGenders(req.Attendees, slots, activeGenders); err != nil {
+		return CheckoutQRResponse{}, err
+	}
 
 	// The primary contact is the holder of the TOPMOST form: the visitor mapped
 	// to the first slot in canonical slot order — never attendees[0] of the
@@ -452,8 +468,10 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 			dob, _ := time.Parse(visitorDobFormat, v.Dob) // validated above
 			filled, err := s.repo.UpdateAttendeeDetails(ctx, tx, v.ID, ord.ID, SlotDetails{
 				Name: v.Name, Email: v.Email, Phone: v.Phone, Dob: dob,
-				// Membership was validated above, so the name always resolves.
-				GenderID: validGenders[v.Gender],
+				// Membership was validated above, so the name always resolves —
+				// from the FULL map, because a retired gender that its own slot
+				// already carried is accepted and still needs its real id.
+				GenderID: knownGenders[v.Gender],
 			})
 			if err != nil {
 				return err
@@ -668,6 +686,49 @@ func primaryContact(visitors []CheckoutVisitor, slots []AttendeeSlotRecord) Chec
 		}
 	}
 	return CheckoutVisitor{}
+}
+
+// validateRetiredGenders enforces spec 011 FR-031 (clarified 2026-08-19): a
+// gender that is no longer offered may still be submitted, but only by the slot
+// that already carries it.
+//
+// This is what makes the restored form submittable. The master list serves
+// active entries only while a slot keeps whatever it was saved with, so a guest
+// returning to a form whose gender was retired in the meantime would otherwise
+// be refused for a value they never chose and cannot see is wrong. Allowing it
+// anywhere else would let a submission put a retired gender on a fresh slot,
+// which is the master list's retirement being undone one order at a time.
+//
+// Runs after matchVisitorsToSlots, so every visitor id maps to a real slot.
+func validateRetiredGenders(
+	visitors []CheckoutVisitor,
+	slots []AttendeeSlotRecord,
+	activeGenders map[string]struct{},
+) error {
+	held := make(map[uuid.UUID]string, len(slots))
+	for _, slot := range slots {
+		if slot.Gender != nil {
+			held[slot.ID] = *slot.Gender
+		}
+	}
+
+	fields := map[string]string{}
+	for i, v := range visitors {
+		if _, ok := activeGenders[v.Gender]; ok {
+			continue
+		}
+		if held[v.ID] != v.Gender {
+			// Same code, key and text as the ordinary refusal in Validate: from
+			// the guest's side this is one rule about one field, and a second
+			// wording would only tell them the server has two.
+			fields[fmt.Sprintf("attendees[%d].gender", i)] = "Select a valid gender."
+		}
+	}
+	if len(fields) > 0 {
+		return apperr.BadRequest(apperr.CodeValidation,
+			"Some fields are missing or invalid.").WithData(fields)
+	}
+	return nil
 }
 
 // validateBundleUnitConsistency enforces spec 010 FR-003: one visitor form

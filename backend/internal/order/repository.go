@@ -481,8 +481,9 @@ type BuyerDetails struct {
 	Phone string
 }
 
-// ListActiveGenders returns the gender master list, the source of both the
-// forms' options and the values checkout accepts (clarified 2026-08-05).
+// ListActiveGenders returns the gender master list as the forms' OPTIONS
+// (clarified 2026-08-05). Active entries only, and deliberately so — spec 011
+// FR-031 widens one card's option list, never this one.
 func (r *Repository) ListActiveGenders(ctx context.Context) ([]GenderRecord, error) {
 	rows, err := r.queries.ListActiveGenders(ctx)
 	if err != nil {
@@ -495,6 +496,22 @@ func (r *Repository) ListActiveGenders(ctx context.Context) ([]GenderRecord, err
 	return out, nil
 }
 
+// ListGenders returns every gender, active or not, as checkout needs them
+// (spec 011 FR-031, clarified 2026-08-19). A slot keeps whatever gender it was
+// saved with, so a restored form can submit one this list still knows and
+// ListActiveGenders no longer offers.
+func (r *Repository) ListGenders(ctx context.Context) ([]GenderRecord, error) {
+	rows, err := r.queries.ListGenders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list all genders: %w", err)
+	}
+	out := make([]GenderRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, GenderRecord{ID: row.ID, Name: row.Name, IsActive: row.IsActive})
+	}
+	return out, nil
+}
+
 // GenderRecord is one row of the gender master list.
 //
 // ID narrowed from uuid to a small integer in migration 0013 (spec 011 FR-025).
@@ -502,6 +519,9 @@ func (r *Repository) ListActiveGenders(ctx context.Context) ([]GenderRecord, err
 type GenderRecord struct {
 	ID   int16
 	Name string
+	// Zero value on rows read through ListActiveGenders, which selects only
+	// active ones; meaningful only on ListGenders.
+	IsActive bool
 }
 
 // SlotDetails is one visitor form's content, written into an attendee slot.

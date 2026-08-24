@@ -78,6 +78,16 @@ Before this call, visitor details exist nowhere server-side (clarification
 2026-08-05, Option B): a revisit of the order page shows the held order with
 empty forms.
 
+> **Superseded in part — spec 011 FR-030 – FR-033 (clarified 2026-08-19).** The
+> persistence rule above still stands: nothing is saved before Continue to
+> Payment. Its *revisit* consequence no longer holds. This call saves every
+> holder's details before it reaches the gateway, and a gateway failure
+> compensates nothing — so an order can sit PENDING, reporting
+> `payment_started: false`, with its forms already stored. A revisit of the order
+> page renders whatever the slots hold; only a slot that has never been filled
+> shows an empty card. "A revisit always shows empty forms" was true only while
+> no revisit could follow a save.
+
 ## 4. QR refresh (POST /ticket/checkout/:order_id/refresh-qr)
 
 ```
@@ -120,7 +130,7 @@ open payment screens flip to the expired state live.
 
 | Order state | Screen (route under events/[slug]) |
 |-------------|-------------------------------------|
-| PENDING, `payment_started=false` | orders/[orderNumber] — empty visitor forms + hold countdown (details load nothing — Option B) |
+| PENDING, `payment_started=false` | orders/[orderNumber] — visitor forms + hold countdown; the forms carry whatever the slots hold, which is nothing until a checkout attempt saves them (spec 011 FR-030, 2026-08-19) |
 | PENDING, `payment_started=true` | orders/[orderNumber] — QR panel + 14m countdown; QR refresh at `qr_refresh_after_seconds`; SSE subscription; **event countdown from shared layout stays mounted (FR-019)** |
 | PAID | redirect → orders/[orderNumber]/done |
 | EXPIRED / CANCELLED | expired state (Figma 288-2295) + link to events/[slug]/tickets to restart |

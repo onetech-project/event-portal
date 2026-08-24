@@ -255,11 +255,19 @@ const visitorPhoneMessage = "Enter a phone number of 12-15 digits."
 // Validate rejects malformed forms with a 400001 whose data is a field→message
 // map (contracts/api.md call 8), so the client can mark the exact inputs.
 //
-// validGenders maps each active gender master NAME to its row id (spec 011:
-// the name is the wire value, gender_id is what checkout stores). Passed in by
-// the service so every problem lands in ONE field map — a guest never fixes
-// the email only to be told about the gender on the next attempt.
-func (r CheckoutFormsRequest) Validate(validGenders map[string]int16) error {
+// knownGenders maps EVERY gender master NAME to its row id — retired entries
+// included (spec 011: the name is the wire value, gender_id is what checkout
+// stores). Passed in by the service so every problem lands in ONE field map —
+// a guest never fixes the email only to be told about the gender on the next
+// attempt.
+//
+// Membership here is a shape check: does this name exist at all. Whether a
+// RETIRED name is allowed on the slot submitting it is a separate rule, applied
+// by the service once it knows which slot that is (FR-031, clarified
+// 2026-08-19). The split keeps this check where it is — ahead of the order
+// lookup — so a malformed payload against an unknown order number still answers
+// 400001 rather than 404.
+func (r CheckoutFormsRequest) Validate(knownGenders map[string]int16) error {
 	fields := map[string]string{}
 
 	if len(r.Attendees) == 0 {
@@ -289,7 +297,7 @@ func (r CheckoutFormsRequest) Validate(validGenders map[string]int16) error {
 		} else if dob.After(time.Now()) {
 			fields[key("dob")] = "Date of birth cannot be in the future."
 		}
-		if _, ok := validGenders[v.Gender]; !ok {
+		if _, ok := knownGenders[v.Gender]; !ok {
 			fields[key("gender")] = "Select a valid gender."
 		}
 	}

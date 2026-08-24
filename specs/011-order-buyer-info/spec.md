@@ -51,6 +51,13 @@
 - Q: What happens to phone numbers already stored under the old rule that are shorter than 12 digits — are they still valid where they sit? → A: **Valid at rest, permanently.** The 12-digit floor is a write-time rule on the holder forms only. Stored shorter numbers keep displaying, keep reaching the payment gateway, and keep working for resend; no database constraint, no migration, and no corrective sweep is introduced. Re-validating history was rejected because digits cannot be invented for a number already taken — the only outcomes would be broken reads or blocked saves, neither of which makes an old number reachable.
 - Q: The order summary panel was hand-edited to match Figma 206-3145, dropping the Booking ID and each line's per-unit price, which FR-013 and FR-014 still required. Should the spec bend to the shipped design, or the panel be restored to the spec? → A: **The spec bends to the design.** FR-013 no longer asks for the Booking ID on the summary card (it stays on the confirmation screen and in the receipt) and FR-014 no longer asks for a per-unit price on each line (quantity and line subtotal remain, and the unit price stays the figure the subtotal is derived from). This closes the open UI/spec disagreement recorded in the quality checklist; the two acceptance assertions suspended in `page.test.tsx` and `checkout/page.test.tsx` are to be rewritten to the amended expectation rather than left commented out.
 
+### Session 2026-08-19
+
+- Q: In which situations should the holder forms come back pre-filled with the details the server already holds? → A: **Whenever the order's slots carry saved details — the data's presence is the only condition.** Every return to the forms screen prefills: an ordinary reload, a back-navigation, a second tab, a return after a payment attempt that did not settle, and an EXPIRED or CANCELLED order rendering behind the end-of-journey modal. The screen never inspects *why* the guest came back. The narrower "only after a failed payment" trigger was rejected because `payment_started` is derived from whether a payment code exists, so an order whose forms saved but whose code was never issued reports `payment_started: false` — precisely the reported case — and that trigger would not have fired on it.
+- Q: If a restored form carries a gender that has since been deactivated in the master list, and so is no longer among the options the select offers, what should the card show? → A: **The saved gender, shown as selected, with that one card's option list widened to include it.** The guest's own recorded answer stays visible and is never silently rewritten, matching the rule already set for holders elsewhere in this spec. Once the guest changes it the retired option leaves the list and cannot be chosen again. Leaving the field blank was rejected as discarding a stated answer; showing it without widening the list was rejected because the value would then be refused on submit.
+- Q: When a background re-read of the order arrives while the guest is part-way through typing, what should happen to the fields on screen? → A: **Nothing — the fields are seeded once, when the card first appears, and no later arrival of the order data rewrites any of them.** The saved details are a starting point, not a live feed. Overwriting untouched fields, or overwriting everything, were both rejected: the order is re-read whenever the guest returns to the tab, so either rule would move fields under a guest who had merely stepped away to their banking app or their email.
+- Q: Should the page tell the guest that their previously entered details have been restored, or simply show the cards already filled? → A: **Simply show them filled — no notice is added.** Filled fields on return are what a guest already expects of any form, and they are reading back their own details. A restore notice was rejected because the holder cards deliberately carry exactly one notice (FR-011's delivery chip on the first card), and a second would compete with it and need its own design decision; correcting a stale value costs the same one edit either way.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - One Form per Ticket Holder, No Separate Buyer Form (Priority: P1)
@@ -168,6 +175,51 @@ When an order runs out of time or is cancelled, the guest keeps the screen they 
 
 ---
 
+### User Story 7 - Returning to the Forms Finds Them Still Filled (Priority: P2)
+
+A guest fills in every ticket holder, presses Continue to Payment, and the payment does not
+complete — the code never appears, they close the tab, they come back from their banking app,
+or they simply reload. They land on the holder forms again and find every card exactly as
+they left it: their names, emails, phone numbers, dates of birth and genders still there. They
+press Continue to Payment again and try the payment once more, without retyping a single
+field.
+
+**Why this priority**: a guest can still finish a purchase without this — by typing everything
+a second time — so it sits below the forms themselves and their validation. But it is the
+difference between a failed payment costing one press and costing a full re-entry of every
+holder's details, and the details are already stored, so the retyping buys nothing.
+
+**Independent Test**: fill and submit the forms for an order, arrange for the payment not to
+complete, return to the forms address, and confirm every field carries what was submitted and
+that continuing again needs no retyping.
+
+**Acceptance Scenarios**:
+
+1. **Given** an order whose holder details were submitted but whose payment did not complete,
+   **When** the guest opens the holder forms again, **Then** every field of every card shows
+   the submitted value.
+2. **Given** that restored screen, **When** the guest reads the Continue to Payment button,
+   **Then** it is enabled, and no field shows a validation error merely for having been
+   restored.
+3. **Given** that restored screen, **When** the guest presses Continue to Payment without
+   editing anything, **Then** the order is accepted with exactly the details already stored.
+4. **Given** an order whose forms have never been submitted, **When** the guest opens the
+   holder forms, **Then** every card is empty, exactly as before this change.
+5. **Given** the guest is part-way through typing into a restored card, **When** they switch
+   to another tab and come back, **Then** every field is exactly as they left it — the
+   restored values they kept, the edits they made, and the field they were mid-way through.
+6. **Given** a restored card whose gender has since been deactivated in the master list,
+   **When** the guest looks at that card, **Then** the gender shows as selected and submitting
+   the card unchanged is accepted.
+7. **Given** that same card, **When** the guest opens the gender select on a *different* card,
+   **Then** the deactivated option is not offered there.
+8. **Given** an order that has expired or been cancelled, **When** the forms render behind the
+   end-of-journey modal, **Then** they are filled with the stored details rather than blank,
+   so the guest can still see what they had entered.
+9. **Given** any restored screen, **When** the guest reads the page, **Then** no notice, badge,
+   or banner announces that the details were restored, and the first card's delivery chip
+   remains the only notice on the forms.
+
 ### Edge Cases
 
 - An order of a single bundle unit shows exactly one form; that form's holder is the primary contact.
@@ -191,6 +243,11 @@ When an order runs out of time or is cancelled, the guest keeps the screen they 
 - The guest presses Escape, clicks the dimmed backdrop, or tries to scroll the page while the modal is up: nothing happens on all three counts. The browser's own back button still works — the modal blocks the page, not the browser.
 - A cancelled order shows the same modal with the cancellation wording rather than the expiry wording; the single button and the unclosable behavior are identical.
 - A gender is deactivated in the master list while ticket holders already reference it: existing holders keep their recorded gender and it still displays by name; the option simply stops appearing in new forms. Deactivating never rewrites or orphans a stored reference.
+- A payment attempt saves the holder details and then fails before a payment code is issued: the order stays PENDING with its details stored and its hold deadline untouched, and it reports that payment has not started. Returning to the forms screen shows every card filled from those stored details (FR-030), and continuing re-runs only the payment leg. This is the case that motivated FR-030 — a trigger keyed on payment state would not fire here, because payment never started.
+- Some slots hold saved details and others do not — an order whose forms have never been submitted, or a shape that changed: each card is filled from its own slots, and a card with nothing saved renders empty exactly as before (FR-030).
+- A restored gender has since been deactivated: the card still shows it as selected, that card's option list is widened to hold it, and submitting the form unchanged is accepted (FR-031). No other card is offered the retired option.
+- The guest steps away to their banking app or their email and returns, causing the order to be re-read: every field stays exactly as they left it, filled or half-typed (FR-032).
+- The guest deliberately clears a restored field: it stays cleared, Continue disables until it is valid again, and nothing puts the old value back.
 - An attempt to add a master list entry whose name matches an existing one (in either list) is refused rather than creating a second entry the name lookup could resolve to either way.
 - An order status entry that orders still reference cannot be deleted; the active flag is how a status is retired, so no order is ever left pointing at nothing.
 - The revision runs on a database that already holds orders, holders and packages: every existing order keeps its state, every holder keeps the same gender name, and every package keeps the same availability — the identifiers beneath them change, the values above them do not.
@@ -239,6 +296,38 @@ When an order runs out of time or is cancelled, the guest keeps the screen they 
 
 > **Supersedes**: This feature removes the separate buyer information block that spec 010 (`specs/010-bundle-single-form`, FR-008) explicitly preserved, and replaces the buyer-contact collection of spec 008 (`specs/008-e2e-purchase-flow`, FR-012) with collection through form 1, which is both ticket holder 1 and the buyer. Delivery (FR-012 here) ends up where the constitution had it before this feature — exactly one email to the buyer containing all tickets — after a same-session detour through per-holder delivery; constitution v3.0.0 restores it.
 
+> **Restoring saved holder details (clarified 2026-08-19) — scope note**: FR-030 onward
+> govern what the holder forms show when the guest returns to a screen whose details the
+> server has already stored. They **supersede** the "Option B" rule of spec
+> `008-e2e-purchase-flow` — that nothing is persisted before Continue to Payment and a
+> revisit therefore always shows empty forms. That rule rested on a premise this feature's
+> own checkout call invalidated: the call saves every holder's details, so a subsequent read
+> of the order does have details to render. Spec 008's contracts, quickstart and data-model
+> notes MUST be corrected in the same change.
+
+- **FR-030**: When an order's slots carry saved holder details, the holder forms MUST render
+  pre-filled with them. The presence of saved details MUST be the only condition — the screen
+  MUST NOT inspect why the guest returned, and MUST NOT key the behaviour on payment state.
+  This applies to an ordinary reload, a back-navigation, a second tab, a return after a
+  payment attempt that did not settle, and an EXPIRED or CANCELLED order rendering behind the
+  end-of-journey modal (FR-022). A slot carrying no saved details MUST render an empty card,
+  exactly as today.
+- **FR-031**: A restored gender that is no longer active in the master list MUST still render
+  as the card's selected value, with that card's option list widened to include it so the
+  select can display it. The retired value MUST NOT be offered on any card that does not
+  already hold it, and once the guest picks a different gender the retired option MUST leave
+  that card's list. Accepting the forms MUST NOT refuse a gender solely for being retired
+  when it is the value already recorded on that slot; a retired gender MUST still be refused
+  on a slot that did not already carry it.
+- **FR-032**: The saved details MUST seed each card once, when it first appears. A later
+  re-read of the same order MUST NOT rewrite any field, whether or not the guest has edited
+  it. Nothing the guest has typed MUST be lost by the order being re-read — including the
+  re-read that happens when they return to the tab or the network reconnects.
+- **FR-033**: Restoring the saved details MUST NOT add any notice, banner, or badge to the
+  screen. The holder cards MUST continue to carry exactly one notice — the delivery chip on
+  the first card (FR-011) — and the restored fields MUST be presented no differently from
+  fields the guest has just typed.
+
 ### Key Entities
 
 - **Ticket Holder (Attendee)**: The person a single form describes — full name, email, phone number, gender, date of birth. Owns one standalone ticket or all passes of one bundle unit. Gender is stored as a reference to a Gender Master List entry, not free text. The email identifies the holder; it is not a delivery address unless the holder is also the buyer (FR-012).
@@ -266,6 +355,9 @@ When an order runs out of time or is cancelled, the guest keeps the screen they 
 - **SC-008**: After the revision, zero occurrences of the `ACTIVE`/`INACTIVE` package strings remain in the admin contract, and every issued ticket still reports one of ACTIVE, USED, or REVOKED — a pass already scanned remains distinguishable from a revoked one in 100% of gate validations.
 - **SC-009**: 100% of entries in both master lists have a non-blank name that is unique within its list and a recorded author — the six system-seeded entries attributed to `SYSTEM`, every admin-created or admin-edited entry attributed to that admin — and an attempt to save a duplicate or blank name is refused in 100% of cases.
 - **SC-010**: On both order screens, an order that ends without a purchase leaves the screen's own layout rendered in 100% of cases and shows the end-of-journey dialog over it; across Escape, backdrop click, and scroll attempts the dialog is dismissed zero times, and exactly one action button is present on it.
+- **SC-011**: A guest returning to the holder forms for an order whose details are stored sees every field of every card carrying those details, in 100% of returns — verified across an ordinary reload, a back-navigation, a second tab, a return after a payment attempt that did not settle, and an EXPIRED or CANCELLED order behind the end-of-journey modal.
+- **SC-012**: Zero characters of a guest's typing are lost to the order being re-read, across repeated tab-away-and-return and reconnect cycles on a part-filled screen.
+- **SC-013**: A form restored from stored details submits unchanged in 100% of cases, including one carrying a gender since deactivated — zero submissions refused for a value the slot already held.
 
 ## Assumptions
 
@@ -285,3 +377,24 @@ When an order runs out of time or is cancelled, the guest keeps the screen they 
 - The `SYSTEM` author recorded on seeded master list entries is a reserved literal, not an admin account; nothing authenticates as it and no screen offers it as a choice.
 - Retiring a master list entry is done by clearing its active flag, not by deleting the row — deletion is assumed never to be offered for entries that existing orders or holders reference.
 - The order status names (`PENDING`, `PAID`, `CANCELLED`, `EXPIRED`) are treated as stable identifiers by everything that reads them, so the master list's names are not renamed casually even though the list is admin-governed.
+- **Restoring saved details (FR-030 – FR-033), added 2026-08-19 — decisions taken without a
+  question, recorded so they are not re-opened silently**:
+  - A card restored to a complete, valid set of details arrives with Continue to Payment
+    already enabled. This is FR-009 applied unchanged — the gate is "every field of every
+    form passes validation" and nothing else — not a new rule. No field shows an error
+    merely for having been restored rather than typed.
+  - Date of birth is stored as a calendar date and typed as DD/MM/YYYY (FR-003, FR-007), so
+    restoring it is a presentation conversion. It is assumed to round-trip exactly: a
+    restored date submitted unchanged stores the same date it came from.
+  - A bundle unit's slots always agree, because a card's values fan out to every slot in its
+    unit on submit (spec 010). A unit's card is therefore seeded from any one of its slots,
+    and no tie-break between them is specified.
+  - Nothing new is exposed. The order response already carries every holder's details to
+    anyone holding the order's address; this feature only draws what that response already
+    contains, so it widens no audience and adds no data to the wire.
+  - Per constitution Principle VIII the acceptance suite gains a scenario for the reported
+    defect — details saved, payment not completed, forms empty on return — and it is
+    confirmed red against the unfixed code before the fix lands. Spec `008-e2e-purchase-flow`
+    asserts the opposite rule in `contracts/booking-flow.md`, `contracts/api.md`,
+    `quickstart.md` and `data-model.md`; those MUST be corrected in the same change, since a
+    superseded rule left standing in a contract document is what let this behaviour survive.

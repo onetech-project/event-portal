@@ -132,8 +132,13 @@ sweeper cleans up abandoned cases.
 
 ### 8. POST /ticket/checkout/:order_id — **Save forms + start payment** (Option B)
 One call: carries the buyer + visitor forms, then starts payment. Details are
-not persisted server-side before this call — a revisit before checkout shows
-empty forms.
+not persisted server-side before this call — a revisit **before any checkout
+attempt** shows empty forms.
+
+**Superseded in part (spec 011 FR-030, clarified 2026-08-19)**: a revisit *after*
+this call shows the stored details, because the forms are saved before the
+gateway is reached and a gateway failure leaves them behind. See spec 011
+`contracts/form-restore.md`.
 
 ```jsonc
 {

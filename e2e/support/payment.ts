@@ -117,3 +117,34 @@ export async function settleOrder(orderNumber: string): Promise<number> {
 export async function expireOrder(orderNumber: string): Promise<number> {
   return deliverNotification({ orderNumber, status: PaymentStatus.Expired });
 }
+
+/**
+ * Arms the gateway stub to refuse the NEXT session open (spec 011 FR-030,
+ * research R35).
+ *
+ * This is the only arrangement that reaches the state the restore exists for: a
+ * checkout whose forms commit and whose gateway leg then fails. TX-D has already
+ * written every holder's details by the time `CreateTransaction` is called, and
+ * the failure compensates nothing — the order stays PENDING, keeps its hold, and
+ * reports `payment_started: false` because no QR string was ever stamped. A
+ * successful checkout cannot stand in for it: `payment_started` flips true and
+ * the forms address forwards to /checkout.
+ *
+ * The stub answers 400 rather than 500 on purpose — the API retries a 5xx three
+ * times under one reference, and a test wanting one clean failure should not
+ * wait out the backoff.
+ *
+ * The refusal returns *before* the stub records the reference, so the retry that
+ * follows is not a duplicate open: it succeeds, and the guest's seats are never
+ * released.
+ *
+ * Lives here rather than in `gateway-stub.ts` because that module is the
+ * standalone server — it imports `node:http` and nothing else, deliberately, so
+ * Playwright's webServer can boot it without loading the suite's env.
+ */
+export async function failNextGatewaySession(): Promise<number> {
+  const response = await fetch(`${config.gatewayStubURL}/__stub/fail-next-session`, {
+    method: "POST",
+  });
+  return response.status;
+}

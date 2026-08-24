@@ -336,6 +336,142 @@ that nothing reports is the failure mode here.
 
 ---
 
+## Phase 18: User Story 7 — Returning to the Forms Finds Them Still Filled (Priority: P2) — Track F
+
+**Goal**: The holder forms render pre-filled whenever the order's slots carry saved details,
+seeded once and never re-synced, with a retired gender still displayable and still acceptable.
+The API already tells the guest their details are saved; this makes the next screen agree.
+
+**Independent Test**: Quickstart Scenario M — fill the forms, force the gateway to fail, return
+to the forms address, and find every field carrying what was submitted; an order whose forms
+were never submitted still shows empty cards.
+
+**Track F is frontend + a narrow backend acceptance change + e2e. No migration, no schema
+change, no response-shape change.** A migration in a Track F commit is out of scope and should
+be challenged in review.
+
+> **Ordering is not a preference here.** T073–T074 come first and T074 must be seen RED.
+> This is the third instance of the R27 trap and the most deceptive: every holder-form fixture
+> in the suite has empty slots, so "the forms are empty" is simultaneously what the tests
+> assert, what unfixed code does, and what fixed code must still do for an unsubmitted order
+> (FR-030's last clause). A scenario that opens the forms and looks at them cannot fail. The
+> scenario must first SAVE details through the real checkout call, then return.
+
+- [X] T073 [P] [US7] `e2e/support/gateway-stub.ts`: export a helper — `failNextGatewaySession()` — that does `POST ${env.gatewayStubURL}/__stub/fail-next-session`. The control surface already exists at `:80` and **nothing in the suite calls it today** (research R35); only the helper is new. Do not change the stub's behaviour: it answers `400` rather than `500` on purpose, because the API retries a `5xx` three times under one reference and a test wanting one clean failure should not wait out the backoff. **Note for T074**: the forced-failure branch returns before `transactions.set(refId, …)`, so the reference is never recorded and the retry does **not** hit the duplicate branch — the retry succeeds cleanly and the seats are never released.
+- [X] T074 [US7] `e2e/specs/guest-purchase.spec.ts`: add quickstart **Scenario M**. Book an order, fill every card with recognisable values, arm `failNextGatewaySession()`, press Continue to Payment, and assert the failure message *"We could not start the payment with the provider. Your details are saved — please try again."* and that the order is still `PENDING` with `payment_started: false`. Reload the forms address and **assert every field carries its step-1 value** — this is the assertion that separates fixed from unfixed code. Then continue again without editing and assert the checkout is accepted. Add the paired negative: an order whose forms were never submitted still shows empty cards. Pair each "filled" assertion with a rendered positive (the summary, the first card's delivery chip) so a screen that failed to render cannot satisfy it vacuously. **Run against unfixed code and confirm the reload assertion fails** (Principle VIII). **Isolation (constitution v4.2.0 Principle VIII)**: this is the first scenario to call `POST /ticket/checkout/:order_id` **twice for one order**, and `RATE_LIMIT_CHECKOUT` defaults to rate `0.2`/s, burst `3` — book its own order, keep its own client identity, and run it with `E2E_RATE_LIMIT_ENABLED` both on and off.
+- [X] T075 [P] [US7] `frontend/components/order/slot-groups.ts`: `SlotGroup` gains the seed values (`name`, `email`, `phone`, `dob`, `gender`), read from the group's **first** slot. A bundle unit's slots are written identically by the submit-time fan-out, so no tie-break between them is specified (spec Assumptions, rev. 6). Keep `slotIds` and every existing field exactly as they are — this adds to the group, it does not restructure it.
+- [X] T076 [P] [US7] `frontend/components/order/slot-groups.test.ts`: assert the seed travels with the group for all three shapes the grouper already covers — a standalone slot, a multi-slot bundle unit, and the pre-010 one-card-per-slot legacy shape. Assert a group built from empty slots carries empty seeds rather than `null` leaking into the form.
+- [X] T077 [US7] `frontend/components/order/visitor-form.tsx`: add `isoToDob`, the inverse of `dobToIso` (`:559`), converting the wire's `YYYY-MM-DD` to the field's `DD/MM/YYYY`; it must round-trip so a restored date submitted unchanged stores the same date. Then replace the hardcoded `defaultValues` at `:125` with the group's seed values, mapping `null` to `""` per field. **Delete the stale comment** ("Option B: always empty — the server holds nothing to prefill from") — it records a premise this feature's own checkout call invalidated (research R31). **Do NOT add a `useEffect`/`reset` that re-syncs the form when `order` changes, and do NOT switch to RHF's `values` prop.** `useForm` captures `defaultValues` at mount and `OrderForms` mounts with data in hand, which is exactly FR-032; a re-sync would wipe a guest's typing on every window-focus refetch (research R33). Depends on T075.
+- [X] T078 [US7] `frontend/components/order/visitor-form.test.tsx` (**new file**): (a) a filled-slots fixture seeds every field of every card, including the DOB conversion and the gender; (b) an empty-slots fixture renders empty cards (FR-030's last clause); (c) **the clobber test (FR-032)** — render, edit one field, clear another, then re-render with a *changed* order object and assert no field moved. (c) is the only guard against the failure mode with no visible symptom until a real guest is mid-type. (d) FR-033: no restore notice, banner or badge is rendered, and the first card's delivery chip is still the only notice. Depends on T077.
+- [X] T079 [US7] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/page.test.tsx`: the case at `:482` asserts every input is empty on a **two-slot** fixture and is the assertion holding the defect in place. Re-point it at an explicit empty-slots fixture so it keeps covering FR-030's last clause, and add a filled-slots case beside it. Add the ended-order case (US7 scenario 8): an EXPIRED or CANCELLED order renders its forms **filled** behind the end-of-journey modal — FR-022 already says the guest can still see what they had entered, and FR-030 is what finally makes that true after a reload.
+- [X] T080 [P] [US7] `frontend/app/(public)/events/[slug]/orders/[orderNumber]/page.tsx`: delete the stale Option B comment at `:119`. **No code change** — the `isPending` guard above it already ensures `OrderForms` mounts with data, which is what makes seed-once correct. If this task produces a behaviour diff, it exceeded its scope.
+- [X] T081 [P] [US7] `backend/internal/order/queries/order.sql`: add `-- name: ListGenders :many` returning `id, name, is_active` for every row, ordered by name. **Leave `ListActiveGenders` at `:288` exactly as it is** — `GET /ticket/genders` must keep serving active genders only (FR-031 widens one card's list, never the master list). Run `sqlc generate`.
+- [X] T082 [US7] `backend/internal/order/repository.go`: add a `ListGenders` wrapper beside `ListActiveGenders`, returning rows carrying `IsActive`. Depends on T081.
+- [X] T083 [US7] `backend/internal/order/dto.go`: `Validate`'s gender membership check at `:292` reads the **full** gender map rather than the active-only one. **Do not move the call site** — `Validate` runs before `GetOrderByNumber`, so a malformed payload against an unknown order still answers `400001` and not `404`; reordering to get slot context in one pass would change error precedence this work has no business touching (research R34). The message text and the field key (`attendees[i].gender`) are unchanged.
+- [X] T084 [US7] `backend/internal/order/service.go`: add `allGenders(ctx)` beside `activeGenders(ctx)` (`:366`) and pass the full map to `Validate`. After `matchVisitorsToSlots` / `validateBundleUnitConsistency` (`:421-426`), add the slot allowance: any submitted gender that is **not** active must equal the gender already recorded on that same slot, else `400001` on `attendees[i].gender`. Resolve `GenderID` at `:452` from the **full** map — the active-only map yields `0` for a retired name, writing an invalid foreign key rather than refusing. Depends on T082, T083.
+- [X] T085 [US7] `backend/internal/order/checkout_forms_test.go`: a retired gender is accepted on the slot that already carries it; refused on a slot that does not; a name absent from the master list entirely is still refused with the unchanged message; and the stored `gender_id` after the accepted case is the retired gender's real id, not `0`. Add a case pinning error precedence: a malformed payload against an unknown order number still answers `400001`, not `404`. Depends on T084.
+- [X] T086 [US7] `frontend/components/order/visitor-form.tsx`: at the `GenderSelect` call site (`:266`), pass a per-card option list — the active list from `useGenders()`, widened with that card's own restored gender when it is absent from it. `GenderSelect` already takes `options` as a prop, so this is a call-site change, not a component rewrite. A retired entry has no master id, so key its `SelectItem` by name. Once the guest picks a different gender the retired option leaves that card's list, and it is never offered on a card that does not hold it. Add the covering cases to `visitor-form.test.tsx`. Depends on T077.
+- [ ] T087 [US7] Walk quickstart **Scenario O** (retired gender) end to end against a running stack. **Coverage justification, recorded rather than assumed (Principle VIII)**: the retired-gender path gets backend coverage (T085) and component coverage (T086) but no e2e scenario, because reaching it through the browser requires deactivating a master-list entry mid-run, which would leak throttle-free admin state into the guest suite and make the gender fixtures order-dependent for every other scenario. The two lower tiers cover the rule on both sides of the wire; this task is the manual confirmation that they meet in the middle. If the walk disagrees with either tier, the tier is wrong, not the walk.
+
+**Checkpoint**: T074 red → green. A guest whose payment fails returns to filled forms, a guest who never submitted still sees empty ones, and nothing a guest has typed is lost to a refetch.
+
+---
+
+## Phase 19: Polish & Verification (rev. 6)
+
+> **Three deviations from the task text, each taken for a reason and recorded
+> rather than absorbed silently.**
+>
+> 1. **`failNextGatewaySession()` lives in `support/payment.ts`, not
+>    `support/gateway-stub.ts`.** That module is the standalone server Playwright
+>    boots as a `webServer`; it imports `node:http` and nothing else, deliberately.
+>    Putting a `config`-reading helper in it would make the server process load
+>    the suite's env. `payment.ts` already imports `config` and is the test-side
+>    gateway driver, which is exactly what this is.
+> 2. **`isoToDob` lives in `slot-groups.ts`, not beside `dobToIso` in
+>    `visitor-form.tsx`.** `visitor-form` imports `slot-groups`, so the reverse
+>    import would be a cycle. The conversion sits with `seedFrom`, its only caller.
+> 3. **The gender widening is inside `GenderSelect`, not at its call site.**
+>    FR-031 requires the retired option to leave the card's list once the guest
+>    picks another, which needs the live field value; a list widened from the seed
+>    would keep offering it forever. Only the Controller has that value.
+>
+> **Two pre-existing red tests found during T090, both outside Track F, and
+> handled differently on purpose.**
+>
+> 1. **The bundle card heading's `flex-1` — FIXED.** `page.test.tsx` asserted
+>    `toHaveClass("flex", "flex-1", "flex-wrap")` on the `CardTitle` while the
+>    component rendered `flex flex-wrap … lg:w-full`, with no `flex-1`. Red at
+>    HEAD, before this session. The component's own surviving comment explains
+>    why the class is needed — "flex-1 so the heading fills the width its header
+>    leaves it … otherwise `ml-auto` pins the badge to the end of the NAME rather
+>    than the edge of the card" — which is spec 019 FR-016 word for word. The
+>    class had been dropped and `lg:w-full` left in its place, which only holds
+>    at `lg` and above. **Resolved by restoring `flex-1`**: the documented intent
+>    and the test agreed with each other and only the class disagreed.
+> 2. **The confirmation screen's "Back to home" button — FIXED.**
+>    `success/page.test.tsx` asserted a `back to home` button with `href="/"`. Red
+>    at HEAD. The control is not on `success/page.tsx` but on the
+>    `order-confirmation.tsx` card it renders, which is why a first pass looking
+>    only at the page reported it missing — it is not missing, it moved: the
+>    button leads to `/events/{slug}` and its label still said "Back to home".
+>    **Resolved by moving the label to the destination, not the destination to the
+>    label.** The href change is consistent with spec 019's direction — the guest
+>    lands where they can act — and reverting it to `/` would fight that. A control
+>    reading "Back to home" that does not go home is precisely the mismatch spec
+>    019 FR-004 forbids on the end-of-journey dialog, for the same reason. The new
+>    wording, **"Back to the event"**, is what every other link to this destination
+>    already reads (`checkout/page.tsx:115`, `success/page.tsx:77`, the order
+>    page), so this removes an inconsistency rather than inventing a word. The test
+>    now pins both halves: the label AND the href, plus the absence of the old
+>    wording, so the pair cannot drift apart again silently.
+
+
+- [X] T088 [P] Correct spec `008-e2e-purchase-flow`, which still asserts the superseded rule in four places: `contracts/booking-flow.md:78` ("revisit of the order page shows the held order with…" empty forms), `contracts/api.md:133` (the Option B heading), `quickstart.md:122` ("revisit shows empty slots (Option B)"), and `data-model.md:151`. Record the supersession — spec 011 FR-030 – FR-033, clarified 2026-08-19 — rather than deleting the history: Option B's persistence rule (nothing saved before Continue to Payment) still stands and is still correct; only its *revisit* consequence is superseded, because checkout now leaves details behind to render. **This is required in the same change** (spec 011 FR-030 scope note): a superseded rule left standing in a contract document is exactly what let this behaviour survive long enough to be reported.
+- [X] T089 [P] Sweep for surfaces still asserting the superseded revisit rule: `grep -rn "Option B" backend/ frontend/ e2e/ specs/ --exclude-dir=node_modules --exclude-dir=.next`. Expected survivors are records and stay — spec 008's own history once T088 has framed it, plan.md's deliberate old-vs-new comparisons, and the delivered task lines in this file. Anything else describing the **live** behaviour of the forms — a source comment, a test name, a fixture comment — is stale and belongs in T077 or T080.
+- [X] T090 Full verification. Backend: `cd backend && go build ./... && go vet ./... && ./scripts/test.sh ./...`. Frontend: `tsc --noEmit` and `./node_modules/.bin/vitest run` (node is not on PATH and there is no `test` script — project memory `frontend-toolchain-invocation.md`). e2e: `cd e2e && npm test`, again with `E2E_CACHE_ENABLED=false` (Principle VII's kill switch), and again with `E2E_RATE_LIMIT_ENABLED=false` (Principle IX / VIII, v4.2.0) — T074 spends two of the checkout allowance's burst of three, so both throttle modes must pass. Scenario M is discharged by the automated scenario T074 added, run red-first. The residual manual walks — Scenario N's tab-away behaviour and Scenario O — are owned by T087, which stays open. Expected non-events, each worth confirming rather than assuming: no migration ran, `SCHEMA.md` needs no edit, `GET /ticket/order/:order_id` and `GET /ticket/genders` are byte-identical, and the amount charged on any order is unchanged.
+
+**T090 results (2026-08-20)** — run against the real stack (Postgres, Redis, Mailpit up,
+migrations current):
+
+| Tier | Result |
+|---|---|
+| `go build ./... && go vet ./...` | clean |
+| `./scripts/test.sh ./...` (backend, database-backed) | **all green** |
+| `./node_modules/.bin/next build` (typecheck of record) | exit 0 |
+| `./node_modules/.bin/vitest run` | **412/412** |
+| `npx playwright test` | 49 passed, 2 skipped, 1 failed (a different flake each run — see below) |
+| `E2E_CACHE_ENABLED=false` | 42 passed, 10 skipped, **0 failed** |
+| `E2E_RATE_LIMIT_ENABLED=false` | 47 passed, 5 skipped, **0 failed** |
+
+Both new scenarios ran (not skipped) in all three e2e modes and passed in all three, so
+Principle VII's cache kill switch and Principle IX's throttle kill switch are both genuinely
+exercised against this change rather than assumed.
+
+**Two distinct flakes surfaced across three valid full runs**, one per run and never the same
+one twice: `a seat taken between the check and Agree refuses with the same general message`
+(guest-purchase, a race scenario) and `rescheduling an event warns about stranded ticket types
+instead of refusing` (admin-console). **Each passes in isolation, and both kill-switch runs
+were clean at 0 failures.** Neither touches the holder forms or the gender path, and nothing in
+Track F is upstream of either. Recorded rather than re-run until green: a suite that drops a
+different test each full run under load is worth someone's attention on its own terms, and
+papering over it here would hide that.
+
+> ⚠️ **Environment trap, cost one confusing 7-failure run.** `next build` is this project's
+> typecheck of record (project memory `frontend-toolchain-invocation`), but it writes a
+> PRODUCTION build into the same `frontend/.next` that Playwright's `webServer` dev process
+> uses. Running it between e2e runs left a stale manifest, and the next suite failed 7 tests
+> with the frontend answering **404 for routes that exist** — which reads like a routing
+> regression and is not one. `rm -rf frontend/.next` before the next e2e run restores it.
+> Run the typecheck either before the e2e runs or after them, and clear `.next` either way.
+
+Expected non-events, confirmed rather than assumed: **zero** migrations and no `SCHEMA.md`
+edit; `dto.go`'s only change is a parameter rename, so no response shape, field or JSON tag
+moved; the payment domain is untouched; and `GET /ticket/genders` still reads
+`ListActiveGenders`, so the master list was not widened.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Rev. 1–2 (delivered)
@@ -406,6 +542,34 @@ T061 (e2e scenario, MUST be seen RED)       T067 [P] forms-page assertions
 - **T052 before T053** — the scenario has nothing to assert until a fee exists, because `e2e/support/db.ts:44-45` truncates the table the migration seeds.
 - **T061 before T062 and T064**, and observed failing. The same correctness ordering as T053, for the same reason in a new place: the e2e holder fixture is 12 digits and valid under both floors, so the entire suite stays green against unfixed code (research R29). A scenario written after the regex could never have failed, and constitution Governance rejects a regression test never seen red.
 - **T062 and T064 in the same change** — they are one rule enforced twice. Shipping the backend floor without the frontend one leaves the guest reading "12-15" only after a round trip; shipping the frontend one alone leaves the API accepting what the form refuses. Neither half is a releasable increment.
+
+### Rev. 6 — one track, one forced ordering, one genuinely parallel half
+
+Track F splits cleanly in two, and the halves touch no common file:
+
+- **Frontend restore** (T075 → T077 → T078, with T076, T079, T080 alongside) — this is the whole
+  of FR-030, FR-032 and FR-033 and is what the reported defect asks for. It ships without the
+  backend half.
+- **Retired-gender acceptance** (T081 → T082 → T083 → T084 → T085, then T086) — FR-031 only.
+  It is a correctness fix for a case the restore *creates*: before the restore, a retired gender
+  never reached the form, so it never came back on a submit.
+
+**Forced ordering**: T073 → T074 before any implementation task, and T074 must be seen red.
+T075 → T077 → T078 (each consumes the previous). T081 → T082 → T083 → T084 → T085 (the query
+before its wrapper, the wrapper before the caller, the caller before its test). T086 needs
+T077's seeding to have something to widen the options around.
+
+**Parallel opportunities**: T073/T075/T081 open three independent fronts (e2e helper, frontend
+grouping, backend SQL). T076, T079, T080 are independent of each other and of the backend half.
+T088 and T089 are independent documents.
+
+**If Track F must be split across two commits**, ship the frontend half first: it delivers the
+reported fix. Ship it *with* T086 and the backend half in the same release, though — the restore
+is what makes a retired gender reachable on a submit, so shipping the restore alone widens a
+path the checkout still refuses.
+
+**Not decomposed here**: nothing. Tracks D and E were decomposed and delivered in Phases 15–17
+(T061–T072); Track F is the last outstanding track in this feature.
 
 ## Implementation Strategy
 

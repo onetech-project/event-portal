@@ -116,8 +116,10 @@ export function OrderView({
     return <Loading label="Loading your order…" />;
   }
 
-  // Option B: nothing is persisted until Continue to Payment, which is why a
-  // revisit always shows empty forms.
+  // The forms seed themselves from whatever the order already holds (spec 011
+  // FR-030). Nothing extra is needed here: the isPending guard above means
+  // OrderForms only ever mounts with data in hand, which is what makes seeding
+  // once — and never re-syncing — correct.
   return (
     <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
       <OrderForms order={data} />

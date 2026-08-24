@@ -37,8 +37,14 @@ import QrisIcon from "../icons/qris";
  * buyer form. The topmost card's holder becomes the order's primary contact
  * (derived server-side from canonical slot order). Everything is submitted in
  * the single Continue to Payment call (Option B —
- * POST /ticket/checkout/:order_id); nothing is persisted before that call,
- * which is why a revisit always shows empty forms.
+ * POST /ticket/checkout/:order_id), and nothing is persisted before it.
+ *
+ * That rule is about when details are SAVED, not about what a revisit shows
+ * (spec 011 FR-030, clarified 2026-08-19). The call saves every holder before it
+ * reaches the gateway and a gateway failure compensates nothing, so an order can
+ * sit PENDING with its forms stored and no payment started. The cards therefore
+ * render whatever the slots hold; only a slot that has never been filled comes
+ * up empty.
  *
  * Spec 010: a bundle unit's slots collapse into ONE card titled with the
  * bundle's name; on submit the card's values fan out to one payload entry per
@@ -122,15 +128,22 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
   } = useForm<OrderFormsValues>({
     resolver: zodResolver(formsSchema),
     mode: "onTouched",
-    // Option B: always empty — the server holds nothing to prefill from.
+    // Seeded from whatever the order already holds (FR-030, clarified
+    // 2026-08-19). The presence of stored details is the ONLY condition — this
+    // never inspects why the guest came back, because the case it exists for
+    // (a checkout whose forms saved and whose gateway leg then failed) reports
+    // payment_started false and is indistinguishable from a plain reload.
+    //
+    // Seeded ONCE, and deliberately so: useForm captures defaultValues at mount,
+    // and OrderForms only mounts with data in hand. Do NOT add an effect that
+    // resets the form when `order` changes, and do NOT switch to RHF's `values`
+    // prop — the order is re-read on every window focus and reconnect, so either
+    // would wipe a guest's typing on their way back from their banking app
+    // (FR-032).
     defaultValues: {
       attendees: groups.map((group) => ({
         slot_ids: group.slotIds,
-        name: "",
-        email: "",
-        phone: "",
-        dob: "",
-        gender: "",
+        ...group.seed,
       })),
     },
   });
@@ -407,18 +420,12 @@ function GroupTitle({ group }: { group: SlotGroup }) {
     <CardTitle
       // data-slot is what [data-slot="card-title"] styling and queries key off.
       data-slot="card-title"
-      // lg:w-full so the heading claims the whole header row from lg up. Its
-      // header is flex-wrap-reverse, so that pushes the first card's delivery
-      // notice onto a second line which wrap-reverse renders ABOVE — which is
-      // what puts the notice top-right of the header (Figma 206-1804). It is
-      // deliberately not flex-1: that would grow the heading but leave the
-      // notice on the same line, beside the ticket-count badge.
-      //
-      // Below lg no width applies, so the heading is only as wide as its text
-      // and this badge sits at the end of the NAME rather than at the card
-      // edge. That is how the brand refresh shipped it, not an oversight
-      // carried over — the narrow layout stacks rather than aligning to edges.
-      className="flex flex-wrap gap-1 items-center gap-y-1 text-lg font-bold lg:w-full"
+      // flex-1 so the heading fills the width its header leaves it. Without it
+      // the CardTitle is only as wide as its text, so `ml-auto` would pin the
+      // badge to the end of the NAME rather than to the edge of the card — a
+      // different place on every card, which is the opposite of what a
+      // right-aligned badge is for.
+      className="flex flex-1 flex-wrap gap-1 items-center gap-y-1 text-lg font-bold lg:w-full"
     >
       {/* min-w-0 with wrap-break-word so a bundle named as one unbroken token wraps
           inside the card rather than pushing past its edge — a flex item will
@@ -438,6 +445,16 @@ function GroupTitle({ group }: { group: SlotGroup }) {
  * A gender select fed by the master list (GET /ticket/genders). The design
  * system Select holds its own value rather than exposing a native input, so it
  * goes through a Controller instead of register().
+ *
+ * The master list serves ACTIVE genders only, while a slot keeps whatever gender
+ * it was saved with — deactivating an entry never rewrites a stored reference.
+ * So a restored card can hold a value this list does not offer, and a select can
+ * only show a value it has an option for. FR-031: the held value is added to
+ * THIS card's options so it displays, and to no other card's.
+ *
+ * The widening tracks the live field value rather than the seed, which is what
+ * makes the retired option leave the list the moment the guest picks something
+ * else — a list widened from the seed would keep offering it forever.
  */
 function GenderSelect({
   control,
@@ -469,8 +486,11 @@ function GenderSelect({
             </SelectValue>
           </SelectTrigger>
           <SelectContent align="start" alignItemWithTrigger={false}>
-            {(options ?? []).map((option) => (
-              <SelectItem key={option.id} value={option.name} className="p-3">
+            {optionsIncluding(options, field.value as string).map((option) => (
+              // A retired entry is not in the master list and so has no id of
+              // its own; its name is unique within the list and is what the
+              // value is anyway, so it serves as the key.
+              <SelectItem key={option.name} value={option.name} className="p-3">
                 {genderLabel(option.name)}
               </SelectItem>
             ))}
@@ -557,6 +577,20 @@ function DobInput({
 }
 
 /** "FEMALE" → "Female": the master list stores the canonical uppercase value. */
+/**
+ * The offered genders, plus `held` when it is set and the list does not already
+ * contain it (FR-031). Returns the master list untouched in every ordinary case,
+ * so the widening costs nothing on a card holding an active gender.
+ */
+function optionsIncluding(
+  options: GenderOption[] | undefined,
+  held: string,
+): Array<{ name: string }> {
+  const list = options ?? [];
+  if (held === "" || list.some((option) => option.name === held)) return list;
+  return [...list, { name: held }];
+}
+
 function genderLabel(name: string): string {
   return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
 }

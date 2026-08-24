@@ -325,9 +325,19 @@ SET buyer_name = $2, buyer_email = $3, buyer_phone = $4, updated_at = now()
 WHERE orders.id = $1 AND status_id = (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PENDING');
 
 -- name: ListActiveGenders :many
--- The gender master list (clarified 2026-08-05): the forms' options and the
--- values checkout accepts both come from here, never a hardcoded set.
+-- The gender master list as the FORMS' OPTIONS (clarified 2026-08-05): active
+-- entries only, and it must stay that way. Spec 011 FR-031 widens one card's
+-- option list to show a gender that card already holds; it does not widen this.
 SELECT id, name FROM genders WHERE is_active ORDER BY name;
+
+-- name: ListGenders :many
+-- Every gender, active or not, as checkout needs it (spec 011 FR-031, clarified
+-- 2026-08-19). Deactivating an entry never rewrites a stored reference, so a
+-- restored form can submit a gender this list still knows and ListActiveGenders
+-- no longer offers. Checkout resolves gender_id from here — the active-only map
+-- yields the zero value for a retired name, which is an invalid foreign key
+-- rather than a refusal.
+SELECT id, name, is_active FROM genders ORDER BY name;
 
 -- name: UpdateAttendeeDetails :execrows
 -- Checkout TX-D: fills one slot. order_id in the predicate stops a forged slot

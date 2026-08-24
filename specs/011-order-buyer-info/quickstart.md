@@ -167,6 +167,75 @@ first, through the admin API — never by writing the `fees` table.
    positive on the same card (the event name, the QRIS radio). A panel that failed to
    render would otherwise satisfy every "not present" assertion at once.
 
+## Scenario M — A failed payment leaves the forms filled (FR-030 / SC-011 / US7)
+
+This is Track F's acceptance gate. Run steps 1–4 against **unfixed** code first: step 4 must
+fail there, and no other scenario in this suite fails on its own (research R35).
+
+1. Book an order and open its holder forms. Fill every field of every card with values you can
+   recognise later, and note them.
+2. Arm the gateway stub to refuse the next session: `POST {STUB}/__stub/fail-next-session`.
+   The stub answers `400` rather than `500` on purpose — a `5xx` would be retried three times
+   by the API and the failure would be swallowed.
+3. Press Continue to Payment. **Expect** the failure message *"We could not start the payment
+   with the provider. Your details are saved — please try again."* — the API's own words, and
+   the promise this scenario exists to hold it to. **Expect** the order to still be `PENDING`,
+   with `payment_started: false` and its seats still held: a gateway failure after TX-D
+   compensates nothing.
+4. Reload the holder forms address. **Expect every field of every card to carry the value from
+   step 1.** On unfixed code every field is blank here — that is the red this scenario must be
+   seen in before the fix lands.
+5. Press Continue to Payment again without editing anything (the stub is no longer armed).
+   **Expect** it to be enabled on arrival, no field to show an error merely for having been
+   restored, and the checkout to be accepted with exactly the details from step 1.
+6. **Guard against a vacuous pass**: assert a rendered positive alongside — the order summary
+   and the first card's delivery chip must both be present. A screen that failed to render its
+   cards would otherwise satisfy a "fields are filled" check that only counted matches it found.
+7. Repeat step 4 for an order whose forms have **never** been submitted. **Expect** every card
+   empty. Without this pair, a prefill that fired unconditionally would look correct.
+8. **Throttling.** This scenario calls `POST /ticket/checkout/:order_id` **twice for one order**
+   — the first in the suite to do so — and `RATE_LIMIT_CHECKOUT` defaults to rate `0.2`/s with
+   burst `3`. Run it under `E2E_RATE_LIMIT_ENABLED` both on and off, per constitution v4.2.0
+   Principle VIII. **Expect** identical results in both runs. If the second checkout answers
+   `RATE_LIMITED`, the scenario is sharing an allowance with another checkout-calling scenario
+   and needs its own client identity — that is an isolation defect in the scenario, not a
+   product defect.
+
+## Scenario N — A re-read never rewrites what the guest is typing (FR-032 / SC-012)
+
+1. Open a restored screen from Scenario M. Edit one card's Full Name to something new and clear
+   another card's Email entirely. Leave a third field half-typed.
+2. Switch to another browser tab, wait a moment, and switch back. This is not an artificial
+   step: the order is re-read on every window focus, and returning from a banking app is the
+   normal way this screen is used.
+3. **Expect** all three to be exactly as left — the new name kept, the cleared email still
+   empty, the half-typed value untouched. Nothing reverts to the stored value.
+4. Drop and restore the network connection and repeat the check; the reconnect refetch must
+   behave the same.
+5. **Expect** the cleared email's card to have Continue to Payment disabled until it is valid
+   again, and **expect** nothing to put the old value back when it re-enables.
+
+## Scenario O — A gender that was retired still restores and still submits (FR-031 / SC-013)
+
+1. Arrange an order whose holder details are saved with a gender that is then deactivated in the
+   master list through the admin API. Deactivate, do not delete — a referenced entry is retired
+   by its flag.
+2. Open the holder forms. **Expect** that card's gender to show as selected, reading its proper
+   label rather than blank or a raw value.
+3. Open that card's gender select. **Expect** the retired option to be listed there.
+4. Open a **different** card's gender select. **Expect** the retired option to be absent — it is
+   widened onto the card that holds it, never onto the master list.
+5. Press Continue to Payment without touching the gender. **Expect** the checkout to be accepted
+   and the slot to still carry that same gender afterwards. On unfixed code this answers
+   `400001` on `attendees[i].gender`.
+6. Change that card's gender to an active one and reopen the select. **Expect** the retired
+   option to be gone.
+7. Server side, bypassing the form: submit the retired gender on a slot that never carried it.
+   **Expect** `400`, code `400001`, key `attendees[i].gender` — the widening is per slot, not a
+   general amnesty.
+8. **Expect `GET /ticket/genders` to be unchanged** — active entries only. If the retired gender
+   appears there, the master list has been widened instead of one card's options.
+
 ## Automated checks
 
 - Backend: `cd backend && ./scripts/test.sh ./...` plus `go build ./... && go vet ./...`. The notification suite encodes the single-recipient contract directly: its fixture's two holders both have addresses that are NOT the buyer's, so a regression back to fan-out fails immediately rather than passing vacuously.
@@ -174,4 +243,6 @@ first, through the admin API — never by writing the `fees` table.
 - Track A starting signal: the two existing "Time's Up" tests (`page.test.tsx:157`, `checkout/page.test.tsx:236`) **assert a `repeat order` link that FR-024 deletes**, so they fail the moment the modal lands — that failure is expected, not a regression.
 - **Rev. 4 (Track C) additions**: the panel component test gains one case per phase plus the `null` and `"0.00"` subtotal cases, all on a fixture where `subtotal ≠ total_amount` — the existing fixture at `order-summary-panel.test.tsx:25-27` sets them equal and must not be reused unmodified. `page.test.tsx:541` asserts `/includes all taxes and fees/i` on the form step and **fails the moment Track C lands** — that failure is expected, not a regression. The e2e scenario (Principle VIII) creates a fee via `POST /api/v1/admin/fees` before booking, then asserts the form-step figure, the checkout figure, and the charged amount; on unfixed code it must be seen red first, which on a fee-less database it would not be.
 - **Rev. 5 (Tracks D & E) additions**: the phone floor's starting signal is that **no existing test goes red on its own** — the e2e holder fixture is `081298765432` (12 digits, `guest-purchase.spec.ts:98`) and passes under both rules, exactly the R27 trap in a new place. The new e2e scenario must drive an **11-digit** value and be seen failing against `{10,15}` before the regex moves. The five verbatim assertions of the message string (`checkout_forms_test.go:164`, `page.test.tsx:600`/`:621`/`:629`, plus the two source constants) move in the same change or the suite reports a copy mismatch instead of a rule change. For Track E nothing goes red at all — no production code changes — so its signal is the opposite: the two suspended comment blocks (`page.test.tsx:529-531`, `checkout/page.test.tsx:125-126`) must become live negative assertions, each paired with a rendered positive so absence cannot pass vacuously.
+- **Rev. 6 (Track F) additions**: run the suite in both throttle modes — Scenario M is the first to spend two of the checkout allowance's burst of three (constitution v4.2.0 Principle VIII). The starting signal is that **nothing goes red on its own** — the third instance of the R27 trap. Every existing holder-form test builds its order from fixtures with empty slots, so "the forms are empty" is what they already assert and what unfixed code already does. Scenario M step 4 is the only assertion that separates fixed from unfixed code, and it must be seen red first. Component tests must pair with it: `page.test.tsx:482` currently asserts every input is empty on a fixture *with two slots* and is the test that pins the defect in place — it needs an explicit empty-slots fixture to keep asserting FR-030's last clause, plus a new filled-slots case. The clobber rule (FR-032) needs its own test that re-renders with a changed order object and asserts the fields do **not** move, because no user-visible symptom distinguishes a correct implementation from one that re-syncs until a guest is mid-type. `e2e/support/gateway-stub.ts:80` exposes `/__stub/fail-next-session` but **no helper calls it today** — the helper is part of this track.
+
 - **Rev. 3 additions**: the modal's three sealed dismissal routes (Escape / backdrop / scroll) and its single-button content belong in a component test, not only in Scenario G — a manual-only check will not survive a Base UI upgrade that adds a dismissal reason. Assert on the *page behind* too: the forms must still be in the DOM with their typed values, which is what distinguishes FR-022 from the old full-page swap. On the backend, the `packages.is_active` conversion needs a test that an inactive package is absent from the public booking list, since that filter is the only thing standing between a retired bundle and a guest buying it.

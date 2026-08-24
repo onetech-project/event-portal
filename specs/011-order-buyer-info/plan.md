@@ -1,6 +1,6 @@
 # Implementation Plan: Order Page Buyer Information — Per-Ticket Holder Forms
 
-**Branch**: `feat/buyer` (spec directory `011-order-buyer-info`) | **Date**: 2026-08-13 (rev. 5 — phone floor + summary-card amendment) | **Spec**: [spec.md](spec.md)
+**Branch**: `feat/buyer` (spec directory `011-order-buyer-info`) | **Date**: 2026-08-19 (rev. 6 — restoring saved holder details) | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `/specs/011-order-buyer-info/spec.md`
 
@@ -18,13 +18,17 @@ Rev. 3's two tracks are **also delivered** (tasks T031–T051), and are retained
 
 Rev. 4's Track C is **also delivered** (tasks T052–T060): the form-filling step renders the pre-fee `subtotal` behind an unchanged "Total Payment" heading, the note states fees arrive at the next step, and the e2e scenario arranges a real fee so the assertion is not vacuous (research R27).
 
-Rev. 5 adds two tracks from the **2026-08-13 clarification session**, and they are the only outstanding work in this feature:
+Rev. 5 added two tracks from the **2026-08-13 clarification session**:
 
 **Track D — Phone floor 10 → 12 (FR-006).** Backend + frontend, no schema change. The validator narrows from `^[0-9]{10,15}$` to `^[0-9]{12,15}$` on both sides of the wire, and the one canonical error string moves with it. Length alone; no prefix branch is introduced, so the floor is counted on the value exactly as typed — an 11-digit local number is refused in `08…` form and accepted as `628123456789`. The typing mask keeps its 15-digit ceiling and gains no floor. **Nothing at rest is re-validated**: `attendees.phone` stays `VARCHAR(50)` with no CHECK, and stored 10- and 11-digit numbers remain valid, displayable, and gateway-deliverable permanently (research R29).
 
 **Track E — FR-013 / FR-014 amend to the shipped panel.** No production change at all. The summary card was hand-edited to Figma `206-3145` — no Booking ID, no per-unit price on the ticket line — and the spec has now been amended to match rather than the panel restored. The work is converting the two suspended comment blocks in `page.test.tsx` and `checkout/page.test.tsx` into live negative assertions, deleting the stale NOTE in the component, and clearing the "open disagreement" record from the quality checklist (research R30).
 
-**Neither track needs a constitution amendment.** v4.0.0's Critical Data Flow Rules govern the panel's *money figures* (Track C's territory) and say nothing about phone format, the Booking ID, or a per-unit price. Track D is the first change in this feature to *narrow* a validation rule, which is why its at-rest question needed answering before it could be planned.
+Rev. 6 adds one further track from the **2026-08-19 clarification session**, and Tracks D, E and F are the outstanding work in this feature:
+
+**Track F — Restoring saved holder details (FR-030 – FR-033), added 2026-08-19.** Frontend, plus one narrowly-scoped acceptance change on the checkout endpoint. No schema change, no migration, no response-shape change. A guest whose payment fails is told by the API — in those words — that their details are saved, and is then returned to a screen with every field blank. The details really are saved: TX-D commits before the gateway is called, and a gateway failure compensates nothing ([service.go:383, :504](../../backend/internal/order/service.go)). The forms discard them because `visitor-form.tsx:125` hardcodes empty `defaultValues` on the reasoning *"the server holds nothing to prefill from"* — true under spec 008's Option B, and invalidated by this feature's own checkout call. The fix is to seed `defaultValues` from `order.slots`, which the page already fetches (research R31, R32). Two consequences carry real design weight: the seed must happen **once** and never re-sync, because the order is re-read on every window focus and a `reset()` effect would wipe a guest's typing on their way back from their banking app (R33); and a restored gender that has since been retired must be accepted back by the checkout, which today refuses it and would write a zero-value foreign key (R34).
+
+**Neither Track D nor Track E needs a constitution amendment, and neither does Track F.** v4.0.0's Critical Data Flow Rules govern the panel's *money figures* (Track C's territory) and say nothing about phone format, the Booking ID, or a per-unit price. Track D is the first change in this feature to *narrow* a validation rule, which is why its at-rest question needed answering before it could be planned.
 
 ## Technical Context
 
@@ -44,13 +48,19 @@ Rev. 5 adds two tracks from the **2026-08-13 clarification session**, and they a
 
 **Scale/Scope (rev. 5)**: Track D — 2 source files (one Go, one TSX), 2 test files, 1 e2e spec; zero migrations, zero SQL, zero DTO shape changes. Track E — 0 source files, 2 test files, 1 comment deletion, 1 checklist note.
 
+**Scale/Scope (rev. 6)**: Track F — 4 frontend source files, 3 Go files, 1 new SQL query under `sqlc generate`, ~4 test files, 1 e2e spec + 1 e2e helper. **Zero migrations, zero schema changes, zero response-shape changes.**
+
+**Storage (rev. 6)**: **None, and no new column.** Every value Track F restores is already stored and already returned — `ListAttendeeSlotsByOrderID` selects `name`, `email`, `phone`, `dob` and the gender NAME today, and `TicketOrderSlot` already types all five ([data-model.md](data-model.md) §9). The single storage-adjacent change is a new read: checkout stops sharing `ListActiveGenders` with `GET /ticket/genders` and gains `ListGenders` (`id, name, is_active`), because the endpoint must keep offering active genders only while the checkout must be able to resolve a retired one. `genders` keeps the shape §7.1 gave it.
+
+**Testing (rev. 6)**: **Track F is the third instance of the R27 trap, and the most deceptive of the three.** Nothing goes red on its own. Every holder-form fixture in the suite has empty slots, so "the forms are empty" is simultaneously what the tests assert, what unfixed code does, and what fixed code must still do for an unsubmitted order. `page.test.tsx:482` asserts every input is empty on a two-slot fixture and is the assertion holding the defect in place: it needs an explicit empty-slots fixture to keep covering FR-030's last clause, plus a new filled-slots case beside it. The e2e gate needs an order whose forms saved and whose payment did not start, which a successful checkout cannot reach (`payment_started` flips true and the page forwards to `/checkout`); `POST /__stub/fail-next-session` ([gateway-stub.ts:80](../../e2e/support/gateway-stub.ts)) reaches it exactly, and **no spec calls it today** — the helper is part of this track (research R35). The clobber rule (FR-032) needs a test of its own that re-renders with a changed order object and asserts the fields do not move, because nothing a user can see distinguishes a correct implementation from one that re-syncs until someone is mid-type.
+
 **Constraints**: Constitution **v4.0.0**. Tracks A, B, **D and E** need no amendment; Track C required one and **already has it** — the fee-presentation bullet was redefined on 2026-08-12 (3.4.0 → 4.0.0, MAJOR, because a reversal is a backward-incompatible redefinition). DTO isolation (Track B's whole design is "storage moves, wire does not"); domain isolation (no domain imports another's repository; the name↔id mapping lives in SQL, not in a shared Go map that would cross domains); SCHEMA.md must be updated in the same change as any schema change (Technology Stack Requirements) — Track C triggers none of that, having no schema change.
 
 **Scale/Scope**: Track A — 3 frontend files + 2 test files. Track B — 1 migration, **2** domains' `queries/*.sql` under `sqlc generate` (`order` and `event` — verified as the only two whose SQL touches the affected tables), ~4 event Go files, 3 frontend admin files, plus SCHEMA.md. Track C — **1 component + 2 call sites**, 3 test files, 1 e2e spec, 1 e2e helper. Zero backend files, zero migrations, zero SQL.
 
 ## Constitution Check
 
-*GATE: evaluated against constitution **v4.0.0** (current). Tracks A, B, D and E require no amendment — v4.0.0's Critical Data Flow Rules govern the panel's money figures, ticket generation and delivery, quota, admission windows, and cache coherence, and were re-read on 2026-08-13 against both new tracks: no bullet mentions phone format, the Booking ID, or a per-unit price. Track C required one and it is already landed — the fee-presentation bullet was redefined on 2026-08-12, so Track C is written against the amended rule rather than proposing one.*
+*GATE: Tracks A–E were evaluated against constitution **v4.0.0**; rev. 6 re-evaluates Track F against **v4.2.0**, the current text — it has gained Principle IX and a throttling clause on Principle VIII since rev. 5, both of which bear on Track F's e2e scenario and are answered in the rev. 6 rows below. Tracks A, B, D and E require no amendment — v4.0.0's Critical Data Flow Rules govern the panel's money figures, ticket generation and delivery, quota, admission windows, and cache coherence, and were re-read on 2026-08-13 against both new tracks: no bullet mentions phone format, the Booking ID, or a per-unit price. Track C required one and it is already landed — the fee-presentation bullet was redefined on 2026-08-12, so Track C is written against the amended rule rather than proposing one.*
 
 | Principle | Verdict | Evidence |
 |---|---|---|
@@ -68,6 +78,19 @@ Rev. 5 adds two tracks from the **2026-08-13 clarification session**, and they a
 | Critical Data Flow Rules — cache coherence | PASS | Track C writes nothing and invalidates nothing. It changes which field an already-cached read is rendered from; the order read itself is unchanged, so no cache key, scope, or invalidation path is touched. |
 | Governance sync (rev. 5) | PASS — no document edit required | Neither track changes the schema, so the "SCHEMA.md in the same change" clause does not fire — and for Track D that is a positive finding rather than an omission: adding a CHECK would have triggered it, and the at-rest clarification forbids one. `PRD.md` and `ARCHITECTURE.md` describe neither phone length nor summary-card contents. The one document that **does** need an edit is not a governance document: [checklists/requirements.md](checklists/requirements.md) still records the FR-013/FR-014 disagreement as open, and Track E closes it. |
 | Governance sync | **PASS with a required follow-up (Track B only)** | Track B changes the schema, so the Technology Stack clause ("Any schema change MUST update `SCHEMA.md` in the same change") binds: SCHEMA.md must carry migration `000013`, the two master-list tables' new shape, `orders.status_id`, `attendees.gender_id`'s new type, and `packages.is_active` **in the same commit**. ARCHITECTURE.md and PRD.md need no edit — no flow or product-scope change. Track C's own governance sync is already discharged: the v4.0.0 report verified `grep -i fee` returns nothing in ARCHITECTURE.md or PRD.md and that SCHEMA.md's `fees`/`order_fees` tables are untouched by a display rule. |
+| I — Modular Monolith (rev. 6) | PASS | Track F is frontend plus `internal/order` only. No new package, no new domain, no new endpoint. |
+| II — Domain Isolation (rev. 6) | PASS | The gender master list is read by the order domain's own SQL, exactly as today; `ListGenders` joins nothing across a domain boundary and no other domain learns of it. No domain imports another's repository. |
+| III — DTO Isolation (rev. 6) | PASS | **The governing constraint, and it holds in both directions.** `GET /ticket/order/:order_id` is asserted byte-identical — every field Track F restores already ships ([contracts/form-restore.md](contracts/form-restore.md) §1), so the fix adds no field and renames none. `CheckoutFormsRequest` keeps its shape too: `attendees[i].gender` keeps its name, type and position, and only the set of *accepted values* widens (§3). |
+| IV — Transactional Integrity (rev. 6) | PASS | No transaction boundary moves. The new slot-allowance check runs beside the existing `matchVisitorsToSlots` refusal, before TX-D opens; no cache call and no gateway call is introduced anywhere, let alone inside a transaction. The restore itself writes nothing. |
+| V — Payment Gateway Abstraction (rev. 6) | PASS | The `Gateway` interface is untouched. Track F changes what the screen shows *after* a gateway failure, not the failure handling — the 502 path and its message stay exactly as they are, and [contracts/form-restore.md](contracts/form-restore.md) §5 asserts it. |
+| VI — Guest-First MVP Scope (rev. 6) | PASS | It removes a re-typing tax from the guest's retry path and adds no surface — FR-033 explicitly forbids adding even a notice. |
+| VIII — e2e Acceptance Gate (rev. 6) | **PASS only if Track F ships Scenario M** | The holder forms are a covered flow and this changes them, so the gate binds as it did for Tracks C and D — and the trap is the same one a third time, in its most deceptive form. Every existing fixture has empty slots, so **the whole suite stays green against unfixed code** and even a well-meaning scenario proves nothing unless it first *saves* details and then returns. The arrangement must force a gateway failure through `/__stub/fail-next-session` and be observed red before the fix (research R35). Per AGENTS.md the details are saved through the real checkout call, never written into `attendees` by the test. **v4.2.0 adds a second obligation this scenario is unusually exposed to**: the suite must pass with throttling enabled *and* disabled, and throttle scenarios must be isolated so one draining an allowance cannot refuse an unrelated one. Scenario M is the **first scenario in the suite to call `POST /ticket/checkout/:order_id` twice for one order**, and `RATE_LIMIT_CHECKOUT` defaults to rate `0.2`/s with burst `3` — two of three consumed, refilling one per five seconds. It must therefore book its own order, run under its own client identity, and not share a worker's allowance with another checkout-calling scenario. |
+| IX — Request Throttling (rev. 6) | PASS — no throttle changes, one scenario obligation | Track F adds, removes and retunes no throttle: `RATE_LIMIT_CHECKOUT` keeps its policy, and no new endpoint means no new limiter. The principle's relevance here is entirely through Principle VIII's acceptance clause above — Scenario M's second checkout call is real traffic against a real allowance, so the scenario is written to survive `E2E_RATE_LIMIT_ENABLED` in both states rather than assuming the throttle is off. |
+| Critical Data Flow Rules (rev. 6) | PASS | Quota, ticket generation, the one-email-to-the-buyer rule, admission windows and payment state are all untouched. The fee-presentation bullet is untouched: Track F changes no money figure. |
+| Critical Data Flow Rules — cache coherence (rev. 6) | PASS | Track F writes nothing and invalidates nothing. It renders fields already present in a response the page fetches today, so no cache key, scope or invalidation path is involved. Verified against the E2E_CACHE_ENABLED=false requirement: with the cache off the behaviour is identical, because no cached read is consulted. |
+| Governance sync (rev. 6) | PASS — no document edit required | No schema change, so the "SCHEMA.md in the same change" clause does not fire — and as with Track D that is a positive finding: the temptation to "finish the job" here is a column or a constraint, and §9 records that none is needed. `PRD.md` and `ARCHITECTURE.md` describe neither form seeding nor gender lifecycle. **One non-governance document does need editing in the same change**: spec `008-e2e-purchase-flow` asserts empty-on-revisit in four places (`contracts/booking-flow.md:78`, `contracts/api.md:133`, `quickstart.md:122`, `data-model.md:151`), and a superseded rule left standing in a contract document is precisely what let this behaviour survive to be reported. |
+
+**Post-Phase-1 re-check (rev. 6)**: PASS — [research.md](research.md) R31–R35, [data-model.md](data-model.md) §9, [contracts/form-restore.md](contracts/form-restore.md), and quickstart Scenarios M–O introduce no new violation: no endpoint, no migration, no schema change, no cross-domain access, no DTO shape change, no outstanding amendment. Two conditional items are carried into [Complexity Tracking](#complexity-tracking) rather than left in a comment — Principle VIII on Scenario M, and the FR-032 clobber rule, which is a design constraint a reasonable implementation breaks by accident.
 
 **Post-Phase-1 re-check (rev. 5)**: PASS — [research.md](research.md) R29–R30, the narrowed phone rule in [data-model.md](data-model.md) §2, [contracts/checkout-and-delivery.md](contracts/checkout-and-delivery.md) §1, [contracts/fee-presentation.md](contracts/fee-presentation.md) §5, and quickstart Scenarios K–L introduce no new violation: no endpoint, no schema change, no cross-domain access, no DTO shape change, no outstanding amendment. The single conditional verdict is Principle VIII on Track D — a task obligation, carried into [Complexity Tracking](#complexity-tracking) below so it cannot be quietly dropped, exactly as Track C's was.
 
@@ -79,22 +102,94 @@ Rev. 5 adds two tracks from the **2026-08-13 clarification session**, and they a
 
 ```text
 specs/011-order-buyer-info/
-├── plan.md              # This file (rev. 5)
+├── plan.md              # This file (rev. 6)
 ├── research.md          # Phase 0 — R1–R16 (delivered) + R17–R24 (rev. 3)
-│                        #   + R25–R28 (rev. 4) + R29–R30 (rev. 5)
+│                        #   + R25–R28 (rev. 4) + R29–R30 (rev. 5) + R31–R35 (rev. 6)
 ├── data-model.md        # Phase 1 — §1–6 (migration 000012) + §7 (migration 000013);
-│                        #   §2's phone rule narrowed to {12,15} (rev. 5, no schema change)
+│                        #   §2's phone rule narrowed to {12,15} (rev. 5, no schema change);
+│                        #   §9 restoring saved details (rev. 6, no schema change)
 ├── quickstart.md        # Phase 1 — scenarios A–F (delivered) + G–I (rev. 3) + J (rev. 4)
 │                        #   + K (phone floor, incl. legacy at rest) + L (panel contents)
+│                        #   + M–O (restore, no-clobber, retired gender) (rev. 6)
 ├── contracts/
 │   ├── checkout-and-delivery.md   # delivered — API deltas vs specs 008/010;
 │   │                              #   §1 phone rule narrowed to 12-15 (rev. 5)
 │   ├── schema-revision.md         # rev. 3 — package wire break; everything else asserted unchanged
-│   └── fee-presentation.md        # rev. 4 — UI contract per phase; API asserted byte-identical
-│                                  #   + §5 panel contents outside the money figures (rev. 5)
-└── tasks.md             # Phase 2 (/speckit-tasks) — T001–T060 all delivered (rev. 1–4);
-                         #   rev. 5's Tracks D and E are NOT yet decomposed into tasks
+│   ├── fee-presentation.md        # rev. 4 — UI contract per phase; API asserted byte-identical
+│   │                              #   + §5 panel contents outside the money figures (rev. 5)
+│   └── form-restore.md            # rev. 6 — screen contract + the one checkout
+│                                  #   acceptance change; both reads asserted unchanged
+└── tasks.md             # Phase 2 (/speckit-tasks) — T001–T060 delivered (rev. 1–4);
+                         #   T061–T072 Tracks D & E delivered (rev. 5);
+                         #   T073–T090 Track F, phases 18–19 (rev. 6) — outstanding
 ```
+
+### Source Code — Track F (restoring saved holder details)
+
+```text
+frontend/
+├── components/order/
+│   ├── slot-groups.ts                 # SlotGroup gains the seed values, read from
+│   │                                  # the group's FIRST slot (a unit's slots are
+│   │                                  # written identically by the fan-out, so no
+│   │                                  # tie-break is specified — spec Assumptions)
+│   ├── slot-groups.test.ts            # grouping now carries values: assert the seed
+│   │                                  # travels with the group, incl. the pre-010
+│   │                                  # one-slot-per-card shape
+│   ├── visitor-form.tsx               # :125 defaultValues "" → seeded from the group
+│   │                                  # (delete the stale Option B comment, do NOT
+│   │                                  # add a reset() effect — FR-032, research R33);
+│   │                                  # new isoToDob, the inverse of dobToIso :559;
+│   │                                  # :266 options={genders} → per-card list widened
+│   │                                  # by that card's own retired gender (FR-031).
+│   │                                  # GenderSelect already takes options as a prop,
+│   │                                  # so this is a call-site change; a retired entry
+│   │                                  # has no master id, so its React key is its name
+│   └── visitor-form.test.tsx          # NEW — seeding, the no-clobber re-render
+│                                      # (FR-032), and the widened option list
+└── app/(public)/events/[slug]/orders/[orderNumber]/
+    ├── page.tsx                       # :119 delete the stale Option B comment.
+    │                                  # NO code change: OrderForms already mounts
+    │                                  # with data in hand (isPending guard), which
+    │                                  # is what makes seed-once correct (R33)
+    └── page.test.tsx                  # :482 asserts every input empty on a TWO-SLOT
+                                       # fixture — the assertion holding the defect in
+                                       # place. Re-point it at an explicit empty-slots
+                                       # fixture (FR-030's last clause) and add a
+                                       # filled-slots case beside it
+
+backend/internal/order/
+├── queries/order.sql                  # NEW ListGenders :many — id, name, is_active.
+│                                      # ListActiveGenders :288 UNCHANGED; GET
+│                                      # /ticket/genders must keep serving active only
+├── repository.go                      # ListGenders wrapper beside ListActiveGenders
+├── dto.go                             # :292 Validate's gender membership checks the
+│                                      # FULL list. Position unchanged — it still runs
+│                                      # before the order is loaded, so 400-before-404
+│                                      # precedence survives (research R34)
+├── service.go                         # allGenders() beside activeGenders(); new
+│                                      # per-slot allowance after matchVisitorsToSlots;
+│                                      # :452 GenderID resolves from the full map — the
+│                                      # active-only map yields 0 for a retired name,
+│                                      # an invalid FK rather than a refusal
+└── checkout_forms_test.go             # retired gender accepted on its own slot,
+                                       # refused on any other, unknown name still 400001
+
+e2e/
+├── support/gateway-stub.ts            # export a helper for POST /__stub/fail-next-session
+│                                      # (:80 exists; nothing calls it today — R35)
+└── specs/guest-purchase.spec.ts       # Scenario M — save forms, force the gateway to
+                                       # fail, return, assert every field restored.
+                                       # MUST be seen red first (Principle VIII)
+
+specs/008-e2e-purchase-flow/           # supersession, same change (spec FR-030 note):
+├── contracts/booking-flow.md          # :78 "revisit shows empty forms"
+├── contracts/api.md                   # :133 Option B heading
+├── quickstart.md                      # :122 "revisit shows empty slots"
+└── data-model.md                      # :151 Option B note
+```
+
+**Migrations**: none. **Response shapes**: unchanged. **Endpoints**: none added.
 
 ### Source Code — Track D (phone floor 10 → 12)
 
@@ -234,7 +329,7 @@ frontend/
 
 No outstanding constitution violations to justify. Track C needed an amendment and got one before planning began (v4.0.0), rather than shipping against a rule it contradicted; Tracks D and E need none, verified against v4.0.0's bullets rather than assumed.
 
-Five items are carried openly rather than resolved silently — one of which (FR-013/FR-014) rev. 5 finally closes:
+Seven items are carried openly rather than resolved silently — one of which (FR-013/FR-014) rev. 5 finally closes:
 
 | Item | Status |
 |---|---|
@@ -243,5 +338,7 @@ Five items are carried openly rather than resolved silently — one of which (FR
 | **FR-013 / FR-014 vs. the shipped summary** | **CLOSED 2026-08-13 — this is now Track E.** Carried openly through rev. 3 and rev. 4 as a decision nobody had made: the panel was hand-edited to drop the Booking ID and the per-unit price to match Figma `206-3145`, and the two covering assertions were suspended in place. The clarification session bent the spec to the design, so no UI is restored and no code changes; the outstanding work is un-suspending the two assertions as negative checks and clearing the stale "open disagreement" note from the checklist. It is no longer a planning gap held open — it is a track with tasks. |
 | **Track D's e2e scenario is the whole gate, again** | Track D's code change is one regex digit on each side of the wire, and — exactly as with Track C — its risk is entirely that nobody proves it. The e2e holder fixture is 12 digits, so **every existing test passes against unfixed code** (research R29). The scenario must drive an 11-digit value and be seen red under `{10,15}` before the regex moves. **If it is dropped, Track D ships unverified and Principle VIII is breached.** The second, quieter failure mode is moving the regex without moving the five verbatim assertions of the message string, which produces a suite failure that reads like a copy nit and is actually the rule and the guest-facing text disagreeing. |
 | **Track D narrows a rule for the first time** | Every previous change to the phone rule widened it, so no stored value ever became invalid. This one makes real rows non-conforming, and the clarification's answer is that they stay valid at rest permanently. The temptation a future reader will feel is to "finish the job" with a CHECK constraint or a backfill sweep; both are explicitly out of scope and would fail on any environment holding real orders. Recorded here rather than only in research R29 because it is the kind of tidy-up that gets added without being planned. |
+| **Track F's e2e scenario is the whole gate, a third time** | The pattern is now three for three, and this instance is the most deceptive. Track C's fixtures set `subtotal == total_amount`; Track D's fixture was 12 digits; Track F's fixtures have **empty slots**, so "the forms are empty" is what the suite asserts, what unfixed code does, and what fixed code must still do for an order nobody has submitted. A scenario that opens the forms and looks at them proves nothing. It must save details through the real checkout call, force the gateway to fail so `payment_started` stays false, return, and assert the values are back — and be seen red first (research R35). **If it is dropped, Track F ships unverified and Principle VIII is breached.** |
+| **FR-032 is a constraint a good implementation breaks by accident** | The natural way to write "prefill from the server" is an effect that syncs the form whenever the order data changes. It reads as more correct than seeding once, and on this screen it is actively harmful: `useOrderDetail` refetches on window focus and reconnect, and returning from a banking app is the normal path here — so the effect would wipe a guest's typing exactly when they came back to finish. Seeding once needs no mechanism at all; RHF's `defaultValues` are captured at mount and `OrderForms` mounts with data in hand (R33). Recorded here because the failure has no visible symptom until a real guest is mid-type, and because a later reader "fixing" the missing sync is the most likely way this regresses. |
 
 One accepted trade-off is recorded in full at research R17: FR-023 forbids the close control that Base UI's docs recommend keeping inside a modal popup for touch screen-reader users. The single "Return to Home Page" button is that escape — focusable, inside the trap, and a genuine exit — so the guidance's intent is met even though its literal shape is not.

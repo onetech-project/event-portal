@@ -359,6 +359,135 @@ Two things make the negative assertions worth writing carefully:
 
 ---
 
+## R31. The screen contradicts a promise the API already makes
+
+**Decision**: Treat this as a defect in the frontend's seeding of the holder forms, not as a
+missing capability anywhere else.
+
+**Rationale**: When the gateway leg of checkout fails, the API returns
+`CodePaymentInitiationFailed` with the guest-facing message **"We could not start the payment
+with the provider. Your details are saved — please try again."**
+([service.go:504](../../backend/internal/order/service.go)). The details genuinely are saved:
+TX-D committed before the gateway was ever called, and the surrounding comment states the
+design outright — *"A gateway failure after TX-D leaves the order PENDING with its forms saved
+and the hold deadline untouched — the guest retries and only the gateway leg re-runs. No
+compensation."* The guest is then returned to a screen with every field blank. The backend was
+built for this retry; only the screen never read the details back.
+
+The frontend's reason for not reading them is recorded in two places — `visitor-form.tsx:125`
+(*"Option B: always empty — the server holds nothing to prefill from"*) and `page.tsx:119` —
+and it was true when written. Spec 008 fixed persistence at Continue to Payment, so before that
+press there was nothing to render. This feature's own checkout call is what invalidated it, and
+the comments outlived the premise.
+
+**Alternatives considered**: making the failed-gateway path clear the saved details so the
+screen and the storage agree in the other direction — rejected outright. It would discard work
+the guest has already done to fix a rendering bug, and would make the API's message a lie
+rather than the screen's blankness.
+
+## R32. Everything FR-030 needs is already on the wire
+
+**Decision**: No backend read change, no DTO change, no query change, no migration.
+
+**Rationale**: `GET /ticket/order/:order_id` already returns each slot's `name`, `email`,
+`phone`, `dob` and `gender` — `ListAttendeeSlotsByOrderID`
+([order.sql:329-338](../../backend/internal/order/queries/order.sql)) selects them and
+`TicketOrderSlot` ([types.ts:214-232](../../frontend/lib/types.ts)) already types them as
+nullable. The user-supplied payload that opened this work is the proof: filled `slots` alongside
+`payment_started: false`. The page fetches this response today and throws the five fields away.
+
+Two consequences worth stating. First, the LEFT JOIN at `order.sql:336` is **not** filtered on
+`g.is_active`, so a retired gender's name already reaches the client — which is what makes R34
+reachable rather than theoretical. Second, `dob` crosses as a date-only `YYYY-MM-DD` string
+while the field is typed `DD/MM/YYYY`, so restoring it is the inverse of the existing
+`dobToIso` (`visitor-form.tsx:559`) and nothing more.
+
+**Alternatives considered**: adding a dedicated "saved forms" endpoint — rejected as inventing a
+second read of data the page has already fetched.
+
+## R33. Seeding once is what React Hook Form already does; the failure mode is the fix
+
+**Decision**: Derive `defaultValues` from `order.slots` at mount and add no synchronising
+effect. FR-032 is then satisfied by construction.
+
+**Rationale**: `useForm` captures `defaultValues` on first render and does not re-read them when
+props change. `OrderForms` mounts only with data in hand — `page.tsx` returns `<Loading>` while
+`isPending` — so the values are available at that first render, and every later arrival of the
+same query is a re-render that touches no field. That is exactly FR-032.
+
+This matters because the obvious-looking implementation breaks it. `useOrderDetail` sets
+`staleTime: 0` with `refetchOnWindowFocus: true` and `refetchOnReconnect: true`
+([queries.ts:208-212](../../frontend/lib/queries.ts)), so the order is re-read every time the
+guest returns to the tab — which on this screen is the *normal* case, since they have just been
+to their banking app. A `useEffect(() => reset(fromSlots(order.slots)), [order])` would look
+like a faithful reading of FR-030 and would wipe the guest's typing on their way back. The
+requirement is written to forbid it, and the plan carries it as a review item rather than
+trusting the comment.
+
+**Alternatives considered**: `values` (RHF's controlled-props option) instead of
+`defaultValues` — rejected for the same reason: it re-syncs on every change of the object
+passed, which is precisely the clobbering FR-032 forbids.
+
+## R34. The retired gender needs a backend change, and it must not reorder the existing errors
+
+**Decision**: Widen the map `Validate` checks membership against to **all** genders, and add a
+separate per-slot check, after slots are loaded, that any *inactive* gender submitted is the one
+already recorded on that slot.
+
+**Rationale**: `GET /ticket/genders` serves `WHERE is_active`
+([order.sql:288](../../backend/internal/order/queries/order.sql)), while a slot keeps whatever
+gender it was saved with — spec 011's own edge case says deactivating "never rewrites or
+orphans a stored reference". So a restored card can hold a value the select does not offer.
+FR-031 makes the card show it; the backend must then accept it back, and today it does not:
+`Validate` refuses any name outside the active map
+([dto.go:292-294](../../backend/internal/order/dto.go)), and the write resolves
+`GenderID: validGenders[v.Gender]` ([service.go:452](../../backend/internal/order/service.go)),
+which for a retired name yields the zero value — an invalid foreign key, not merely a refusal.
+
+The naive fix is to load the slots before validating, so the per-slot allowance is available in
+one pass. It is rejected: `Validate` currently runs **before** `GetOrderByNumber`, so a
+malformed payload on an unknown order number returns `400001` today and would start returning
+`404` — an observable change to an endpoint this work has no business touching, asserted in
+`checkout_handler_test.go`. Splitting the check keeps every existing precedence intact and
+confines the new refusal to the genuinely new case.
+
+This needs one new query returning `id, name, is_active` for the whole list, from which both
+maps are derived. `ListActiveGenders` stays exactly as it is, because `GET /ticket/genders` must
+keep offering active genders only — FR-031 widens one card's list, not the master list.
+
+**Alternatives considered**: accepting any gender recorded anywhere on the order rather than on
+that specific slot — simpler, one map, no per-slot bookkeeping, and rejected because FR-031
+says a retired gender "MUST still be refused on a slot that did not already carry it". Also
+considered: reactivating a gender on demand — rejected as letting a guest's submission edit
+master data.
+
+## R35. Principle VIII: the trap here is that the reported state is unreachable by accident
+
+**Decision**: The acceptance scenario must force a gateway failure through the stub's existing
+control surface, and must be seen red before the fix.
+
+**Rationale**: The gate binds — the holder forms are a covered flow. The trap is the same shape
+as R27's and R29's, and worse. A scenario that merely loads the forms screen and asserts empty
+fields passes identically against fixed and unfixed code, because an order that has never been
+submitted *should* show empty forms (FR-030's last clause). The scenario has to reach an order
+whose details are saved, and a successful checkout does not reach it: `payment_started` flips
+true and `page.tsx` forwards to `/checkout`.
+
+The one arrangement that lands exactly on the reported state is a checkout whose forms commit
+and whose gateway call then fails, which the stub already supports — `POST
+/__stub/fail-next-session` ([gateway-stub.ts:80](../../e2e/support/gateway-stub.ts)) forces the
+next session open to answer 400, deliberately not 500 so the API's 5xx retry does not swallow
+it. **No spec uses it today and no helper exports it**, so Track F adds the helper. A 400 takes
+the generic failure branch, not the duplicate branch, so the order stays PENDING with its seats
+held and its forms saved — the reported state, arranged entirely through the real API, as
+AGENTS.md requires.
+
+The ended-order path (US7 scenario 8) is arranged differently and more cheaply: let the hold
+lapse, reopen the forms address, and assert the fields are filled behind the modal.
+
+**Alternatives considered**: writing the saved details straight into `attendees` from the test —
+forbidden by AGENTS.md, and it would also skip the cache invalidation the real call performs.
+
 ## Known issues flagged, out of scope
 
 - `lib/booking-stage.ts:28` maps the order route to the "Payment" rail step for both phases (the "Registration" step never lights up). Pre-existing; unchanged.

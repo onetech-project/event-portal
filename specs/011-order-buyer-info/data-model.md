@@ -224,3 +224,56 @@ Listed for completeness, and to record a stronger claim than §7.6's: Track C ch
 The `??` is nullish, not falsy, by decision R28: `"0.00"` is a real subtotal and must render as `Rp 0`; only a `NULL` subtotal (an order predating fees) takes the fallback, and for such an order the stored total already excludes fees, so the fallback is exact rather than approximate.
 
 **Invariant the tests must hold** (SC-005a): for every order, the amount charged after this change equals the amount that would have been charged before it. Track C has no legitimate path to violating this, which is precisely why it should be asserted — a display change that moves money would do so silently.
+
+## 9. Restoring saved holder details (FR-030 – FR-033) — no schema impact; one new read, no new column
+
+**No migration. No table, column, type, index or constraint changes.** Every value FR-030
+restores is already stored and already read: `attendees.name`, `.email`, `.phone`, `.dob` and
+`.gender_id` are written by checkout TX-D and returned — with the gender resolved to its master
+row's NAME — by `ListAttendeeSlotsByOrderID` (§7.3). The restore renders data the order page
+already fetches and currently discards, so nothing about storage moves.
+
+### 9.1 The one storage-adjacent change: reading the whole gender list
+
+FR-031 requires the checkout to accept a gender that is no longer active when it is the value
+already recorded on that slot. Today the only gender read is `ListActiveGenders`
+(`WHERE is_active`), which serves both `GET /ticket/genders` and the checkout's membership
+check. Those two uses now need different sets, so they stop sharing one query:
+
+| Read | Set | Used by | Change |
+|---|---|---|---|
+| `ListActiveGenders` | active only | `GET /ticket/genders` — the forms' options | **unchanged**, and must stay so: FR-031 widens one card's list, never the master list |
+| `ListGenders` *(new)* | every row, with `is_active` | checkout validation + `gender_id` resolution | new `:many` returning `id, name, is_active` |
+
+The new query adds no column and no table. `genders` keeps the shape §7.1 gave it.
+
+### 9.2 Validation, restated as a rule over a slot rather than over the list
+
+The gender rule stops being "is this name in the active list" and becomes a two-part rule, held
+apart so the existing error precedence survives (research R34):
+
+| Stage | Runs | Rule | On failure |
+|---|---|---|---|
+| Shape check | before the order is loaded, as today | the name exists in the **full** gender list | `400001`, `attendees[i].gender` — unchanged text, unchanged position |
+| Slot allowance | after slots are matched | if the name is **inactive**, it MUST equal the gender already recorded on that same slot | `400001`, `attendees[i].gender` |
+
+`gender_id` then resolves from the full map, so a retired name resolves to its real id rather
+than to the zero value the active-only map would have produced.
+
+**Invariants preserved**: a gender never appears on a slot that did not already carry it; no
+guest submission reactivates a master row; `attendees.gender_id` remains a valid foreign key in
+every path, including the retired one — which today it would not be.
+
+### 9.3 What the restore reads, per field
+
+| Wire field (`slots[i]`) | Stored as | Form field | Conversion |
+|---|---|---|---|
+| `name`, `email`, `phone` | `text` | same | none — verbatim |
+| `dob` | `date`, crosses as `YYYY-MM-DD` | typed `DD/MM/YYYY` | inverse of `dobToIso`; must round-trip to the same date |
+| `gender` | `gender_id` → master NAME via LEFT JOIN | select value | none — the wire already carries the name |
+| `id` | `attendees.id` | the card's `slot_ids` | already used; a bundle unit's card seeds from its first slot (§7.5, spec 010 grouping) |
+
+A `null` in any of these means the slot was never filled; that card renders empty (FR-030, last
+clause). A partially-filled slot is not a state the API can produce — checkout validates every
+field of every slot before TX-D opens and writes them in one transaction — so no per-field
+fallback is specified.

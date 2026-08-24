@@ -25,7 +25,61 @@ export type SlotGroup = {
    * solo with its package name as a badge (exactly the old card).
    */
   packageBadge: string | null;
+  /**
+   * What this card's fields start out holding (spec 011 FR-030, clarified
+   * 2026-08-19). Empty strings when the slot has never been filled, which is
+   * every slot until checkout saves them.
+   *
+   * Read from the group's FIRST slot: a bundle unit's slots are written
+   * identically by the submit-time fan-out, so they cannot disagree and no
+   * tie-break between them is specified.
+   */
+  seed: SlotSeed;
 };
+
+/** One card's worth of stored holder details, ready for the form. */
+export type SlotSeed = {
+  name: string;
+  email: string;
+  phone: string;
+  /** DD/MM/YYYY, converted from the wire's date-only YYYY-MM-DD. */
+  dob: string;
+  /** The gender master row's NAME, which may since have been deactivated. */
+  gender: string;
+};
+
+/**
+ * The stored details of one slot as form values. A slot the guest has never
+ * filled carries nulls in every field, and an empty string is what an untouched
+ * input holds — so the two states render identically, which is FR-030's last
+ * clause.
+ */
+function seedFrom(slot: TicketOrderSlot): SlotSeed {
+  return {
+    name: slot.name ?? "",
+    email: slot.email ?? "",
+    phone: slot.phone ?? "",
+    dob: isoToDob(slot.dob),
+    gender: slot.gender ?? "",
+  };
+}
+
+/**
+ * The wire's date-only `YYYY-MM-DD` as the field's `DD/MM/YYYY`. The inverse of
+ * `dobToIso` in visitor-form.tsx, and it must round-trip: a restored date
+ * submitted unchanged has to store the date it came from.
+ *
+ * Anything that is not a plain ISO date comes back empty rather than partly
+ * converted — a half-formed value in a masked field is worse than an empty one,
+ * because the guest cannot tell what it was.
+ */
+export function isoToDob(iso: string | null): string {
+  if (iso === null) return "";
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return "";
+  const [, year, month, day] = match;
+  return `${day}/${month}/${year}`;
+}
 
 /**
  * Groups an order's slots into visitor forms. Slots sharing a non-null
@@ -55,6 +109,7 @@ export function groupOrderSlots(slots: TicketOrderSlot[]): SlotGroup[] {
         packageId: slot.package_id,
         packageUnit: slot.package_unit,
         packageBadge: null,
+        seed: seedFrom(slot),
       };
       bundleGroups.set(key, group);
       groups.push(group);
@@ -70,6 +125,7 @@ export function groupOrderSlots(slots: TicketOrderSlot[]): SlotGroup[] {
       packageId: slot.package_id,
       packageUnit: null,
       packageBadge: slot.package_name,
+      seed: seedFrom(slot),
     });
   }
 

@@ -359,6 +359,33 @@ const HELD: TicketOrderDetail = {
 };
 
 /**
+ * The same held order after a checkout that saved every holder and then failed
+ * at the gateway (spec 011 FR-030). PENDING, no payment code, details stored —
+ * the state the reported defect showed blank.
+ */
+const RESTORED: TicketOrderDetail = {
+  ...HELD,
+  slots: [
+    {
+      ...HELD.slots[0],
+      name: "Heather Higgins",
+      email: "heather@example.com",
+      phone: "144650550532",
+      dob: "1990-10-09",
+      gender: "FEMALE",
+    },
+    {
+      ...HELD.slots[1],
+      name: "Second Holder",
+      email: "second@example.com",
+      phone: "081234509876",
+      dob: "02/03/1990".split("/").reverse().join("-"),
+      gender: "MALE",
+    },
+  ],
+};
+
+/**
  * A held order for ONE bundle unit containing two constituent tickets
  * (spec 010 US1): the registration step must show a single bundle-titled
  * visitor form whose values fan out to both slots.
@@ -474,12 +501,15 @@ async function findContinueButton() {
 }
 
 describe("order page — registration phase (payment not started)", () => {
-  it("shows one empty visitor card per slot and no buyer card", async () => {
+  it("shows one visitor card per slot, empty when the slots hold nothing, and no buyer card", async () => {
     vi.stubGlobal("fetch", registrationFetch(HELD));
 
     renderOrder();
 
-    // Two slots → two cards; every input empty (Option B revisit).
+    // Two slots → two cards. HELD's slots carry nulls — an order nobody has
+    // submitted — so the cards are empty. This is FR-030's last clause, NOT the
+    // old "a revisit always shows empty forms" rule it used to assert: an order
+    // whose details ARE stored comes back filled, which the case below covers.
     const nameInputs = await screen.findAllByPlaceholderText(/as written on id card/i);
     expect(nameInputs).toHaveLength(2);
     for (const input of nameInputs) {
@@ -492,6 +522,48 @@ describe("order page — registration phase (payment not started)", () => {
     expect(
       screen.getByRole("button", { name: /continue to payment/i }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * Spec 011 FR-030 (clarified 2026-08-19). The defect this feature fixes: a
+   * checkout whose forms committed and whose gateway leg then failed leaves the
+   * order PENDING with payment_started false — indistinguishable, from this
+   * screen's point of view, from a plain reload. So the screen does not ask why
+   * the guest is back; it renders what the order holds.
+   */
+  it("brings back the stored details when the order's slots carry them", async () => {
+    vi.stubGlobal("fetch", registrationFetch(RESTORED));
+
+    renderOrder();
+
+    const names = await screen.findAllByPlaceholderText(/as written on id card/i);
+    expect(names[0]).toHaveValue("Heather Higgins");
+    expect(names[1]).toHaveValue("Second Holder");
+    expect(screen.getAllByPlaceholderText("name@example.com")[0]).toHaveValue(
+      "heather@example.com",
+    );
+    // Stored date-only, rendered in the field's own format.
+    expect(screen.getAllByPlaceholderText("DD/MM/YYYY")[0]).toHaveValue("09/10/1990");
+    // FR-009 unchanged: valid on arrival means enabled on arrival.
+    expect(screen.getByRole("button", { name: /continue to payment/i })).toBeEnabled();
+  });
+
+  /**
+   * FR-022 already promised the guest could still see what they had entered
+   * behind the end-of-journey dialog. That held only until they reloaded;
+   * FR-030 is what finally makes it true afterwards.
+   */
+  it("renders the forms filled behind the end-of-journey dialog on an ended order", async () => {
+    vi.stubGlobal(
+      "fetch",
+      registrationFetch({ ...RESTORED, status: "EXPIRED" }),
+    );
+
+    renderOrder();
+
+    await screen.findByRole("heading", { name: /time's up/i });
+    const names = await screen.findAllByPlaceholderText(/as written on id card/i);
+    expect(names[0]).toHaveValue("Heather Higgins");
   });
 
   it("pins the delivery notice to the first holder card only", async () => {
