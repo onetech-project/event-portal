@@ -169,7 +169,9 @@ export function RegistrationView({
         email: values.email.trim(),
         phone: values.phone.trim(),
         dob: dobToIso(values.dob) ?? values.dob,
-        gender: values.gender,
+        // The field holds the id as a string because the Select exchanges
+        // strings; the wire takes the number (spec 022 FR-022).
+        gender_id: Number(values.gender),
         agreed: true,
         event_terms_updated_at: acceptedVersion,
       });
@@ -348,7 +350,17 @@ export function RegistrationView({
               <Row label="Full Name" value={values.name} />
               <Row label="Email" value={values.email} />
               <Row label="Phone Number" value={values.phone} />
-              <Row label="Gender" value={genderLabel(values.gender)} />
+              {/* The review shows the NAME. The field holds the id, so the
+                  label is looked up — a guest is never shown an identifier
+                  (spec 011 FR-036). This form is always rendered fresh, so its
+                  value is always in the active list and the lookup cannot miss
+                  the way a restored holder card's could. */}
+              <Row
+                label="Gender"
+                value={genderLabel(
+                  data?.genders.find((g) => String(g.id) === values.gender)?.name ?? "",
+                )}
+              />
               <Row label="Date of Birth" value={values.dob} />
             </dl>
 

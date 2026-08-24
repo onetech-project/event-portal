@@ -284,6 +284,59 @@
   specific ticket and cannot choose another on it. The dialog is a check on typing, not on
   selection, because there is no selection to get wrong.
 
+### Session 2026-08-24
+
+- **Q: Where should the "master data lives in Redis" requirement be written — into this spec,
+  or its own?**
+  → **A: its own feature spec.** The request that prompted this session carried two things: a
+  defect in this feature's registration path, and a cross-cutting change to how master data
+  (genders, and by extension the other master lists) is read. Only the first is spec 022's.
+  The second touches checkout and the booking surfaces as much as registration, and it cannot
+  be built without amending Constitution Principle VII, whose cacheable-surface list is closed
+  and enumerates `events`, `ticket_types`, packages, `orders` and `attendees` and nothing else —
+  an amendment that must update ARCHITECTURE.md, PRD.md and SCHEMA.md in the same change. Folding
+  that into a guest-registration spec would bury a constitutional change inside a feature nobody
+  reviews for one. Recorded here, and under *Out of Scope*, so the boundary is explicit rather
+  than implied by omission.
+
+- **Q: When a registration is submitted carrying a gender that has since been retired from the
+  master list, should it be refused?**
+  → **A: yes — registration validates against the ACTIVE master only, deliberately unlike
+  checkout.** Checkout resolves a submitted gender against *every* known entry, retired included
+  (spec 011 FR-031), because a restored booking form legitimately carries a value that was active
+  when it was saved. Registration has no such case: the form is rendered fresh from the
+  prerequisites call on every visit and is never restored from saved state, so a retired value
+  can only arrive from a stale tab or a hand-made request. The divergence is recorded rather than
+  left to be inferred, because the two paths sit in the same package and read the same table, and
+  an unexplained difference invites being "harmonised" into silently accepting retired values.
+  FR-022a states the rule; FR-022b names the resolution map so the refusal cannot be
+  re-implemented as a zero-valued foreign key.
+
+- **Q: What evidence closes the defect, given that it made every existing test red?**
+  → **A: a new database-backed Go test pinning the retired-gender refusal, plus the existing
+  suites returning green — no `e2e/specs/` change.** Principle VIII's "confirm it fails before
+  you fix it" is satisfied only trivially here: the package did not compile, so every test in it
+  failed, which proves nothing about genders in particular. The rule that needs a test it has
+  never had is the one clarified above. It is pinned at the Go DB-backed tier and not in `e2e/`
+  because retiring a gender is not reachable through any API — there is no admin CRUD for the
+  master lists (migration 000013) — and `e2e/support/db.ts` deliberately excludes `genders` from
+  its reset as migration-seeded master data. Reaching in to flip `is_active` from a browser spec
+  would add the first master-data write to a suite built to avoid exactly that.
+
+### Session 2026-08-24 (second)
+
+- **Q: Should the registration form submit the gender master entry's identifier rather than its
+  display name?**
+  → **A: yes, the identifier** — matching the holder forms, which change the same way in the same
+  release (spec 011 FR-034, clarified the same day). Registration is the simpler half of the
+  change: its form is always rendered fresh from the prerequisites call and never restored, so it
+  has no equivalent of spec 011 FR-031's retired-gender case and needs no readback carrying two
+  values. FR-022a is unaffected in substance and only changes what it matches on — a retired
+  entry's IDENTIFIER is refused where its name was refused before. FR-022b's warning survives
+  the change intact and matters more under it, not less: an identifier absent from the active
+  master must produce an explicit field-level refusal, never a silent resolution to a zero value,
+  which would now write a foreign key to no row rather than merely failing to match a name.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Invited guest registers and receives a free e-ticket (Priority: P1)
@@ -520,6 +573,11 @@ the registration form's modal.
   again; registration MUST behave the same way.
 - **Event has no authored Terms & Conditions**: registration is unavailable and says so
   (FR-014g), rather than rendering a form whose agreement control can never be satisfied.
+- **Gender retired between the form rendering and the submit**: the submission is refused with a
+  field-level validation error naming the gender, nothing is recorded, and no attendee is written
+  carrying an unresolved gender reference. Registration checks the ACTIVE master only, unlike
+  checkout, which accepts a retired value because a restored booking form can legitimately hold
+  one (FR-022a, FR-022b).
 
 ## Requirements *(mandatory)*
 
@@ -645,7 +703,20 @@ the registration form's modal.
   and MUST use the same length rule and the same verbatim message as the existing holder
   forms, so the identical input fails identically on both surfaces.
 - **FR-021**: Date of birth MUST be a real date and MUST NOT be in the future.
-- **FR-022**: Gender MUST be one of the active values from the shared gender master list.
+- **FR-022**: Gender MUST be one of the active entries of the shared gender master list. The
+  submitted value is the entry's IDENTIFIER, not its display name (clarified 2026-08-24, matching
+  spec 011 FR-034).
+- **FR-022a**: A gender identifier that exists in the master list but is no longer active MUST be refused,
+  reported as a field-level validation failure alongside any other offending field per FR-024.
+  This is a DELIBERATE divergence from checkout, which accepts a retired value because a restored
+  booking form can legitimately carry one; a registration form is rendered fresh on every visit
+  and is never restored, so it has no such case (clarified 2026-08-24). The divergence MUST NOT be
+  removed in the name of consistency between the two paths.
+- **FR-022b**: The submitted gender identifier MUST be checked against the ACTIVE-only master.
+  The refusal of FR-022a MUST be an explicit validation failure and MUST NOT be left to emerge
+  from a lookup that yields no entry. This matters MORE now that an identifier rather than a name
+  is submitted: an unmatched name merely failed to resolve, whereas an unchecked identifier would
+  be written straight through as a foreign key to no row.
 - **FR-023**: The email address MUST NOT be checked against prior use. An address that already
   holds a place at this event — whether from a purchase or from an earlier registration — MUST be
   accepted, and each accepted submission MUST produce its own order, attendee and e-ticket, each
@@ -913,6 +984,9 @@ the registration form's modal.
   registration path consults an address's prior use. Sending mail to an address the caller does
   not control remains possible through the unlisted link, as it was before; 100% of submissions
   beyond the configured per-source threshold are refused, and that throttle is the only bound.
+- **SC-017**: 100% of submissions naming a gender that is no longer offered are refused with a
+  field-level validation error and record nothing, and 0 registrants are stored carrying an
+  unresolved gender reference (FR-022a, FR-022b; clarified 2026-08-24).
 
 ## Constitution Deviations Requiring Amendment
 
@@ -1010,3 +1084,10 @@ cache both enabled and disabled, and with throttling both enabled and disabled.
 - Bulk or CSV registration, and admin-initiated registration on a guest's behalf.
 - Registering for more than one ticket, or more than one ticket type, in a single submission.
 - Any change to how paid orders, fees, payments, receipts or the gateway behave.
+- **Caching the gender master list, or any other master data, in Redis.** Requested alongside this
+  feature's gender defect and deliberately separated from it (clarified 2026-08-24): the cacheable
+  surfaces are closed by Constitution Principle VII and admitting a new one requires amending the
+  constitution together with ARCHITECTURE.md, PRD.md and SCHEMA.md. It also spans checkout and the
+  booking surfaces, not just registration. Registration therefore continues to read the master list
+  directly from PostgreSQL, and MUST keep behaving identically if that read is later served from a
+  cache — no correctness of this feature may come to depend on one.

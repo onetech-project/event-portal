@@ -370,7 +370,7 @@ func (s *Service) RecordAgreement(ctx context.Context, orderNumber string, req A
 // Genders returns the active gender master list for the forms' options
 // (GET /ticket/genders, clarified 2026-08-05).
 func (s *Service) Genders(ctx context.Context) ([]GenderOption, error) {
-	records, err := s.repo.ListActiveGenders(ctx)
+	records, err := s.activeGenderRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -381,29 +381,65 @@ func (s *Service) Genders(ctx context.Context) ([]GenderOption, error) {
 	return out, nil
 }
 
-// genderMaps loads the gender master list for checkout: every NAME → its id,
-// plus the set of names still offered to new forms.
+// genderMaps loads the gender master list for checkout: every known IDENTIFIER,
+// plus the subset still offered to new forms.
 //
-// Two maps rather than one because checkout now asks two different questions
-// (spec 011 FR-031, clarified 2026-08-19). "Does this name exist" is a shape
-// check and uses `known`, which includes retired entries — a slot keeps whatever
-// gender it was saved with, so a restored form can legitimately submit one.
-// "May THIS slot use it" is a separate rule applied once the slots are loaded.
+// Keyed by identifier rather than name since 2026-08-24 (spec 011 FR-034): the
+// form submits the id, so nothing here resolves a name any more. What survives
+// unchanged is the reason there are TWO sets rather than one.
 //
-// `known` is also what resolves the stored gender_id (FR-018): the active-only
-// map yields the zero value for a retired name, which writes an invalid foreign
-// key rather than refusing.
-func (s *Service) genderMaps(ctx context.Context) (known map[string]int16, active map[string]struct{}, err error) {
-	records, err := s.repo.ListGenders(ctx)
+// Two sets rather than one because checkout asks two different questions
+// (spec 011 FR-031, clarified 2026-08-19). "Does this identifier exist" is a
+// shape check and uses `known`, which includes retired entries — a slot keeps
+// whatever gender it was saved with, so a restored form can legitimately submit
+// one. "May THIS slot use it" is a separate rule applied once the slots are
+// loaded.
+//
+// `known` is what stops an unmatched identifier being written straight through
+// as a foreign key to no row. Under the old name-based wire an unmatched value
+// merely failed to resolve; an unchecked id would now reach storage.
+// activeGenderRecords and allGenderRecords are the two cached reads of the
+// gender master list (spec 023). Everything that needs genders goes through one
+// of them, and the SHAPING each caller does stays above them, untouched.
+//
+// That split is deliberate. The three consumers produce three different shapes
+// from only two queries, and the difference between two of those shapes IS the
+// retired-gender rule: registration refuses a retired value (spec 022 FR-022a),
+// checkout accepts one on a slot that already held it (spec 011 FR-031). Caching
+// underneath the shaping leaves that rule exactly where it was; caching at the
+// shaping would have pulled it into this feature's blast radius for no gain.
+//
+// The cached value is []GenderRecord — this domain's own repository type, never
+// an ordersql generated struct (Principle III).
+func (s *Service) activeGenderRecords(ctx context.Context) ([]GenderRecord, error) {
+	return cache.Through(ctx, s.cache, cache.GendersActiveKey(),
+		func(ctx context.Context) ([]GenderRecord, error) {
+			return s.repo.ListActiveGenders(ctx)
+		})
+}
+
+// allGenderRecords is every gender, retired included. NOT derivable from
+// activeGenderRecords: ListActiveGenders selects only active rows and leaves
+// GenderRecord.IsActive at its zero value, so the two carry different
+// information and are separately cached.
+func (s *Service) allGenderRecords(ctx context.Context) ([]GenderRecord, error) {
+	return cache.Through(ctx, s.cache, cache.GendersAllKey(),
+		func(ctx context.Context) ([]GenderRecord, error) {
+			return s.repo.ListGenders(ctx)
+		})
+}
+
+func (s *Service) genderMaps(ctx context.Context) (known map[int16]struct{}, active map[int16]struct{}, err error) {
+	records, err := s.allGenderRecords(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	known = make(map[string]int16, len(records))
-	active = make(map[string]struct{}, len(records))
+	known = make(map[int16]struct{}, len(records))
+	active = make(map[int16]struct{}, len(records))
 	for _, r := range records {
-		known[r.Name] = r.ID
+		known[r.ID] = struct{}{}
 		if r.IsActive {
-			active[r.Name] = struct{}{}
+			active[r.ID] = struct{}{}
 		}
 	}
 	return known, active, nil
@@ -486,10 +522,11 @@ func (s *Service) CheckoutOrder(ctx context.Context, orderNumber string, req Che
 			dob, _ := time.Parse(visitorDobFormat, v.Dob) // validated above
 			filled, err := s.repo.UpdateAttendeeDetails(ctx, tx, v.ID, ord.ID, SlotDetails{
 				Name: v.Name, Email: v.Email, Phone: v.Phone, Dob: dob,
-				// Membership was validated above, so the name always resolves —
-				// from the FULL map, because a retired gender that its own slot
-				// already carried is accepted and still needs its real id.
-				GenderID: knownGenders[v.Gender],
+				// The form now submits the identifier directly (spec 011
+				// FR-034), so nothing is resolved here. Membership — including
+				// the retired-but-already-held case — was validated above, which
+				// is what makes writing it straight through safe.
+				GenderID: v.GenderID,
 			})
 			if err != nil {
 				return err
@@ -721,21 +758,21 @@ func primaryContact(visitors []CheckoutVisitor, slots []AttendeeSlotRecord) Chec
 func validateRetiredGenders(
 	visitors []CheckoutVisitor,
 	slots []AttendeeSlotRecord,
-	activeGenders map[string]struct{},
+	activeGenders map[int16]struct{},
 ) error {
-	held := make(map[uuid.UUID]string, len(slots))
+	held := make(map[uuid.UUID]int16, len(slots))
 	for _, slot := range slots {
-		if slot.Gender != nil {
-			held[slot.ID] = *slot.Gender
+		if slot.GenderID != nil {
+			held[slot.ID] = *slot.GenderID
 		}
 	}
 
 	fields := map[string]string{}
 	for i, v := range visitors {
-		if _, ok := activeGenders[v.Gender]; ok {
+		if _, ok := activeGenders[v.GenderID]; ok {
 			continue
 		}
-		if held[v.ID] != v.Gender {
+		if held[v.ID] != v.GenderID {
 			// Same code, key and text as the ordinary refusal in Validate: from
 			// the guest's side this is one rule about one field, and a second
 			// wording would only tell them the server has two.
@@ -802,7 +839,7 @@ func visitorFieldDiffs(a, b CheckoutVisitor) []string {
 	if a.Dob != b.Dob {
 		diffs = append(diffs, "dob")
 	}
-	if a.Gender != b.Gender {
+	if a.GenderID != b.GenderID {
 		diffs = append(diffs, "gender")
 	}
 	return diffs

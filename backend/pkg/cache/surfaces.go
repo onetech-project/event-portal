@@ -10,8 +10,10 @@ import (
 )
 
 // Family names one cacheable list. The set below is CLOSED: Constitution
-// Principle VII enumerates exactly these surfaces, and adding a tenth requires
-// amending the constitution, not just adding a constant here.
+// Principle VII enumerates exactly these surfaces, and adding to it requires
+// amending the constitution, not just adding a constant here. FamilyGendersMaster
+// was added that way — constitution v6.1.0 admits the gender master list BY NAME,
+// and deliberately does not admit master data as a category.
 //
 // Family is also the Prometheus label, which is why it is a small fixed set —
 // an event id or a filter value must never reach a metric label.
@@ -32,6 +34,13 @@ const (
 
 	// Packages resolved by event id rather than slug (internal read path).
 	FamilyPackagesByEvent Family = "packages_by_event"
+
+	// The gender master list (spec 023). ONE family for both projections, not
+	// two: the active-only list is a filtered variant of the all-known list, and
+	// the Paging comment below records why a variant belongs in the fingerprint
+	// rather than in the family — Family is the Prometheus label, and a variant
+	// there makes the label set grow with the variants.
+	FamilyGendersMaster Family = "genders_master"
 )
 
 // Families is the registry. Anything not listed here cannot be cached: the key
@@ -47,6 +56,7 @@ var Families = []Family{
 	FamilyOrdersAdmin,
 	FamilyAttendeesAdmin,
 	FamilyPackagesByEvent,
+	FamilyGendersMaster,
 }
 
 // --- Paging -----------------------------------------------------------------
@@ -118,6 +128,26 @@ func PackagesAdminKey(eventID uuid.UUID) Key {
 // PackagesByEventKey is the by-id package read.
 func PackagesByEventKey(eventID uuid.UUID) Key {
 	return Key{Family: FamilyPackagesByEvent, Scope: Event(eventID)}
+}
+
+// GendersActiveKey is the ACTIVE-only gender master list: the options a holder
+// form offers, and what a registration validates and resolves against.
+//
+// Distinct from GendersAllKey and it must stay that way. Collapsing the two would
+// either refuse a retired gender that checkout must accept on a slot which
+// already held it (spec 011 FR-031), or offer one that a registration form must
+// not (spec 022 FR-022a). The fingerprints are compile-time constants, so nothing
+// caller-supplied reaches the key and the optSearch hashing concern below does
+// not arise here.
+func GendersActiveKey() Key {
+	return Key{Family: FamilyGendersMaster, Scope: Master(), Fingerprint: "proj=active"}
+}
+
+// GendersAllKey is every gender, retired included: what checkout resolves a
+// restored form's stored value through. See GendersActiveKey for why the two are
+// separate keys.
+func GendersAllKey() Key {
+	return Key{Family: FamilyGendersMaster, Scope: Master(), Fingerprint: "proj=all"}
 }
 
 // OrdersAdminKey is one page of one filter combination of the admin order list.

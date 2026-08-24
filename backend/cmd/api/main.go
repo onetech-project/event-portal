@@ -196,8 +196,36 @@ func run(log *logger.Logger) error {
 			if err := rc.Ping(pingCtx); err != nil {
 				log.Warn("cache is not reachable at startup; serving from the database until it appears",
 					"error", err.Error())
+				// The master-data refresh below did not run. Said out loud rather
+				// than left silent: master data has no write path, so startup is
+				// the ONLY event that makes a migration's change visible, and a
+				// boot that skipped it can serve a pre-migration list. What bounds
+				// that window is CACHE_TTL, which is exactly the "backstop for an
+				// invalidation that was somehow missed" it is documented to be.
+				// Refusing to start is not an option: Principle VII requires the
+				// API to start and serve with the cache absent (spec 023 FR-008a).
+				log.Warn("master data was not refreshed at startup; a pre-migration list may be served until the TTL lapses",
+					"ttl", cfg.CacheTTL.String())
 			} else {
 				log.Info("connected to the cache", "ttl", cfg.CacheTTL.String())
+				// Master data is reachable only by migration, so it has no commit
+				// to invalidate on. Service start is its triggering event
+				// (Constitution VII, third case, v6.1.0): a migration always
+				// arrives with a deployment, and a deployment restarts the
+				// service. One instance starting clears it for all of them,
+				// because the generation counter is shared.
+				//
+				// Master() and NOTHING else (FR-009). FlushAll here, or passing a
+				// second scope, would discard the event catalogue and every admin
+				// order list on every single boot — surfaces that are expensive to
+				// rebuild and were already correct by their own write-triggered
+				// invalidation.
+				if err := rc.Invalidate(startupCtx, cache.Master()); err != nil {
+					log.Warn("could not refresh master data at startup; the TTL bounds any staleness",
+						"error", err.Error(), "ttl", cfg.CacheTTL.String())
+				} else {
+					log.Info("master data refreshed at startup", "scope", cache.Master().String())
+				}
 			}
 			cancelPing()
 		}

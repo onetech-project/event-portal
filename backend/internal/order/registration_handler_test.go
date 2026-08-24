@@ -33,6 +33,9 @@ func newRegistrationAPI(t *testing.T, quota int32) (*echo.Echo, registrationFixt
 	return e, f
 }
 
+// gender_id, not gender: the wire submits the master entry's IDENTIFIER since
+// 2026-08-24 (spec 022 FR-022). Raw JSON on purpose — this is the level at which a
+// DTO tag and the wire could drift apart unnoticed.
 func registrationBody(f registrationFixture) string {
 	return fmt.Sprintf(`{
 		"slug":"%s",
@@ -40,10 +43,10 @@ func registrationBody(f registrationFixture) string {
 		"email":"halo@example.com",
 		"phone":"628125567820",
 		"dob":"1996-04-12",
-		"gender":"MALE",
+		"gender_id":%d,
 		"agreed":true,
 		"event_terms_updated_at":"%s"
-	}`, f.event.Slug, f.updatedAt.UTC().Format(time.RFC3339Nano))
+	}`, f.event.Slug, f.maleGenderID, f.updatedAt.UTC().Format(time.RFC3339Nano))
 }
 
 // Spec 022 T050 / FR-012: SIX distinct reasons a registration is unavailable, and

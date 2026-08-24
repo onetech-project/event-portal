@@ -12,6 +12,7 @@ import {
   health,
   metricValue,
   metrics,
+  publicGenders,
   isoHoursFromNow,
   publicTicketTypes,
   putTerms,
@@ -212,6 +213,46 @@ test.describe("Read cache stays invisible to users", () => {
     await page.reload();
     await expect(page.getByText("Flushable")).toBeVisible();
     expect((await publicTicketTypes(event.slug))[0].quota_remaining).toBe(4);
+  });
+
+  /**
+   * Spec 023. The gender master list is the one cached surface with no write
+   * path — only a migration changes it — so it is also the one whose entry can
+   * never be invalidated by anything a test does. That makes it the easiest
+   * surface to cache WRONG in a way nothing notices: a list that is correct but
+   * never actually served from the store looks identical from here.
+   *
+   * So this asserts on the hit counter, not on the names. The names are checked
+   * too, but they would pass against an implementation that does nothing.
+   */
+  test("the gender master list is served from cache after the first read", async () => {
+    const first = await publicGenders();
+    expect(first.length).toBeGreaterThan(0);
+
+    const before = metricValue(
+      await metrics(),
+      'cache_requests_total{family="genders_master",result="hit"}',
+    );
+
+    for (let i = 0; i < 5; i++) {
+      expect(await publicGenders()).toEqual(first);
+    }
+
+    const after = metricValue(
+      await metrics(),
+      'cache_requests_total{family="genders_master",result="hit"}',
+    );
+    expect(after - before).toBe(5);
+  });
+
+  test("an operator flush leaves the gender list correct", async () => {
+    const before = await publicGenders();
+
+    const flushed = await flushCache(token);
+    expect(flushed.status).toBe(200);
+
+    // Rebuilt from PostgreSQL, byte-identical, same order.
+    expect(await publicGenders()).toEqual(before);
   });
 
   /**

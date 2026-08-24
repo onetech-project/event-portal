@@ -97,23 +97,35 @@ nothing else (Constitution Principle VII). PostgreSQL remains the single source 
 truth; nothing exists only in Redis, and `FLUSHDB` costs latency and nothing else.
 Redis MUST NOT be used for writes, sessions, locks, queues, or pub/sub.
 
-*What is cached* — a closed set of nine list reads, in both their public and admin
-projections: the event catalogue, per-event ticket-type and package lists, and the
-admin order and attendee lists including their filtered variants. Nothing else:
-not detail reads, not ticket lookup by code, not payment status, not the QRIS
-image. The set is enforced by the key-constructor registry in `pkg/cache/surfaces.go`,
-and extending it requires a constitution amendment.
+*What is cached* — a closed set of ten list reads. Nine in both their public and
+admin projections: the event catalogue, per-event ticket-type and package lists,
+and the admin order and attendee lists including their filtered variants. The
+tenth, admitted by constitution v6.1.0, is the **gender master list** in both its
+projections — the active-only list a holder form offers, and the all-known list
+checkout resolves a retired value through, which must stay separately correct. It is admitted by name
+and does NOT admit master data as a category: `fees` is read inside the
+order-writing transaction where a cache call is refused outright, and
+`order_statuses` is never read as a list. Nothing else: not detail reads, not ticket
+lookup by code, not payment status, not the QRIS image. The set is enforced by the
+key-constructor registry in `pkg/cache/surfaces.go`, and extending it requires a
+constitution amendment.
 
-*How it stays fresh* — refresh-on-write, never expiry. Each scope owns a
+*How it stays fresh* — refresh-on-event, never expiry. Each scope owns a
 generation counter in Redis and cache keys embed its current value, so a write
-invalidates every entry derived from that scope with a single `INCR`. Three scopes
-exist:
+invalidates every entry derived from that scope with a single `INCR`. For every
+surface with a write path that event is the commit. For a surface with **no** write
+path — the gender master list, which only a migration changes — the event is
+**service start**, which ties freshness to the deployment that carries the
+migration; that invalidation is scoped to master data alone and never prevents
+startup if Redis is unreachable, in which case the TTL backstop bounds the window.
+Four scopes exist:
 
 | Scope | Counter | Covers |
 |---|---|---|
 | `events` | `gen:events` | Catalogue + admin event list |
 | `event:{id}` | `gen:event:{id}` | That event's ticket-type and package lists |
 | `orders` | `gen:orders` | Every admin order and attendee variant |
+| `master` | `gen:master` | The gender master list, both projections |
 
 The single shared `orders` counter is what lets one order change reach every warm
 filter combination without the writer knowing which are warm. The TTL

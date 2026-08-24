@@ -590,7 +590,11 @@ type AttendeeSlotRecord struct {
 	Email          *string
 	Phone          *string
 	Dob            *time.Time
-	Gender         *string
+	// GenderID is what a restored form submits, Gender what it displays — both,
+	// because a retired entry can be resolved from neither direction against the
+	// active-only master list (spec 011 FR-035).
+	GenderID *int16
+	Gender   *string
 }
 
 // ListAttendeeSlotsByOrderID returns an order's slots in stable insertion
@@ -617,6 +621,7 @@ func (r *Repository) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uui
 			Email:          row.Email,
 			Phone:          row.Phone,
 			Dob:            dob,
+			GenderID:       row.GenderID,
 			Gender:         row.Gender,
 		})
 	}

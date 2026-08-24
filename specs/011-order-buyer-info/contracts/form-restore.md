@@ -24,7 +24,8 @@ temptation when "the form does not prefill" is to assume the data is missing and
       "email":  "…@mailinator.com",  // ← restored to Email
       "phone":  "144650550532",      // ← restored to Phone, verbatim
       "dob":    "1010-10-10",        // ← restored to DD/MM/YYYY
-      "gender": "FEMALE"             // ← restored to the gender select
+      "gender_id": 1,                // ← restored INTO the select (what it resubmits)
+      "gender": "FEMALE"             // ← what the select DISPLAYS (FR-035, 2026-08-24)
     }
   ],
   "payment_started": false

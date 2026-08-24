@@ -1,12 +1,13 @@
 import { expect, test } from "@playwright/test";
 
 import {
-  adminLogin,
+adminLogin,
   adminOrders,
   adminOrdersPage,
   bookAsAnotherGuest,
   createRegistrationEvent,
   createSellableEvent,
+  genderIdFor,
   isoHoursFromNow,
   request,
   updateEvent,
@@ -840,7 +841,7 @@ async function registerViaApi(slug: string, ticketTypeId: string, email: string)
       email,
       phone: "628125567820",
       dob: "1996-04-12",
-      gender: "MALE",
+      gender_id: await genderIdFor("MALE"),
       agreed: true,
       event_terms_updated_at: data.updated_at,
     }),

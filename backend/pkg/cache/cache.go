@@ -69,7 +69,7 @@ type Lists interface {
 
 // --- Scopes ----------------------------------------------------------------
 
-// ScopeKind enumerates the three invalidation scopes. There are deliberately no
+// ScopeKind enumerates the invalidation scopes. There are deliberately no
 // others: per-event granularity is what keeps one event's writes from disturbing
 // another's entries, and a single shared orders scope is what lets one order
 // change reach every admin filter variant with one command.
@@ -83,6 +83,17 @@ const (
 	ScopeKindEvent ScopeKind = "event"
 	// ScopeKindOrders covers every admin order and attendee list variant.
 	ScopeKindOrders ScopeKind = "orders"
+	// ScopeKindMaster covers master data — today, the gender list in both its
+	// projections (constitution v6.1.0, spec 023).
+	//
+	// DISJOINT from the three above, and that is the point rather than an
+	// accident: no write path touches master data and any other scope, because
+	// master data has no write path at all. That disjointness is what lets the
+	// startup invalidation this scope exists for stay narrow — bumping it must
+	// not discard the event catalogue or the admin order lists, which are
+	// expensive to rebuild and already correct by their own write-triggered
+	// invalidation.
+	ScopeKindMaster ScopeKind = "master"
 )
 
 // Scope names what a write invalidates.
@@ -99,6 +110,12 @@ func Event(id uuid.UUID) Scope { return Scope{Kind: ScopeKindEvent, ID: id} }
 
 // Orders is the order/attendee-wide scope.
 func Orders() Scope { return Scope{Kind: ScopeKindOrders} }
+
+// Master is the master-data scope. Like Events and Orders, and unlike Event, it
+// carries no id: there is one master-data scope for the process, and both gender
+// projections derive from it — so one INCR orphans both, which is correct,
+// because the migration that changes the table changes both.
+func Master() Scope { return Scope{Kind: ScopeKindMaster} }
 
 // GenerationKey is the Redis key holding this scope's counter. It carries no TTL:
 // losing it while derived entries survived would reset the generation to a value

@@ -522,10 +522,14 @@ WHERE o.order_number = $1;
 -- Ordering (spec 010): standalone slots first, then bundle slots contiguous
 -- per (package_id, package_unit), so one visitor form maps to one unit. The
 -- FIRST row of this ordering is the order's primary contact (spec 011).
--- gender comes back as the master row's NAME (LEFT JOIN: unfilled slots are
--- NULL), keeping the wire contract unchanged over the gender_id FK.
+-- gender comes back as BOTH the master row's id and its NAME (spec 011 FR-035,
+-- clarified 2026-08-24). Not redundancy: a form submits the id, a guest is shown
+-- the name, and a RETIRED entry is absent from the active master list — so a
+-- client given only one of the two could not resolve the other, and FR-031's
+-- restored form would break in one direction or the other. LEFT JOIN: an
+-- unfilled slot is NULL in both.
 SELECT a.id, a.order_id, a.ticket_type_id, a.package_id, a.package_unit,
-       a.name, a.email, a.phone, a.dob, g.name AS gender,
+       a.name, a.email, a.phone, a.dob, a.gender_id, g.name AS gender,
        tt.name AS ticket_type_name
 FROM attendees a
 JOIN ticket_types tt ON tt.id = a.ticket_type_id

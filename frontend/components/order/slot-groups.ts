@@ -44,8 +44,18 @@ export type SlotSeed = {
   phone: string;
   /** DD/MM/YYYY, converted from the wire's date-only YYYY-MM-DD. */
   dob: string;
-  /** The gender master row's NAME, which may since have been deactivated. */
+  /**
+   * The gender master row's IDENTIFIER as a string, which the select exchanges
+   * (spec 011 FR-034). Empty when the slot was never filled.
+   */
   gender: string;
+  /**
+   * The saved entry as (id, name). Present only when the slot holds one, and
+   * needed only when that entry has since been RETIRED: the active master list
+   * no longer carries it, so its display name cannot be looked up (FR-031,
+   * FR-035).
+   */
+  heldGender?: { id: number; name: string };
 };
 
 /**
@@ -60,7 +70,16 @@ function seedFrom(slot: TicketOrderSlot): SlotSeed {
     email: slot.email ?? "",
     phone: slot.phone ?? "",
     dob: isoToDob(slot.dob),
-    gender: slot.gender ?? "",
+    // `== null` catches undefined as well as null. Not pedantry: an older API
+    // that has not yet learned to send gender_id omits the key entirely, and
+    // `String(undefined)` would seed the select with the literal "undefined" —
+    // a value no option matches, so the card would silently show "Select" and
+    // the guest's saved answer would look like one they never gave.
+    gender: slot.gender_id == null ? "" : String(slot.gender_id),
+    heldGender:
+      slot.gender_id == null || slot.gender == null
+        ? undefined
+        : { id: slot.gender_id, name: slot.gender },
   };
 }
 

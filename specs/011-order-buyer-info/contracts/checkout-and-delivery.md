@@ -28,7 +28,7 @@
                    "name": "…", "email": "…",
                    "phone": "081234567890",        // NEW RULE: ^[0-9]{12,15}$
                    "dob": "2000-01-31",
-                   "gender": "FEMALE" } ]          // still the NAME from GET /ticket/genders
+                   "gender_id": 1 } ]              // the ID from GET /ticket/genders (FR-034, 2026-08-24)
 }
 ```
 

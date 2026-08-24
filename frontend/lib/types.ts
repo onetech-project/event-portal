@@ -145,7 +145,11 @@ export type RegistrationSubmission = {
   phone: string;
   /** Date only, YYYY-MM-DD. */
   dob: string;
-  gender: string;
+  /**
+   * The gender master entry's IDENTIFIER, not its display name (spec 022
+   * FR-022, clarified 2026-08-24). The name remains what the guest is shown.
+   */
+  gender_id: number;
   agreed: boolean;
   event_terms_updated_at: string;
 };
@@ -263,6 +267,12 @@ export type TicketOrderSlot = {
   phone: string | null;
   /** Date-only, YYYY-MM-DD. */
   dob: string | null;
+  /**
+   * Both, deliberately (spec 011 FR-035). `gender_id` is what a restored form
+   * SUBMITS; `gender` is what it DISPLAYS. A retired entry is absent from the
+   * active master list, so neither could be derived from the other.
+   */
+  gender_id: number | null;
   gender: string | null;
 };
 

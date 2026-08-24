@@ -14,6 +14,7 @@ import {
   isoHoursFromNow,
   publicOrder,
   longTermsHtml,
+  publicGenders,
   publicTicketTypes,
   putLongTerms,
   putTerms,
@@ -269,6 +270,48 @@ test.describe("Guest purchase, end to end", () => {
     expect(await ticketCodesFor(orderNumber)).toEqual(codes);
   });
 
+  /**
+   * Spec 023. Checkout resolves a holder's gender through the ALL-KNOWN
+   * projection of the master list — the one that includes retired entries so a
+   * restored form can still submit what it was saved with (spec 011 FR-031).
+   * That projection now comes from the read cache.
+   *
+   * The risk this covers is not "the wrong names appear". It is that the two
+   * projections get collapsed into one: serve checkout the ACTIVE-only list and
+   * every retired gender starts being refused, while a form filled from the same
+   * list still looks perfectly normal. Booking through the browser with the
+   * cache already warm is what exercises that resolution end to end.
+   */
+  test("a purchase completes with the gender master list already cached", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "uat-gender-cache",
+      name: "UAT Gender Cache",
+      quota: 5,
+      price: "150000.00",
+    });
+
+    // Warm the master list before the journey starts, so checkout resolves the
+    // holder's gender against a CACHED master rather than a fresh read.
+    const genders = await publicGenders();
+    expect(genders.length).toBeGreaterThan(0);
+
+    const guest = new GuestJourney(page);
+    await guest.openTicketSelection(event.slug);
+    await guest.selectQuantity(ticketType.name, 1);
+
+    const orderNumber = await guest.agreeToTermsAndBook();
+    expect(orderNumber).toMatch(/^ORD-/);
+
+    await guest.fillHolder(0, defaultHolder);
+    await guest.payWithQris();
+    await guest.expectAwaitingPayment();
+
+    // The gender resolved and the attendee was written — the assertion that
+    // would fail if checkout had been handed the wrong projection.
+    expect(await attendeeCountFor(orderNumber)).toBe(1);
+    expect(await orderStatusOf(orderNumber)).toBe("PENDING");
+  });
+
   test("a guest can look up an issued ticket by its code", async ({ page }) => {
     const { event, ticketType } = await createSellableEvent(token, {
       slug: "uat-lookup",
@@ -462,11 +505,16 @@ test.describe("Guest purchase, end to end", () => {
 
     // Each line names its own day. Against unfixed code both read the event's
     // opening date and these two dates are identical.
-    const lineDates = await page
-      .locator('[data-testid="order-line-date"]')
-      .allTextContents();
+    //
+    // toHaveCount FIRST, then read: allTextContents() does not auto-wait, so
+    // reading straight after the booking snapshots whatever happens to be in the
+    // DOM — an empty array if the page has not finished rendering. That made this
+    // assertion fail as "0 lines" under load, which reads like a product bug and
+    // is not one.
+    const lines = page.locator('[data-testid="order-line-date"]');
+    await expect(lines).toHaveCount(2);
+    const lineDates = await lines.allTextContents();
 
-    expect(lineDates).toHaveLength(2);
     expect(lineDates[0]).not.toBe(lineDates[1]);
   });
 
@@ -540,8 +588,10 @@ test.describe("Guest purchase, end to end", () => {
     await guest.agreeToTermsAndBook();
 
     // One line, naming both days. Against unfixed code it names only the first.
-    const dates = await page.locator('[data-testid="order-line-date"]').allTextContents();
-    expect(dates).toHaveLength(1);
+    // toHaveCount before reading — see the note in the multi-day test above.
+    const lines = page.locator('[data-testid="order-line-date"]');
+    await expect(lines).toHaveCount(1);
+    const dates = await lines.allTextContents();
 
     const bundleLine = dates[0];
     expect(bundleLine).toMatch(/\d/);
@@ -628,9 +678,10 @@ test.describe("Guest purchase, end to end", () => {
     // The box spans the whole event; the line names the single day the ticket
     // admits on. If the box had been derived from the ticket the two would match.
     const boxRange = await page.getByText(/Gate opens at/i).locator("..").textContent();
-    const lineDate = (
-      await page.locator('[data-testid="order-line-date"]').allTextContents()
-    )[0];
+    // Wait for the line before reading it — see the note in the multi-day test.
+    const lines = page.locator('[data-testid="order-line-date"]');
+    await expect(lines).toHaveCount(1);
+    const lineDate = (await lines.allTextContents())[0];
 
     expect(boxRange).toBeTruthy();
     expect(boxRange).not.toBe(lineDate);

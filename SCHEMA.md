@@ -219,7 +219,10 @@ CREATE TABLE order_items (
 -- pre-010 one-form-per-slot behavior).
 -- Spec 011: gender is a real reference to the genders master (migration 0012
 -- replaced the free-text column + fixed CHECK with gender_id). The API keeps
--- exchanging the gender NAME; reads JOIN genders, writes resolve name -> id.
+-- exchanging the gender ID (migration 0017, 2026-08-24): a form submits
+-- gender_id, and the order readback carries both gender_id and the display name
+-- — a retired entry is absent from the active master list, so a client given
+-- only one could resolve neither the other nor the restored-form case.
 -- Phone is validated digits-only 10-12 at checkout since spec 011 (no CHECK —
 -- pre-011 rows keep their 7-20-digit-era values).
 CREATE TABLE attendees (

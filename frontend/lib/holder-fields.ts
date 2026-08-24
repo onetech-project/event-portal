@@ -66,6 +66,13 @@ export const dobSchema = z
 
 // The gender option set comes from master data, so the schema only requires a
 // choice; the server checks membership against the active list.
+//
+// Held as a STRING even though the wire carries a number (spec 011 FR-034): the
+// design-system Select exchanges string values, so the id is stringified for the
+// field and converted back at submit. Keeping it a string here means an
+// untouched select is "" and fails this check, exactly as before — whereas a
+// numeric field would have to treat 0 as "unselected" and 0 is a value the
+// master list could legitimately assign.
 export const genderSchema = z.string().min(1, "Select a gender.");
 
 // Spec 011 FR-006 (clarified 2026-08-07, floor raised 2026-08-13) — 12-15

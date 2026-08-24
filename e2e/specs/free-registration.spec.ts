@@ -4,6 +4,8 @@ import {
   adminLogin,
   createRegistrationEvent,
   putLongTerms,
+  genderIdFor,
+  publicGenders,
   publicTicketTypes,
   request,
   requestRaw,
@@ -380,7 +382,7 @@ test.describe("The registration endpoint refuses what the form would not offer",
       email: HOLDER.email,
       phone: HOLDER.phone,
       dob: "1996-04-12",
-      gender: "MALE",
+      gender_id: await genderIdFor("MALE"),
       agreed: true,
       event_terms_updated_at: new Date().toISOString(),
     });
@@ -470,6 +472,72 @@ async function currentTermsUpdatedAt(slug: string): Promise<string> {
 }
 
 
+/**
+ * Spec 023. The gender master list moved behind the read cache. These assert the
+ * move is INVISIBLE — that the form offers the same options and the endpoint
+ * refuses the same values, warm or cold.
+ *
+ * Both run in either cache mode on purpose: with E2E_CACHE_ENABLED=false they
+ * exercise the direct database path, which is what makes them a comparison
+ * rather than a self-consistent tautology.
+ */
+test.describe("The gender master list behind the cache", () => {
+  test("the registration form offers the same options warm and cold", async ({ page }) => {
+    const { event, registration } = await createRegistrationEvent(token, {
+      slug: "gender-cache-options",
+    });
+
+    // Cold, then warm: the API answer must not move.
+    const cold = await publicGenders();
+    const warm = await publicGenders();
+    expect(warm).toEqual(cold);
+    expect(cold.length).toBeGreaterThan(0);
+
+    // And the rendered form offers exactly those names, however they were served.
+    await page.goto(`/events/${event.slug}/register/${registration.id}`);
+    const select = page.getByRole("combobox", { name: "Gender" });
+    await expect(select).toBeVisible();
+    await select.click();
+    for (const option of cold) {
+      const label = option.name.charAt(0) + option.name.slice(1).toLowerCase();
+      // exact: "Female" contains "Male", so a substring match resolves to two.
+      await expect(page.getByRole("option", { name: label, exact: true })).toBeVisible();
+    }
+  });
+
+  test("a gender outside the master list is still refused", async () => {
+    const { event, registration } = await createRegistrationEvent(token, {
+      slug: "gender-cache-refusal",
+    });
+    const before = await quotaOf(registration.id);
+
+    // Warm the entry first, so the refusal is decided against a CACHED master
+    // rather than a freshly-read one. That is the path this feature introduces.
+    await publicGenders();
+
+    const refused = await request(`/ticket/register/${registration.id}`, {
+      method: "POST",
+      body: JSON.stringify({
+        slug: event.slug,
+        name: HOLDER.name,
+        email: HOLDER.email,
+        phone: HOLDER.phone,
+        dob: "1996-04-12",
+        // An identifier no master entry carries — the failure mode that would
+        // now reach storage as a foreign key to no row if it were not refused.
+        gender_id: 99999,
+        agreed: true,
+        event_terms_updated_at: new Date().toISOString(),
+      }),
+    });
+
+    // A field-level refusal is apperr.BadRequest — 400, the same as every other
+    // validation failure on this endpoint.
+    expect(refused.status).toBe(400);
+    expect(await quotaOf(registration.id)).toBe(before);
+  });
+});
+
 test.describe("A registration's ticket is an ordinary ticket", () => {
   // SC-003 / FR-028. The code in the e-ticket must open the door. A registration
   // that produced a document nobody could scan would satisfy every other
@@ -514,6 +582,8 @@ test.describe("A registration's ticket is an ordinary ticket", () => {
       registrationQuota: 1,
     });
 
+    // Resolved once, outside the synchronous body builder below.
+    const maleID = await genderIdFor("MALE");
     const body = (email: string) =>
       JSON.stringify({
         slug: event.slug,
@@ -521,7 +591,7 @@ test.describe("A registration's ticket is an ordinary ticket", () => {
         email,
         phone: HOLDER.phone,
         dob: "1996-04-12",
-        gender: "MALE",
+        gender_id: maleID,
         agreed: true,
         event_terms_updated_at: undefined,
       });
@@ -583,7 +653,7 @@ test.describe("A registration's ticket is an ordinary ticket", () => {
         email: HOLDER.email,
         phone: HOLDER.phone,
         dob: "1996-04-12",
-        gender: "MALE",
+        gender_id: await genderIdFor("MALE"),
         agreed: true,
         event_terms_updated_at: stale,
       }),

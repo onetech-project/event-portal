@@ -17,7 +17,7 @@ The goal of this MVP is validation, not scalability. High availability, microser
 *   **Frontend:** Next.js (App Router), TypeScript, TailwindCSS, TanStack Query, React Hook Form, Zod
 *   **Backend:** Golang 1.24+, **Echo v4**, PostgreSQL, **sqlc** (for type-safe SQL queries)
 *   **Infrastructure:** Docker, Docker Compose (PostgreSQL, Redis)
-*   **Cache:** Redis (single node) — read cache for the event list, ticket_type list, and order lists only, refreshed on every committed write. See Constitution Principle VII.
+*   **Cache:** Redis (single node) — read cache for the event list, ticket_type list, order lists, and the gender master list only, refreshed on every committed write. The gender master list has no write path, so it refreshes on service start instead; it is admitted by name and does not put master data as a category in scope — fee and order-status lists stay out. See Constitution Principle VII.
 *   **Payment:** Payment Gateway Abstraction (concrete: Manjo gateway over plain HTTP REST, wire shapes from the shared `cdtc` contract module — no vendor SDK)
 *   **Email & PDF:** SMTP (`go-mail/mail` or `net/smtp`), PDF Generator (`maroto` or `gofpdf`), QR Generator (`go-qrcode`).
 *   **Testing:** Go unit + database-backed tests, frontend Vitest, and a Playwright end-to-end acceptance suite in `e2e/` that drives a real browser through the whole purchase journey. The e2e suite is the acceptance gate for the §1.4 requirements below — see Constitution Principle VIII.

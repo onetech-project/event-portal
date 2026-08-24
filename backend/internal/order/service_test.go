@@ -448,7 +448,7 @@ func TestCheckoutLosingTheStampRaceNamesTheStoredSessionNotItsOwn(t *testing.T) 
 		f.records.record(stored.ID, "txn-winner")
 	}
 
-	resp, err := f.svc.CheckoutOrder(ctx, orderNumber, formsFor(slotIDs))
+	resp, err := f.svc.CheckoutOrder(ctx, orderNumber, formsFor(t, f, slotIDs))
 	require.NoError(t, err)
 
 	assert.Equal(t, "WINNER-QR-PAYLOAD", resp.QRString,

@@ -222,8 +222,11 @@ type CheckoutVisitor struct {
 	Email string    `json:"email"`
 	Phone string    `json:"phone"`
 	// Dob is date-only, YYYY-MM-DD.
-	Dob    string `json:"dob"`
-	Gender string `json:"gender"`
+	Dob string `json:"dob"`
+	// GenderID is the master entry's identifier, not its display name
+	// (spec 011 FR-034, clarified 2026-08-24). The NAME remains what a guest is
+	// shown (FR-036); it is simply no longer what the form submits.
+	GenderID int16 `json:"gender_id"`
 }
 
 // CheckoutFormsRequest is the Option B checkout body
@@ -240,9 +243,9 @@ type CheckoutFormsRequest struct {
 // forms build their options from (clarified 2026-08-05).
 type GenderOption struct {
 	// Narrowed from a uuid string to a small integer by migration 0013
-	// (spec 011 FR-025). Safe because no client reads it: checkout submits the
-	// gender NAME, and the form's select is bound to the name too — verified
-	// across the frontend, not assumed (contracts/schema-revision.md §4).
+	// (spec 011 FR-025). It was inert then — nothing read it, because the wire
+	// carried the name. Since 2026-08-24 it is the value a form SUBMITS
+	// (spec 011 FR-034, spec 022 FR-022), and Name is what the guest is shown.
 	ID   int16  `json:"id"`
 	Name string `json:"name"`
 }
@@ -269,19 +272,21 @@ const visitorPhoneMessage = "Enter a phone number of 12-15 digits."
 // Validate rejects malformed forms with a 400001 whose data is a field→message
 // map (contracts/api.md call 8), so the client can mark the exact inputs.
 //
-// knownGenders maps EVERY gender master NAME to its row id — retired entries
-// included (spec 011: the name is the wire value, gender_id is what checkout
-// stores). Passed in by the service so every problem lands in ONE field map —
-// a guest never fixes the email only to be told about the gender on the next
-// attempt.
+// knownGenderIDs is EVERY gender master identifier — retired entries included.
+// Passed in by the service so every problem lands in ONE field map: a guest
+// never fixes the email only to be told about the gender on the next attempt.
 //
-// Membership here is a shape check: does this name exist at all. Whether a
-// RETIRED name is allowed on the slot submitting it is a separate rule, applied
+// Membership here is a shape check: does this identifier exist at all. Whether a
+// RETIRED one is allowed on the slot submitting it is a separate rule, applied
 // by the service once it knows which slot that is (FR-031, clarified
 // 2026-08-19). The split keeps this check where it is — ahead of the order
 // lookup — so a malformed payload against an unknown order number still answers
 // 400001 rather than 404.
-func (r CheckoutFormsRequest) Validate(knownGenders map[string]int16) error {
+//
+// The check is not optional now that an identifier rather than a name arrives:
+// an unmatched name merely failed to resolve, whereas an unchecked identifier
+// would be written straight through as a foreign key to no row (FR-034).
+func (r CheckoutFormsRequest) Validate(knownGenderIDs map[int16]struct{}) error {
 	fields := map[string]string{}
 
 	if len(r.Attendees) == 0 {
@@ -311,7 +316,10 @@ func (r CheckoutFormsRequest) Validate(knownGenders map[string]int16) error {
 		} else if dob.After(time.Now()) {
 			fields[key("dob")] = "Date of birth cannot be in the future."
 		}
-		if _, ok := knownGenders[v.Gender]; !ok {
+		if _, ok := knownGenderIDs[v.GenderID]; !ok {
+			// Keyed "gender", not "gender_id": the field a guest sees is the
+			// gender select, and the identifier is a submission detail they have
+			// no use for (FR-036).
 			fields[key("gender")] = "Select a valid gender."
 		}
 	}
@@ -365,8 +373,13 @@ type TicketOrderSlot struct {
 	Email          *string    `json:"email"`
 	Phone          *string    `json:"phone"`
 	// Dob is date-only (YYYY-MM-DD), matching the checkout request format.
-	Dob    *string `json:"dob"`
-	Gender *string `json:"gender"`
+	Dob *string `json:"dob"`
+	// GenderID is what a restored form SUBMITS; Gender is what it DISPLAYS.
+	// Both, deliberately (spec 011 FR-035): a retired entry is absent from the
+	// active master list, so a client holding only one could resolve neither the
+	// other nor FR-031's restored-card behaviour.
+	GenderID *int16  `json:"gender_id"`
+	Gender   *string `json:"gender"`
 }
 
 // PublicOrderFee is one frozen fee line on the guest order read, exactly as

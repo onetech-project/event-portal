@@ -13,6 +13,7 @@ function slot(overrides: Partial<TicketOrderSlot> & { id: string }): TicketOrder
     email: null,
     phone: null,
     dob: null,
+    gender_id: null,
     gender: null,
     ...overrides,
   };
@@ -166,6 +167,7 @@ describe("groupOrderSlots — the seed each card starts from", () => {
     email: "heather@example.com",
     phone: "144650550532",
     dob: "1990-10-09",
+    gender_id: 1,
     gender: "FEMALE",
   };
 
@@ -177,7 +179,11 @@ describe("groupOrderSlots — the seed each card starts from", () => {
       email: "heather@example.com",
       phone: "144650550532",
       dob: "09/10/1990",
-      gender: "FEMALE",
+      // The field holds the id as a string (the Select exchanges strings); the
+      // (id, name) pair rides alongside so a RETIRED entry can still be
+      // labelled, which the active master list could not do (FR-035).
+      gender: "1",
+      heldGender: { id: 1, name: "FEMALE" },
     });
   });
 
@@ -186,7 +192,14 @@ describe("groupOrderSlots — the seed each card starts from", () => {
 
     // FR-030's last clause: a slot with nothing saved is indistinguishable from
     // one the guest has not touched, which is what an empty input holds.
-    expect(group.seed).toEqual({ name: "", email: "", phone: "", dob: "", gender: "" });
+    expect(group.seed).toEqual({
+      name: "",
+      email: "",
+      phone: "",
+      dob: "",
+      gender: "",
+      heldGender: undefined,
+    });
   });
 
   it("seeds a bundle unit's single card from the unit's slots", () => {

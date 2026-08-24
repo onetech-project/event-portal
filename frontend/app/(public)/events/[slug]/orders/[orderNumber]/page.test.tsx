@@ -341,6 +341,7 @@ const HELD: TicketOrderDetail = {
       email: null,
       phone: null,
       dob: null,
+      gender_id: null,
       gender: null,
     },
     {
@@ -353,6 +354,7 @@ const HELD: TicketOrderDetail = {
       email: null,
       phone: null,
       dob: null,
+      gender_id: null,
       gender: null,
     },
   ],
@@ -372,6 +374,7 @@ const RESTORED: TicketOrderDetail = {
       email: "heather@example.com",
       phone: "144650550532",
       dob: "1990-10-09",
+      gender_id: 1,
       gender: "FEMALE",
     },
     {
@@ -380,6 +383,7 @@ const RESTORED: TicketOrderDetail = {
       email: "second@example.com",
       phone: "081234509876",
       dob: "02/03/1990".split("/").reverse().join("-"),
+      gender_id: 2,
       gender: "MALE",
     },
   ],
@@ -415,6 +419,7 @@ const BUNDLE_HELD: TicketOrderDetail = {
       email: null,
       phone: null,
       dob: null,
+      gender_id: null,
       gender: null,
     },
     {
@@ -427,6 +432,7 @@ const BUNDLE_HELD: TicketOrderDetail = {
       email: null,
       phone: null,
       dob: null,
+      gender_id: null,
       gender: null,
     },
   ],
@@ -434,8 +440,8 @@ const BUNDLE_HELD: TicketOrderDetail = {
 
 /** The gender master list (GET /ticket/genders) the form's options load from. */
 const GENDERS = [
-  { id: "g1111111-1111-1111-1111-111111111111", name: "FEMALE" },
-  { id: "g2222222-2222-2222-2222-222222222222", name: "MALE" },
+  { id: 1, name: "FEMALE" },
+  { id: 2, name: "MALE" },
 ];
 
 /**
@@ -836,7 +842,9 @@ describe("order page — registration phase (payment not started)", () => {
         email: "siti@example.com",
         phone: PHONE,
         dob: "1995-05-05",
-        gender: "FEMALE",
+        // The wire carries the IDENTIFIER only (spec 011 FR-034). The name is a
+        // display concern and no longer travels on a submission.
+        gender_id: 1,
       });
       expect(body.attendees[1]).toMatchObject({
         id: HELD.slots[1].id,
@@ -921,7 +929,7 @@ describe("order page — registration phase with a bundle", () => {
         expect(attendee.name).toBe("Bundle Visitor");
         expect(attendee.email).toBe("visitor@example.com");
         expect(attendee.dob).toBe("2000-01-31");
-        expect(attendee.gender).toBe("FEMALE");
+        expect(attendee.gender_id).toBe(1);
       }
     });
   });
@@ -996,6 +1004,7 @@ describe("order page — registration phase with a bundle", () => {
       email: null,
       phone: null,
       dob: null,
+      gender_id: null,
       gender: null,
     });
     const TWO_UNITS_HELD: TicketOrderDetail = {

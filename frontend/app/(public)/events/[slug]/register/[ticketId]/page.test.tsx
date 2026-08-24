@@ -21,8 +21,8 @@ const PREREQS = {
   ticket_type_name: "Invitation Access",
   event_terms_updated_at: TERMS_UPDATED_AT,
   genders: [
-    { id: "g1", name: "MALE" },
-    { id: "g2", name: "FEMALE" },
+    { id: 2, name: "MALE" },
+    { id: 1, name: "FEMALE" },
   ],
 };
 

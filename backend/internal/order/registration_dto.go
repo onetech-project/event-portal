@@ -42,13 +42,16 @@ type RegistrationEvent struct {
 type RegistrationRequest struct {
 	// Slug scopes the ticket type to an event, so a type id smuggled from another
 	// event cannot be registered against this one.
-	Slug   string `json:"slug"`
-	Name   string `json:"name"`
-	Email  string `json:"email"`
-	Phone  string `json:"phone"`
-	Dob    string `json:"dob"`
-	Gender string `json:"gender"`
-	Agreed bool   `json:"agreed"`
+	Slug  string `json:"slug"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Phone string `json:"phone"`
+	Dob   string `json:"dob"`
+	// GenderID is the master entry's identifier (spec 022 FR-022, clarified
+	// 2026-08-24), matching the holder forms. The NAME remains what the guest is
+	// shown; it is no longer what the form submits.
+	GenderID int16 `json:"gender_id"`
+	Agreed   bool  `json:"agreed"`
 	// EventTermsUpdatedAt is the VERSION of the Terms & Conditions the guest
 	// actually read, echoed back from the prereqs call.
 	//
@@ -78,7 +81,7 @@ type RegistrationResponse struct {
 // different rules on two forms of one product is a defect, not a feature — a
 // guest who can register with a phone number checkout would reject has found a
 // bug, whichever way round it fails.
-func (r RegistrationRequest) Validate(validGenders map[string]int16) error {
+func (r RegistrationRequest) Validate(activeGenderIDs map[int16]struct{}) error {
 	fields := map[string]string{}
 
 	if strings.TrimSpace(r.Name) == "" {
@@ -95,7 +98,9 @@ func (r RegistrationRequest) Validate(validGenders map[string]int16) error {
 	} else if dob.After(time.Now()) {
 		fields["dob"] = "Date of birth cannot be in the future."
 	}
-	if _, ok := validGenders[r.Gender]; !ok {
+	if _, ok := activeGenderIDs[r.GenderID]; !ok {
+		// Keyed "gender", not "gender_id": the guest sees a gender select, and
+		// the identifier is a submission detail they have no use for.
 		fields["gender"] = "Select a valid gender."
 	}
 

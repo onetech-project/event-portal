@@ -50,7 +50,9 @@ The only contract change in this revision. Admin package endpoints exchange a bo
 
 ## 4. Gender master list — NO contract change (FR-025)
 
-`GET /api/v1/ticket/genders` keeps returning `{ id, name }`. The `id` narrows from a uuid string to a small integer in JSON, but **no client reads it**: the checkout request submits the gender **name** (contract §1 of [checkout-and-delivery.md](checkout-and-delivery.md)), and `frontend/components/order/visitor-form.tsx` binds its select to the name. Verify this before merge rather than assuming — if any client starts keying on `id`, this becomes a breaking change.
+`GET /api/v1/ticket/genders` keeps returning `{ id, name }`. The `id` narrows from a uuid string to a small integer in JSON.
+
+**Superseded 2026-08-24.** This section originally recorded that **no client reads the `id`** — the checkout request submitted the gender **name** and the select bound to the name — and warned: "if any client starts keying on `id`, this becomes a breaking change." That is exactly what happened. Spec 011 FR-034 makes the `id` the submitted value, and the change was taken as the breaking change this paragraph predicted: request bodies carry `gender_id`, the order readback carries both `gender_id` and `gender` (FR-035), and migration 0017 rewrites the column comment that asserted otherwise. The warning is left standing rather than deleted, because it is the reason the change was scoped as a contract break rather than a refactor.
 
 ## 5. Master-list authorship — no endpoint (FR-028)
 

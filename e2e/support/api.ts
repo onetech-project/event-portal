@@ -564,6 +564,8 @@ export type PublicOrderSlot = {
   phone: string | null;
   /** Date-only, YYYY-MM-DD. */
   dob: string | null;
+  /** What a restored form submits; the name beside it is what it displays. */
+  gender_id: number | null;
   gender: string | null;
 };
 
@@ -592,6 +594,30 @@ export async function publicOrder(orderNumber: string): Promise<PublicOrder> {
   );
   if (status !== 200) {
     throw new Error(`read order ${orderNumber} failed with ${status}`);
+  }
+  return data;
+}
+
+/**
+ * The gender master list (spec 023). Served from the read cache once warm, and
+ * identical either way — which is the whole point of the scenarios that use it.
+ */
+/**
+ * The identifier of a gender by name. Forms submit the identifier (spec 011
+ * FR-034), and the seeded ids are not a contract — migration 0013 fixes the
+ * ORDER STATUS ids only — so a spec asserting a literal would be encoding an
+ * accident.
+ */
+export async function genderIdFor(name: string): Promise<number> {
+  const match = (await publicGenders()).find((g) => g.name === name);
+  if (match === undefined) throw new Error(`no gender named ${name} in the master list`);
+  return match.id;
+}
+
+export async function publicGenders(): Promise<Array<{ id: number; name: string }>> {
+  const { status, data } = await request<Array<{ id: number; name: string }>>("/ticket/genders");
+  if (status !== 200) {
+    throw new Error(`read genders failed with ${status}`);
   }
   return data;
 }

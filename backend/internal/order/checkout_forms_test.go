@@ -46,16 +46,33 @@ func bookAgreedOrder(t *testing.T, f checkoutFixture) (string, []uuid.UUID) {
 // formsFor fills every slot with the same visitor identity except gender, which
 // alternates through the seeded master names. No buyer block (spec 011): the
 // primary contact is derived server-side from the first canonical slot.
-func formsFor(slotIDs []uuid.UUID) order.CheckoutFormsRequest {
+// genderID resolves a master entry's identifier by name.
+//
+// Looked up rather than hardcoded: a form submits the identifier now (spec 011
+// FR-034), and migration 000013 fixes the ids of the ORDER STATUSES only — the
+// gender ids are whatever row_number() assigned. A test asserting on a literal
+// 1 or 2 would be encoding an accident as a contract.
+func genderID(t *testing.T, f checkoutFixture, name string) int16 {
+	t.Helper()
+	var id int16
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT id FROM genders WHERE name = $1`, name).Scan(&id),
+		"no gender named %q in the master list", name)
+	return id
+}
+
+func formsFor(t *testing.T, f checkoutFixture, slotIDs []uuid.UUID) order.CheckoutFormsRequest {
+	t.Helper()
+	alternating := []int16{genderID(t, f, "FEMALE"), genderID(t, f, "MALE")}
 	visitors := make([]order.CheckoutVisitor, 0, len(slotIDs))
 	for i, id := range slotIDs {
 		visitors = append(visitors, order.CheckoutVisitor{
-			ID:     id,
-			Name:   "Visitor",
-			Email:  "visitor@example.com",
-			Phone:  "081234567890",
-			Dob:    "2000-01-31",
-			Gender: []string{"FEMALE", "MALE"}[i%2],
+			ID:       id,
+			Name:     "Visitor",
+			Email:    "visitor@example.com",
+			Phone:    "081234567890",
+			Dob:      "2000-01-31",
+			GenderID: alternating[i%2],
 		})
 	}
 	return order.CheckoutFormsRequest{Attendees: visitors}
@@ -65,7 +82,7 @@ func TestCheckoutOrderSavesFormsAndStartsPayment(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	resp, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	resp, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 	require.NoError(t, err)
 
 	assert.Equal(t, orderNumber, resp.OrderID)
@@ -112,10 +129,10 @@ func TestCheckoutOrderRejectsBadFormsWithAFieldMap(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	bad := formsFor(slotIDs)
+	bad := formsFor(t, f, slotIDs)
 	bad.Attendees[0].Email = "not-an-email"
 	bad.Attendees[0].Dob = "31-01-2000"
-	bad.Attendees[1].Gender = "OTHER"
+	bad.Attendees[1].GenderID = 9999 // no such entry
 
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, bad)
 
@@ -156,7 +173,7 @@ func TestCheckoutOrderRejectsMalformedPhonesWithTheExactMessage(t *testing.T) {
 			f := newCheckoutFixture(t)
 			orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-			bad := formsFor(slotIDs)
+			bad := formsFor(t, f, slotIDs)
 			bad.Attendees[0].Phone = phone
 
 			_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, bad)
@@ -186,7 +203,7 @@ func TestCheckoutAcceptsThePhoneLengthBoundariesAndStoresItVerbatim(t *testing.T
 			f := newCheckoutFixture(t)
 			orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-			forms := formsFor(slotIDs)
+			forms := formsFor(t, f, slotIDs)
 			for i := range forms.Attendees {
 				forms.Attendees[i].Phone = phone
 			}
@@ -209,36 +226,37 @@ func TestCheckoutStoresAGenderIDResolvingToTheSubmittedName(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	forms := formsFor(slotIDs) // genders alternate FEMALE / MALE
+	forms := formsFor(t, f, slotIDs) // genders alternate FEMALE / MALE
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
 	require.NoError(t, err)
 
-	submitted := map[uuid.UUID]string{}
+	submitted := map[uuid.UUID]int16{}
 	for _, v := range forms.Attendees {
-		submitted[v.ID] = v.Gender
+		submitted[v.ID] = v.GenderID
 	}
 
 	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
 	require.NoError(t, err)
 	rows, err := f.pool.Query(context.Background(), `
-		SELECT a.id, g.name
+		SELECT a.id, g.id
 		FROM attendees a
 		JOIN genders g ON g.id = a.gender_id
 		WHERE a.order_id = $1`, stored.ID)
 	require.NoError(t, err)
 	defer rows.Close()
 
-	resolved := map[uuid.UUID]string{}
+	resolved := map[uuid.UUID]int16{}
 	for rows.Next() {
 		var id uuid.UUID
-		var name string
-		require.NoError(t, rows.Scan(&id, &name))
-		resolved[id] = name
+		var genderID int16
+		require.NoError(t, rows.Scan(&id, &genderID))
+		resolved[id] = genderID
 	}
 	require.NoError(t, rows.Err())
 
 	// The inner JOIN drops any NULL gender_id, so map equality proves both
-	// non-NULL storage and correct name resolution for every slot.
+	// non-NULL storage and that what was submitted is exactly what was stored —
+	// which under FR-034 is a direct write, no longer a name resolution.
 	assert.Equal(t, submitted, resolved)
 }
 
@@ -255,7 +273,7 @@ func TestCheckoutOrderRefusesWhenAgreementWasNeverRecorded(t *testing.T) {
 	require.NoError(t, err)
 
 	_, checkoutErr := f.svc.CheckoutOrder(context.Background(), resp.OrderID,
-		formsFor([]uuid.UUID{slots[0].ID}))
+		formsFor(t, f, []uuid.UUID{slots[0].ID}))
 
 	var appErr *apperr.Error
 	require.True(t, errors.As(checkoutErr, &appErr))
@@ -267,10 +285,10 @@ func TestCheckoutOrderIsIdempotentOncePaymentStarted(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	first, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	first, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 	require.NoError(t, err)
 
-	_, retryErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	_, retryErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 
 	// 409004 whose data is the current QR payload — the client renders it
 	// exactly as it would a fresh 200 (contracts/api.md call 8).
@@ -289,7 +307,7 @@ func TestCheckoutOrderKeepsFormsWhenTheGatewayFails(t *testing.T) {
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 	f.gateway.err = errors.New("provider down")
 
-	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 
 	var appErr *apperr.Error
 	require.True(t, errors.As(err, &appErr))
@@ -307,7 +325,7 @@ func TestCheckoutOrderKeepsFormsWhenTheGatewayFails(t *testing.T) {
 
 	// And the retry succeeds once the provider recovers.
 	f.gateway.err = nil
-	_, retryErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	_, retryErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 	require.NoError(t, retryErr)
 }
 
@@ -315,7 +333,7 @@ func TestCheckoutOrderRejectsAForeignSlotID(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	forged := formsFor(slotIDs)
+	forged := formsFor(t, f, slotIDs)
 	forged.Attendees[1].ID = uuid.New()
 
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forged)
@@ -353,10 +371,11 @@ func bookAgreedBundleOrder(t *testing.T, f checkoutFixture, qty int32) (string, 
 
 // visitorNamed is one filled visitor form entry for a slot; identity varies by
 // name+email, the rest stays constant.
-func visitorNamed(id uuid.UUID, name, email string) order.CheckoutVisitor {
+func visitorNamed(t *testing.T, f checkoutFixture, id uuid.UUID, name, email string) order.CheckoutVisitor {
+	t.Helper()
 	return order.CheckoutVisitor{
 		ID: id, Name: name, Email: email,
-		Phone: "081234567890", Dob: "2000-01-31", Gender: "FEMALE",
+		Phone: "081234567890", Dob: "2000-01-31", GenderID: genderID(t, f, "FEMALE"),
 	}
 }
 
@@ -371,8 +390,8 @@ func TestCheckoutBundleUnitRejectsDivergentVisitorData(t *testing.T) {
 
 	// Same unit, two different visitors — the single-form contract is broken.
 	forms := bundleForms([]order.CheckoutVisitor{
-		visitorNamed(slots[0].ID, "Visitor", "visitor@example.com"),
-		visitorNamed(slots[1].ID, "Someone Else", "other@example.com"),
+		visitorNamed(t, f, slots[0].ID, "Visitor", "visitor@example.com"),
+		visitorNamed(t, f, slots[1].ID, "Someone Else", "other@example.com"),
 	})
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
 
@@ -400,8 +419,8 @@ func TestCheckoutBundleUnitAcceptsIdenticalVisitors(t *testing.T) {
 	require.Len(t, slots, 2)
 
 	forms := bundleForms([]order.CheckoutVisitor{
-		visitorNamed(slots[0].ID, "Visitor", "visitor@example.com"),
-		visitorNamed(slots[1].ID, "Visitor", "visitor@example.com"),
+		visitorNamed(t, f, slots[0].ID, "Visitor", "visitor@example.com"),
+		visitorNamed(t, f, slots[1].ID, "Visitor", "visitor@example.com"),
 	})
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
 	require.NoError(t, err)
@@ -432,7 +451,7 @@ func TestCheckoutBundleAllowsDifferentVisitorsAcrossUnits(t *testing.T) {
 	for _, slot := range slots {
 		require.NotNil(t, slot.PackageUnit)
 		visitors = append(visitors,
-			visitorNamed(slot.ID, nameByUnit[*slot.PackageUnit], emailByUnit[*slot.PackageUnit]))
+			visitorNamed(t, f, slot.ID, nameByUnit[*slot.PackageUnit], emailByUnit[*slot.PackageUnit]))
 	}
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, bundleForms(visitors))
 	require.NoError(t, err)
@@ -479,9 +498,9 @@ func TestCheckoutMixedOrderKeepsStandaloneVisitorIndependent(t *testing.T) {
 	visitors := make([]order.CheckoutVisitor, 0, len(slots))
 	for _, slot := range slots {
 		if slot.PackageID.Valid {
-			visitors = append(visitors, visitorNamed(slot.ID, "Bundle Visitor", "bundle@example.com"))
+			visitors = append(visitors, visitorNamed(t, f, slot.ID, "Bundle Visitor", "bundle@example.com"))
 		} else {
-			visitors = append(visitors, visitorNamed(slot.ID, "Solo Visitor", "solo@example.com"))
+			visitors = append(visitors, visitorNamed(t, f, slot.ID, "Solo Visitor", "solo@example.com"))
 		}
 	}
 	_, err = f.svc.CheckoutOrder(context.Background(), resp.OrderID, bundleForms(visitors))
@@ -539,11 +558,11 @@ func TestCheckoutMixedOrderDerivesThePrimaryContactFromTheFirstCanonicalSlot(t *
 	for i := len(slots) - 1; i >= 0; i-- {
 		slot := slots[i]
 		if slot.PackageID.Valid {
-			v := visitorNamed(slot.ID, "Bundle Visitor", "bundle@example.com")
+			v := visitorNamed(t, f, slot.ID, "Bundle Visitor", "bundle@example.com")
 			v.Phone = "089999999999"
 			visitors = append(visitors, v)
 		} else {
-			v := visitorNamed(slot.ID, "Solo Visitor", "solo@example.com")
+			v := visitorNamed(t, f, slot.ID, "Solo Visitor", "solo@example.com")
 			v.Phone = "081111111111"
 			visitors = append(visitors, v)
 		}
@@ -585,8 +604,8 @@ func TestCheckoutBundleExemptsLegacySlotsWithoutAUnit(t *testing.T) {
 
 	// Divergent visitors are the OLD contract — still accepted for such orders.
 	forms := bundleForms([]order.CheckoutVisitor{
-		visitorNamed(slots[0].ID, "Visitor", "visitor@example.com"),
-		visitorNamed(slots[1].ID, "Someone Else", "other@example.com"),
+		visitorNamed(t, f, slots[0].ID, "Visitor", "visitor@example.com"),
+		visitorNamed(t, f, slots[1].ID, "Someone Else", "other@example.com"),
 	})
 	_, checkoutErr := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
 	require.NoError(t, checkoutErr)
@@ -601,7 +620,7 @@ func TestCheckoutOrderRefusesAnExpiredHold(t *testing.T) {
 		orderNumber)
 	require.NoError(t, err)
 
-	_, checkoutErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	_, checkoutErr := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 
 	var appErr *apperr.Error
 	require.True(t, errors.As(checkoutErr, &appErr))
@@ -658,7 +677,7 @@ func TestCheckoutOrderKeepsTheFormsWhenTheGatewayFails(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	checkoutFailingAtGateway(t, f, orderNumber, formsFor(slotIDs))
+	checkoutFailingAtGateway(t, f, orderNumber, formsFor(t, f, slotIDs))
 
 	stored, err := f.repo.GetOrderByNumber(context.Background(), orderNumber)
 	require.NoError(t, err)
@@ -679,9 +698,9 @@ func TestCheckoutOrderAcceptsARetiredGenderOnTheSlotThatAlreadyHeldIt(t *testing
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	forms := formsFor(slotIDs)
+	forms := formsFor(t, f, slotIDs)
 	for i := range forms.Attendees {
-		forms.Attendees[i].Gender = "FEMALE"
+		forms.Attendees[i].GenderID = genderID(t, f, "FEMALE")
 	}
 	checkoutFailingAtGateway(t, f, orderNumber, forms)
 
@@ -711,18 +730,18 @@ func TestCheckoutOrderRefusesARetiredGenderOnASlotThatNeverHeldIt(t *testing.T) 
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	saved := formsFor(slotIDs)
+	saved := formsFor(t, f, slotIDs)
 	for i := range saved.Attendees {
-		saved.Attendees[i].Gender = "MALE"
+		saved.Attendees[i].GenderID = genderID(t, f, "MALE")
 	}
 	checkoutFailingAtGateway(t, f, orderNumber, saved)
 
 	deactivateGender(t, f, "FEMALE")
 
 	// The slots hold MALE; FEMALE is retired and was never on them.
-	retried := formsFor(slotIDs)
+	retried := formsFor(t, f, slotIDs)
 	for i := range retried.Attendees {
-		retried.Attendees[i].Gender = "FEMALE"
+		retried.Attendees[i].GenderID = genderID(t, f, "FEMALE")
 	}
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, retried)
 	require.Error(t, err)
@@ -736,14 +755,16 @@ func TestCheckoutOrderRefusesARetiredGenderOnASlotThatNeverHeldIt(t *testing.T) 
 		"one rule about one field: the same message the ordinary refusal uses")
 }
 
-// A name that was never in the master list is refused exactly as before —
-// FR-031 widens what a slot may re-submit, not what a gender may be.
-func TestCheckoutOrderStillRefusesAGenderThatIsNotInTheMasterList(t *testing.T) {
+// An identifier that was never in the master list is refused exactly as before —
+// FR-031 widens what a slot may re-submit, not what a gender may be. This matters
+// more under FR-034 than it did: an unmatched name failed to resolve, whereas an
+// unchecked identifier would reach storage as a foreign key to no row.
+func TestCheckoutOrderStillRefusesAGenderIDThatIsNotInTheMasterList(t *testing.T) {
 	f := newCheckoutFixture(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	forms := formsFor(slotIDs)
-	forms.Attendees[0].Gender = "NOT_A_GENDER"
+	forms := formsFor(t, f, slotIDs)
+	forms.Attendees[0].GenderID = 9999 // never in the master list
 
 	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, forms)
 	require.Error(t, err)
@@ -761,7 +782,7 @@ func TestCheckoutOrderStillRefusesAGenderThatIsNotInTheMasterList(t *testing.T) 
 func TestCheckoutOrderValidatesTheFormsBeforeLookingTheOrderUp(t *testing.T) {
 	f := newCheckoutFixture(t)
 
-	forms := formsFor([]uuid.UUID{uuid.New()})
+	forms := formsFor(t, f, []uuid.UUID{uuid.New()})
 	forms.Attendees[0].Email = "not-an-email"
 
 	_, err := f.svc.CheckoutOrder(context.Background(), "ORD-00000000-NOSUCH", forms)

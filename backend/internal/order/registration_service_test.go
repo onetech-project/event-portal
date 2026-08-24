@@ -58,6 +58,10 @@ type registrationFixture struct {
 	ticket    testsupport.TicketType
 	terms     uuid.UUID
 	updatedAt time.Time
+	// maleGenderID is resolved once at fixture build: a form submits the master
+	// entry's IDENTIFIER (spec 022 FR-022, clarified 2026-08-24), and request()
+	// has no *testing.T to look one up with.
+	maleGenderID int16
 }
 
 func newRegistrationFixture(t *testing.T, quota int32) registrationFixture {
@@ -77,6 +81,7 @@ func newRegistrationFixture(t *testing.T, quota int32) registrationFixture {
 		ticket:          tt,
 		terms:           termsID,
 		updatedAt:       termsUpdatedAt(t, f, ev.ID),
+		maleGenderID:    genderID(t, f, "MALE"),
 	}
 }
 
@@ -95,7 +100,7 @@ func (f registrationFixture) request() order.RegistrationRequest {
 		Email:               "halo@example.com",
 		Phone:               "628125567820",
 		Dob:                 "1996-04-12",
-		Gender:              "MALE",
+		GenderID:            f.maleGenderID,
 		Agreed:              true,
 		EventTermsUpdatedAt: f.updatedAt,
 	}
@@ -357,7 +362,7 @@ func TestRegisterFreeRefusesAnUnpublishedEvent(t *testing.T) {
 
 	req := order.RegistrationRequest{
 		Slug: draft.Slug, Name: "Halo", Email: "halo@example.com",
-		Phone: "628125567820", Dob: "1996-04-12", Gender: "MALE",
+		Phone: "628125567820", Dob: "1996-04-12", GenderID: genderID(t, f, "MALE"),
 		Agreed: true, EventTermsUpdatedAt: time.Now(),
 	}
 	requireCode(t, f.svc.RegisterFree(context.Background(), tt.ID, req),
@@ -584,4 +589,81 @@ func TestDerivedRegistrationFlagFlipsWhenTheTicketTypeBecomesPurchasable(t *test
 	assert.False(t, after.IsRegistration,
 		"a derived classification follows current ticket-type state — the same order "+
 			"now reads as a purchase, and a resend would render it a receipt")
+}
+
+// --- FR-022a / FR-022b: the ACTIVE master, and only it ----------------------
+
+// retireGender deactivates one master entry for the duration of a test.
+//
+// `genders` is master data: it is seeded by migration and deliberately absent
+// from Truncate, so the flip outlives the fixture and would otherwise be
+// inherited by whatever test runs next. Undone on cleanup rather than left.
+func retireGender(t *testing.T, f registrationFixture, name string) {
+	t.Helper()
+	setGenderActive(t, f, name, false)
+	t.Cleanup(func() { setGenderActive(t, f, name, true) })
+}
+
+func setGenderActive(t *testing.T, f registrationFixture, name string, active bool) {
+	t.Helper()
+	tag, err := f.pool.Exec(context.Background(),
+		`UPDATE genders SET is_active = $2 WHERE name = $1`, name, active)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected(), "no gender named %q in the master list", name)
+}
+
+// validationFieldsOf pulls the field→message map out of a validation refusal.
+// registration_dto_test.go has the same helper, but it is an in-package test
+// and this file is not, so the two cannot share one.
+func validationFieldsOf(t *testing.T, err error) map[string]string {
+	t.Helper()
+	require.Error(t, err)
+	var appErr *apperr.Error
+	require.ErrorAs(t, err, &appErr)
+	fields, ok := appErr.Data.(map[string]string)
+	require.True(t, ok, "validation refusal must carry a field map, got %T", appErr.Data)
+	return fields
+}
+
+// A gender retired between the form rendering and the submit is REFUSED.
+//
+// Checkout deliberately does the opposite: it resolves a submitted gender
+// against every known entry, retired included (spec 011 FR-031), because a
+// restored booking form legitimately carries a value that was active when it
+// was saved. Registration has no such case — its form is rendered fresh from
+// the prerequisites call on every visit and is never restored — so a retired
+// value can only arrive from a stale tab or a hand-made request.
+//
+// The row assertions are the real point (SC-017). An active-only lookup that is
+// permitted to MISS rather than refuse yields the zero value, and writing that
+// as gender_id is a foreign key to nothing.
+func TestRegisterFreeRefusesARetiredGender(t *testing.T) {
+	f := newRegistrationFixture(t, 5)
+	retireGender(t, f, "MALE")
+
+	err := f.svc.RegisterFree(context.Background(), f.ticket.ID, f.request())
+
+	assert.Equal(t, "Select a valid gender.", validationFieldsOf(t, err)["gender"])
+	assert.Zero(t, countRows(t, f.checkoutFixture, `SELECT count(*) FROM orders`),
+		"a refused registration records no order")
+	assert.Zero(t, countRows(t, f.checkoutFixture, `SELECT count(*) FROM attendees`),
+		"a refused registration records no attendee, valid or otherwise")
+	assert.Equal(t, int32(5), quotaOf(t, f.checkoutFixture, f.ticket.ID),
+		"a refused registration deducts no quota")
+}
+
+// The form and the validator MUST read the same master, or the refusal above
+// could fire on a value the form itself had just offered.
+func TestRegistrationPrerequisitesDoNotOfferARetiredGender(t *testing.T) {
+	f := newRegistrationFixture(t, 5)
+	retireGender(t, f, "MALE")
+
+	prereqs, err := f.svc.RegistrationPrerequisites(
+		context.Background(), f.event.Slug, f.ticket.ID)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, prereqs.Genders, "the remaining active entries are still offered")
+	for _, g := range prereqs.Genders {
+		assert.NotEqual(t, "MALE", g.Name, "a retired gender is not offered as an option")
+	}
 }

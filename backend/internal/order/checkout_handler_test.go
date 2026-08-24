@@ -19,11 +19,16 @@ import (
 
 // --- T022: POST /ticket/checkout/:order_id + moved QR image ------------------
 
-func checkoutFormsBody(slotIDs []uuid.UUID) string {
+// The body carries gender_id, not gender: the wire submits the master entry's
+// IDENTIFIER since 2026-08-24 (spec 011 FR-034). Written as raw JSON on purpose —
+// these are the tests that would catch the DTO tag and the wire drifting apart.
+func checkoutFormsBody(t *testing.T, f checkoutFixture, slotIDs []uuid.UUID) string {
+	t.Helper()
+	female := genderID(t, f, "FEMALE")
 	visitors := make([]string, 0, len(slotIDs))
 	for _, id := range slotIDs {
 		visitors = append(visitors, fmt.Sprintf(
-			`{"id":"%s","name":"Visitor","email":"v@example.com","phone":"081234567890","dob":"2000-01-31","gender":"FEMALE"}`, id))
+			`{"id":"%s","name":"Visitor","email":"v@example.com","phone":"081234567890","dob":"2000-01-31","gender_id":%d}`, id, female))
 	}
 	return fmt.Sprintf(`{"attendees":[%s]}`, strings.Join(visitors, ","))
 }
@@ -32,7 +37,7 @@ func TestCheckoutEndpointReturnsTheQRContractShape(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var data map[string]any
@@ -51,9 +56,9 @@ func TestCheckoutEndpointReturns409004WithTheCurrentPayloadOnRetry(t *testing.T)
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 	require.Equal(t, http.StatusOK,
-		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs)).Code)
+		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs)).Code)
 
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	var body apperr.Body
@@ -68,7 +73,7 @@ func TestCheckoutEndpointReturns400001FieldMap(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	bad := strings.Replace(checkoutFormsBody(slotIDs), "v@example.com", "nope", 1)
+	bad := strings.Replace(checkoutFormsBody(t, f, slotIDs), "v@example.com", "nope", 1)
 	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, bad)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -91,7 +96,7 @@ func TestCheckoutEndpointIgnoresStaleBuyerFields(t *testing.T) {
 		"buyer_email":"siti@example.com",
 		"buyer_phone":"+628123456789",
 		"buyer_dob":"1995-05-05",
-		"buyer_gender":"FEMALE",` + strings.TrimPrefix(checkoutFormsBody(slotIDs), "{")
+		"buyer_gender":"FEMALE",` + strings.TrimPrefix(checkoutFormsBody(t, f, slotIDs), "{")
 
 	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, stale)
 
@@ -102,7 +107,7 @@ func TestQRImageServesAtTheTicketOrderPath(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 	require.Equal(t, http.StatusOK,
-		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs)).Code)
+		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs)).Code)
 
 	rec := getPath(t, e, "/api/v1/ticket/order/"+orderNumber+"/qris.png")
 
@@ -115,7 +120,7 @@ func TestQRImageDisappearsForAnUnpayableOrder(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 	require.Equal(t, http.StatusOK,
-		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs)).Code)
+		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs)).Code)
 	_, err := f.pool.Exec(context.Background(),
 		`UPDATE orders SET payment_expires_at = now() - interval '1 second' WHERE order_number = $1`,
 		orderNumber)
@@ -133,7 +138,7 @@ func TestCheckoutReturnsTheGatewaysExternalReference(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var data map[string]any
@@ -150,12 +155,12 @@ func TestCheckoutRetryCarriesTheSameExternalReference(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	first := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	first := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 	require.Equal(t, http.StatusOK, first.Code)
 	var opened map[string]any
 	require.NoError(t, json.Unmarshal(testsupport.UnwrapData(t, first.Body.Bytes()), &opened))
 
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	var body apperr.Body
@@ -176,7 +181,7 @@ func TestCheckoutSucceedsWhenTheGatewaySuppliesNoExternalReference(t *testing.T)
 	f.gateway.providerRef = noProviderRef
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var data map[string]any
@@ -193,10 +198,10 @@ func TestCheckoutStillAnswersWhenTheReferenceCannotBeRead(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 	require.Equal(t, http.StatusOK,
-		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs)).Code)
+		postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs)).Code)
 
 	f.records.err = errors.New("payments unreachable")
-	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(slotIDs))
+	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, checkoutFormsBody(t, f, slotIDs))
 
 	require.Equal(t, http.StatusConflict, rec.Code, "the already-started refusal, not a 5xx")
 	var body apperr.Body
@@ -213,7 +218,7 @@ func TestCheckoutFailuresCarryNoExternalReference(t *testing.T) {
 	e, f := newCheckoutAPI(t)
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
 
-	stale := checkoutFormsBody(slotIDs[:0])
+	stale := checkoutFormsBody(t, f, slotIDs[:0])
 	rec := postJSON(t, e, "/api/v1/ticket/checkout/"+orderNumber, stale)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)

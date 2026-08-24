@@ -93,7 +93,12 @@ func (s *PublicService) TicketOrderByNumber(ctx context.Context, orderNumber str
 			Name:           slot.Name,
 			Email:          slot.Email,
 			Phone:          slot.Phone,
-			Gender:         slot.Gender,
+			// Both: GenderID is what a restored form submits, Gender what it
+			// displays (spec 011 FR-035). Omitting the id here is silent — the
+			// readback still looks complete, and the restored select simply
+			// falls back to "Select" with the guest's saved answer gone.
+			GenderID: slot.GenderID,
+			Gender:   slot.Gender,
 		}
 		if slot.PackageID.Valid {
 			pkgID := slot.PackageID.UUID

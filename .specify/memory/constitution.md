@@ -1,5 +1,78 @@
 <!--
 Sync Impact Report
+Version change: 6.0.0 -> 6.1.0 (MINOR - a surface is ADDED to a closed list and an
+existing rule gains a third case. Nothing compliant under 6.0.0 becomes non-compliant:
+every surface already cacheable stays cacheable on identical terms, and commit-triggered
+invalidation remains mandatory for every surface that has a write path. The change only
+widens what is permitted, which is the MINOR branch of the versioning policy, not the
+MAJOR one - no principle is removed and no existing requirement is withdrawn.)
+
+Trigger: spec 023 (Master Data Read Cache). The gender master list is read on the public
+options endpoint, on registration prerequisites, on registration validation and on
+checkout - four request paths, none inside a transaction - and every one of them spends a
+database connection to return two rows that only a migration can change. Principle VII's
+surface list is closed, so the accelerator could not be applied without this amendment.
+
+Modified sections:
+  - Principle VII, cacheable-surfaces bullet - `genders` added to the enumeration, with
+    its rationale stated as the INVERSE of the existing entries': the others are admitted
+    for read volume, this one for near-immutability. Two things are pinned deliberately.
+    First, both projections are named - active-only and all-known - and required to stay
+    separately correct, because collapsing them would either refuse a retired gender that
+    checkout must accept or offer one that a form must not; that distinction is load-
+    bearing and easy to lose in an implementation. Second, the admission is BY NAME and
+    explicitly does not admit master data as a category, with `fees` and `order_statuses`
+    named as staying outside and the reason recorded for each - `fees` is read inside the
+    order-writing transaction where the next rule forbids a cache call, `order_statuses`
+    is never read as a list at all. Recording the exclusions inside the principle is what
+    stops a later reader from "completing" the category in good faith.
+  - Principle VII, invalidation bullet - retitled from "triggered by commit, not by time"
+    to "triggered by an event, not by time". The commit rule itself is untouched.
+  - Principle VII, NEW bullet on service start - the third case. A surface with no write
+    path has no commit to trigger on, which left it with expiry as its only route to
+    correctness, and the preceding bullet forbids exactly that. Service start is the
+    triggering event, tied to the deployment that necessarily carries the migration. Four
+    constraints keep this an addition rather than an escape hatch: invalidate on commit
+    the moment a write path exists; TTL stays a backstop; the startup invalidation is
+    scoped to its own surface and must not discard others; and it must never prevent
+    startup, since fail-open already requires the API to start with the cache absent.
+
+Added principles: none - the new bullet extends Principle VII rather than standing alone.
+
+Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - ARCHITECTURE.md - UPDATED WITH THIS CHANGE: SS3.6a's "closed set of nine list reads"
+    now names the gender master list alongside the nine, its two projections are
+    described, the "refresh-on-write, never expiry" line carries the service-start case,
+    and the scope table gains a master-data row. The section is marked as describing an
+    admitted-but-not-yet-implemented surface, because it is: this amendment permits spec
+    023, it does not implement it, and a document claiming a counter that does not exist
+    yet would be wrong in the other direction.
+  - PRD.md - UPDATED WITH THIS CHANGE: SS1.2's one-line cache scope named the event,
+    ticket_type and order lists only, so leaving it would have contradicted the principle
+    it cites. It now names the gender master list and repeats the by-name-not-by-category
+    limit, so the product-level summary cannot be read as admitting master data generally.
+  - SCHEMA.md - no impact, verified rather than assumed: spec 023 adds no table, column,
+    index or migration. It changes where the `genders` rows are READ FROM, never what they
+    are or how they are stored, and the two projections it serves are the two queries that
+    already exist. `genders` keeps every column and constraint migrations 0008 and 0013
+    gave it.
+
+Templates requiring follow-up: none. The plan template's Constitution Check reads this
+file at runtime.
+
+Follow-up TODOs:
+  - The service-start rule is written against a `genders` table that has NO admin CRUD;
+    migration 000013 records that absence explicitly. If master-list CRUD is ever built,
+    the first bullet of the new rule activates and commit-triggered invalidation becomes
+    mandatory for this surface - the startup invalidation then becomes redundant belt-and-
+    braces rather than the mechanism. This is stated here so that whoever builds that CRUD
+    finds the obligation rather than discovering the staleness.
+-->
+
+<!--
+Sync Impact Report
 Version change: 5.0.0 -> 6.0.0 (MAJOR - an existing rule is REDEFINED, and a mandatory
 requirement is REMOVED. Principle IV required a registration-originated order to be
 "marked at creation", making the marker part of the permission that admitted the second
@@ -758,21 +831,46 @@ subject to all of the following rules. Every rule is a MUST.
   persistence, sessions, locks, queues, or pub/sub.
 * **The cacheable surfaces are closed and enumerated.** Only *list* reads over these
   entity families may be cached, in both their public and their admin projections, and
-  including filtered variants: `events`, `ticket_types`, ticket packages, `orders`, and
-  `attendees`. The guest-facing published event list and per-event `ticket_types` and
-  package lists are the primary targets — they carry by far the highest read volume — and
-  the admin lists are admitted because they are the same rows invalidated by the same
-  writes, so excluding them would add an exception without removing any risk. Nothing
-  else may be cached: not single-record detail reads, not ticket lookup by `ticket_code`,
-  not payment or checkout status, not the QRIS image. Adding a surface to this list
-  requires amending this constitution.
-* **Invalidation is triggered by commit, not by time.** Every committed write that
+  including filtered variants: `events`, `ticket_types`, ticket packages, `orders`,
+  `attendees`, and the `genders` master list. The guest-facing published event list and
+  per-event `ticket_types` and package lists are the primary targets — they carry by far
+  the highest read volume — and the admin lists are admitted because they are the same
+  rows invalidated by the same writes, so excluding them would add an exception without
+  removing any risk. `genders` is admitted on the opposite rationale: it is read on every
+  holder-form and registration path and changes only when a migration changes it, making
+  it the surface whose cached copy is least likely to be wrong. Both of its projections
+  are covered — the active-only list a form offers, and the all-known list checkout
+  resolves a retired value through — and they MUST remain separately correct, because
+  collapsing them would either refuse a retired gender that checkout must accept or offer
+  one that a form must not. `genders` is admitted **by name and does not admit master data
+  as a category**: `fees` and `order_statuses` stay outside this list — the first because
+  it is read inside the order-writing transaction, where the rule below forbids a cache
+  call outright, and the second because it is never read as a list at all. Nothing else
+  may be cached: not single-record detail reads, not ticket lookup by `ticket_code`, not
+  payment or checkout status, not the QRIS image. Adding a surface to this list requires
+  amending this constitution.
+* **Invalidation is triggered by an event, not by time.** Every committed write that
   changes cached data MUST invalidate the affected entries so the next read returns
   post-write content; a transaction that rolls back MUST NOT invalidate. This covers
   every write path, including admin CRUD, booking, checkout, payment webhooks
   (`settlement`/`capture`, `expire`, `cancel`, `deny`, `failure`), and any expiry sweep.
   A TTL MAY exist only as a backstop bounding the damage of a missed invalidation; TTL
   expiry MUST NOT be the mechanism by which the system becomes correct.
+* **Service start is the triggering event for a surface with no write path.** A cached
+  surface whose data cannot be written by the application at all — reachable only by
+  migration, as `genders` is today — has no commit to trigger on, and would otherwise be
+  left with expiry as its only means of ever becoming correct, which the rule above
+  forbids. For that case, and only that case, the surface MUST be invalidated when the
+  service starts, tying its freshness to the deployment that necessarily carries the
+  migration. Four constraints make this an addition to the commit rule rather than an
+  escape from it: the surface MUST be invalidated on commit as normal the moment any
+  write path exists; a TTL remains a backstop and still MUST NOT be the mechanism of
+  correctness; the startup invalidation MUST be scoped to the surface it concerns and
+  MUST NOT discard others, which are expensive to rebuild and already correct by their
+  own write-triggered invalidation; and a startup invalidation that cannot run because
+  the store is unreachable MUST NOT prevent the service from starting — the fail-open
+  rule below requires the API to start with the cache absent, and in that window the TTL
+  backstop is what bounds the staleness.
 * **The cache is never authoritative for inventory.** Quota and availability decisions
   MUST continue to be made by the atomic, row-locked `UPDATE` inside the booking
   transaction (Principle IV). A cached availability figure is a display value only; it
@@ -1049,4 +1147,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 6.0.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-20
+**Version**: 6.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-24

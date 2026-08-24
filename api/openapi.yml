@@ -575,8 +575,8 @@ paths:
       summary: List genders
       operationId: listGenders
       description: |
-        The gender master list the holder forms build their options from. Checkout submits the
-        **name**, not the id.
+        The gender master list the holder forms build their options from. A form submits the
+        **id**; the **name** is what the guest is shown (spec 011 FR-034/FR-036, 2026-08-24).
       responses:
         '200':
           description: The master list.
@@ -2689,7 +2689,7 @@ components:
       description: |
         One holder, one free ticket. No quantity and no line items — the ticket type is in the
         path and a registration is always exactly one place.
-      required: [slug, name, email, phone, dob, gender, agreed, event_terms_updated_at]
+      required: [slug, name, email, phone, dob, gender_id, agreed, event_terms_updated_at]
       properties:
         slug:
           type: string
@@ -2714,10 +2714,11 @@ components:
           format: date
           description: ISO `YYYY-MM-DD`. Must be a real date and not in the future.
           example: '1996-04-12'
-        gender:
-          type: string
-          description: A **name** from `GET /api/v1/ticket/genders`, not an id.
-          example: MALE
+        gender_id:
+          type: integer
+          format: int16
+          description: An **id** from `GET /api/v1/ticket/genders`, not a name.
+          example: 2
         agreed:
           type: boolean
           description: Must be true. False is refused `TERMS_NOT_ACCEPTED`.
@@ -2732,7 +2733,7 @@ components:
     CheckoutVisitor:
       type: object
       description: One filled holder form, addressed to the slot it fills.
-      required: [id, name, email, phone, dob, gender]
+      required: [id, name, email, phone, dob, gender_id]
       properties:
         id:
           type: string
@@ -2753,10 +2754,11 @@ components:
           format: date
           description: Date-only, YYYY-MM-DD.
           example: "1995-04-17"
-        gender:
-          type: string
-          description: The **name** from `GET /api/v1/ticket/genders`.
-          example: MALE
+        gender_id:
+          type: integer
+          format: int16
+          description: The **id** from `GET /api/v1/ticket/genders`, not a name.
+          example: 2
 
     CheckoutRequest:
       type: object
@@ -2888,7 +2890,18 @@ components:
         email: { type: string, nullable: true }
         phone: { type: string, nullable: true }
         dob: { type: string, nullable: true }
-        gender: { type: string, nullable: true }
+        gender_id:
+          type: integer
+          format: int16
+          nullable: true
+          description: |
+            What a restored form SUBMITS. Carried alongside `gender` deliberately (spec 011
+            FR-035): a retired entry is absent from `GET /api/v1/ticket/genders`, so a client
+            given only one of the two could resolve neither the other.
+        gender:
+          type: string
+          nullable: true
+          description: The display name for `gender_id`. Never submitted; only rendered.
 
     PaymentInstruction:
       type: object

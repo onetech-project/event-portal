@@ -32,8 +32,11 @@ function envelope(data: unknown) {
 }
 
 const GENDERS = [
-  { id: "g1111111-1111-1111-1111-111111111111", name: "FEMALE" },
-  { id: "g2222222-2222-2222-2222-222222222222", name: "MALE" },
+  // Numeric ids, matching the wire since migration 0013 narrowed them. The
+  // uuid-shaped placeholders these replace were harmless while the NAME was the
+  // key and became wrong the moment the id started being submitted (FR-034).
+  { id: 1, name: "FEMALE" },
+  { id: 2, name: "MALE" },
 ];
 
 function slot(overrides: Partial<TicketOrderSlot> & { id: string }): TicketOrderSlot {
@@ -46,6 +49,7 @@ function slot(overrides: Partial<TicketOrderSlot> & { id: string }): TicketOrder
     email: null,
     phone: null,
     dob: null,
+    gender_id: null,
     gender: null,
     ...overrides,
   };
@@ -91,6 +95,7 @@ const SAVED = {
   email: "heather@example.com",
   phone: "144650550532",
   dob: "1990-10-09",
+  gender_id: 1,
   gender: "FEMALE",
 };
 
@@ -227,7 +232,7 @@ describe("OrderForms — the seed is applied once and never re-applied (FR-032)"
 });
 
 describe("OrderForms — a restored gender that has since been retired (FR-031)", () => {
-  const RETIRED = order([slot({ id: "s1", ...SAVED, gender: "PREFER_NOT_TO_SAY" })]);
+  const RETIRED = order([slot({ id: "s1", ...SAVED, gender_id: 99, gender: "PREFER_NOT_TO_SAY" })]);
 
   it("shows the held gender even though the master list no longer offers it", async () => {
     render(<OrderForms order={RETIRED} />, { wrapper: wrapper() });
@@ -252,7 +257,7 @@ describe("OrderForms — a restored gender that has since been retired (FR-031)"
     render(
       <OrderForms
         order={order([
-          slot({ id: "s1", ...SAVED, gender: "PREFER_NOT_TO_SAY" }),
+          slot({ id: "s1", ...SAVED, gender_id: 99, gender: "PREFER_NOT_TO_SAY" }),
           slot({ id: "s2", ...SAVED }),
         ])}
       />,

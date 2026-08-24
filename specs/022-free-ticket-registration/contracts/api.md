@@ -71,7 +71,7 @@ Public, unauthenticated. **Throttled** — see §4.
   "email": "halo@example.com",
   "phone": "628125567820",
   "dob": "1996-04-12",
-  "gender": "Man",
+  "gender_id": 1,
   "agreed": true,
   "event_terms_updated_at": "2026-08-20T04:12:33Z"
 }

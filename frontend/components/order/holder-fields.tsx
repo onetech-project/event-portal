@@ -39,6 +39,7 @@ export function HolderFields<T extends FieldValues>({
   fields,
   errors,
   genders,
+  heldGender,
 }: {
   control: Control<T>;
   /** Where each value lives in the caller's own form shape. */
@@ -58,6 +59,12 @@ export function HolderFields<T extends FieldValues>({
     dob?: string;
   };
   genders: GenderOption[] | undefined;
+  /**
+   * The gender this card already holds, as (id, name). Needed only when that
+   * entry has since been retired — the active master list no longer carries it,
+   * so its display name cannot be looked up (spec 011 FR-031, FR-035).
+   */
+  heldGender?: { id: number; name: string };
 }) {
   return (
     <>
@@ -104,7 +111,12 @@ export function HolderFields<T extends FieldValues>({
       </Field>
 
       <Field label="Gender" required error={errors.gender}>
-        <GenderSelect control={control} name={fields.gender} options={genders} />
+        <GenderSelect
+          control={control}
+          name={fields.gender}
+          options={genders}
+          held={heldGender}
+        />
       </Field>
 
       <Field label="Date of birth" required error={errors.dob}>
@@ -114,44 +126,97 @@ export function HolderFields<T extends FieldValues>({
   );
 }
 
+/**
+ * A gender select fed by the master list (GET /ticket/genders). The design
+ * system Select holds its own value rather than exposing a native input, so it
+ * goes through a Controller instead of register().
+ *
+ * The value exchanged is the master entry's IDENTIFIER, stringified because the
+ * Select deals in strings (spec 011 FR-034). The NAME is only ever rendered.
+ *
+ * The master list serves ACTIVE genders only, while a slot keeps whatever gender
+ * it was saved with — deactivating an entry never rewrites a stored reference.
+ * So a restored card can hold a value this list does not offer, and a select can
+ * only show a value it has an option for. FR-031: the held value is added to
+ * THIS card's options so it displays, and to no other card's.
+ *
+ * That widening needs the retired entry's NAME, which the active master list by
+ * definition does not have — which is why `held` carries the (id, name) pair the
+ * readback supplies (FR-035) rather than just the id. Under the old name-based
+ * wire the name was self-sufficient and no such pair was needed; it is the one
+ * place the move to identifiers cost something rather than simplifying.
+ */
 function GenderSelect<T extends FieldValues>({
   control,
   name,
   options,
+  held,
 }: {
   control: Control<T>;
   name: FieldPath<T>;
   options: GenderOption[] | undefined;
+  held?: { id: number; name: string };
 }) {
   return (
     <Controller
       control={control}
       name={name}
-      render={({ field }) => (
-        <Select
-          value={field.value === "" ? null : (field.value as string)}
-          onValueChange={(value) => field.onChange(value ?? "")}
-        >
-          <SelectTrigger
-            aria-label="Gender"
-            className="px-3 py-4 w-full data-[size=default]:h-fit "
-          >
-            {/* The trigger shows the human label, never the stored value. */}
-            <SelectValue>
-              {(value: string | null) => (value === null ? "Select" : genderLabel(value))}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent align="start" alignItemWithTrigger={false}>
-            {(options ?? []).map((option) => (
-              <SelectItem key={option.id} value={option.name} className="p-3">
-                {genderLabel(option.name)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      )}
+      render={({ field }) => {
+        const value = field.value === "" ? null : (field.value as string);
+        const choices = optionsIncluding(options, held, value);
+        return (
+          <Select value={value} onValueChange={(v) => field.onChange(v ?? "")}>
+            <SelectTrigger
+              aria-label="Gender"
+              className="px-3 py-4 w-full data-[size=default]:h-fit "
+            >
+              {/* The trigger shows the human label, never the submitted id. */}
+              <SelectValue>
+                {(current: string | null) => {
+                  if (current === null) return "Select";
+                  const match = choices.find((o) => String(o.id) === current);
+                  // A value with no matching option cannot be labelled — which
+                  // is precisely why the readback carries the name alongside the
+                  // id (FR-035) and why `held` is threaded down here.
+                  return match ? genderLabel(match.name) : "Select";
+                }}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent align="start" alignItemWithTrigger={false}>
+              {choices.map((option) => (
+                <SelectItem key={option.id} value={String(option.id)} className="p-3">
+                  {genderLabel(option.name)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        );
+      }}
     />
   );
+}
+
+/**
+ * The offered genders, plus `held` when it is set and the list does not already
+ * contain it (FR-031). Returns the master list untouched in every ordinary case,
+ * so the widening costs nothing on a card holding an active gender.
+ *
+ * The widening tracks the LIVE field value rather than the seed, which is what
+ * makes the retired option leave the list the moment the guest picks something
+ * else — a list widened from the seed would keep offering it forever.
+ */
+function optionsIncluding(
+  options: GenderOption[] | undefined,
+  held: { id: number; name: string } | undefined,
+  current: string | null,
+): GenderOption[] {
+  const list = options ?? [];
+  if (!held) return list;
+  // Tracks the LIVE field value, not the seed: once the guest picks something
+  // else the retired option leaves the list and cannot be chosen again (FR-031).
+  if (String(held.id) !== current) return list;
+  if (list.some((option) => option.id === held.id)) return list;
+  return [...list, held];
 }
 
 /**

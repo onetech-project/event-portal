@@ -88,6 +88,38 @@ func (s *Service) RegistrationPrerequisites(ctx context.Context, slug string, ti
 	}, nil
 }
 
+// activeGenders is the master the registration form validates against: the set
+// of ACTIVE entry identifiers (FR-022a, FR-022b). It resolves nothing any more —
+// the form submits the identifier itself (clarified 2026-08-24) — so this is
+// purely a membership check.
+//
+// Deliberately NOT genderMaps' `known`, which is checkout's. Checkout has to
+// accept a retired value because a restored booking form legitimately carries
+// one that was active when it was saved (spec 011 FR-031). A registration form
+// is rendered fresh from RegistrationPrerequisites on every visit and is never
+// restored, so it has no such case and a retired value is refused
+// (clarified 2026-08-24).
+//
+// Reading the same query the prerequisites call offers its options from is what
+// makes the form and the validator agree by construction: the refusal can never
+// fire on a value this feature itself had just displayed.
+//
+// The returned set is the shape Validate wants, so an absent identifier is
+// reported as a field-level refusal rather than written straight through — which
+// would be a gender_id referencing no row. That risk is HIGHER now that an
+// identifier arrives: an unmatched name merely failed to match.
+func (s *Service) activeGenders(ctx context.Context) (map[int16]struct{}, error) {
+	records, err := s.activeGenderRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := make(map[int16]struct{}, len(records))
+	for _, r := range records {
+		active[r.ID] = struct{}{}
+	}
+	return active, nil
+}
+
 // RegisterFree issues one free ticket (spec 022 FR-026 … FR-032).
 //
 //	pre-TX  validate shape · resolve target · resolve + version-check terms ·
@@ -144,7 +176,7 @@ func (s *Service) RegisterFree(ctx context.Context, ticketTypeID uuid.UUID, req 
 
 	var created OrderRecord
 	for attempt := range orderNumberAttempts {
-		created, err = s.registerOnce(ctx, target, terms.ID, email, dob, genders[req.Gender], req)
+		created, err = s.registerOnce(ctx, target, terms.ID, email, dob, req.GenderID, req)
 		if err == nil {
 			break
 		}

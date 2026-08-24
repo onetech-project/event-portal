@@ -21,7 +21,7 @@ import (
 func pendingOrder(t *testing.T, f checkoutFixture) string {
 	t.Helper()
 	orderNumber, slotIDs := bookAgreedOrder(t, f)
-	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(slotIDs))
+	_, err := f.svc.CheckoutOrder(context.Background(), orderNumber, formsFor(t, f, slotIDs))
 	require.NoError(t, err)
 	return orderNumber
 }
@@ -218,4 +218,37 @@ func TestPackageLineDeduplicatesConstituentsSharingADay(t *testing.T) {
 
 	assert.Len(t, detail.Items[0].AdmissionStarts, 1,
 		"two parts admitting at the same instant are one day")
+}
+
+// The readback must carry BOTH the gender identifier and its display name
+// (spec 011 FR-035, clarified 2026-08-24).
+//
+// Regression test for a real defect: the DTO field existed and the query
+// selected the column, but nothing copied it across in public_service.go. The
+// entire Go suite stayed green — the readback still LOOKED complete, and the
+// only symptom was a restored holder card silently falling back to "Select"
+// with the guest's saved answer gone. Asserting the id is non-nil is what
+// catches an omission that asserting the name never could.
+func TestTicketOrderReadbackCarriesBothGenderIDAndName(t *testing.T) {
+	f := newCheckoutFixture(t)
+	orderNumber, slotIDs := bookAgreedOrder(t, f)
+
+	forms := formsFor(t, f, slotIDs)
+	checkoutFailingAtGateway(t, f, orderNumber, forms)
+
+	detail, err := f.public.TicketOrderByNumber(context.Background(), orderNumber)
+	require.NoError(t, err)
+	require.Len(t, detail.Slots, len(slotIDs))
+
+	submitted := map[uuid.UUID]int16{}
+	for _, v := range forms.Attendees {
+		submitted[v.ID] = v.GenderID
+	}
+	for _, slot := range detail.Slots {
+		require.NotNil(t, slot.GenderID, "the id a restored form resubmits")
+		require.NotNil(t, slot.Gender, "the name a restored form displays")
+		assert.Equal(t, submitted[slot.ID], *slot.GenderID,
+			"the readback returns exactly what was submitted")
+		assert.NotEmpty(t, *slot.Gender)
+	}
 }

@@ -10,7 +10,9 @@ import (
 	"github.com/manjo/ticketing/backend/pkg/apperr"
 )
 
-func validGenderSet() map[string]int16 { return map[string]int16{"Man": 1, "Woman": 2} }
+// The ACTIVE master as identifiers — what a form now submits (FR-022,
+// clarified 2026-08-24).
+func validGenderSet() map[int16]struct{} { return map[int16]struct{}{1: {}, 2: {}} }
 
 func validRegistration() RegistrationRequest {
 	return RegistrationRequest{
@@ -19,7 +21,7 @@ func validRegistration() RegistrationRequest {
 		Email:               "halo@example.com",
 		Phone:               "628125567820",
 		Dob:                 "1996-04-12",
-		Gender:              "Man",
+		GenderID:            1,
 		Agreed:              true,
 		EventTermsUpdatedAt: time.Now(),
 	}
@@ -103,7 +105,7 @@ func TestRegistrationRejectsAMalformedDateOfBirth(t *testing.T) {
 
 func TestRegistrationRejectsAGenderOutsideTheMaster(t *testing.T) {
 	req := validRegistration()
-	req.Gender = "Attack Helicopter"
+	req.GenderID = 99 // no such entry
 	assert.Equal(t, "Select a valid gender.",
 		fieldsOf(t, req.Validate(validGenderSet()))["gender"])
 }
@@ -116,7 +118,7 @@ func TestRegistrationReportsEveryBadFieldAtOnce(t *testing.T) {
 	req.Email = "nope"
 	req.Phone = "123"
 	req.Dob = "not-a-date"
-	req.Gender = "unknown"
+	req.GenderID = 99
 
 	fields := fieldsOf(t, req.Validate(validGenderSet()))
 	assert.ElementsMatch(t, []string{"name", "email", "phone", "dob", "gender"}, keysOf(fields))

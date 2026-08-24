@@ -119,7 +119,9 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
           // The schema has proven the DD/MM/YYYY value converts; the wire
           // contract stays ISO.
           dob: dobToIso(entry.dob) ?? entry.dob,
-          gender: entry.gender,
+          // The field holds the id as a string because the Select exchanges
+          // strings; the wire takes the number (spec 011 FR-034).
+          gender_id: Number(entry.gender),
         };
       }),
     );
@@ -206,6 +208,7 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
                     dob: errors.attendees?.[index]?.dob?.message,
                   }}
                   genders={genders}
+                  heldGender={group.seed.heldGender}
                 />
               </CardContent>
             </Card>
@@ -362,21 +365,6 @@ function GroupTitle({ group }: { group: SlotGroup }) {
 }
 
 
-/**
- * A gender select fed by the master list (GET /ticket/genders). The design
- * system Select holds its own value rather than exposing a native input, so it
- * goes through a Controller instead of register().
- *
- * The master list serves ACTIVE genders only, while a slot keeps whatever gender
- * it was saved with — deactivating an entry never rewrites a stored reference.
- * So a restored card can hold a value this list does not offer, and a select can
- * only show a value it has an option for. FR-031: the held value is added to
- * THIS card's options so it displays, and to no other card's.
- *
- * The widening tracks the live field value rather than the seed, which is what
- * makes the retired option leave the list the moment the guest picks something
- * else — a list widened from the seed would keep offering it forever.
- */
 /** Words a non-field checkout failure for the guest. */
 function checkoutErrorMessage(error: ApiError): string {
   if (error.code === API_CODES.termsNotRecorded) {

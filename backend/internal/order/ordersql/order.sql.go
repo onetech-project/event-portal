@@ -873,7 +873,7 @@ func (q *Queries) ListActiveGenders(ctx context.Context) ([]ListActiveGendersRow
 
 const listAttendeeSlotsByOrderID = `-- name: ListAttendeeSlotsByOrderID :many
 SELECT a.id, a.order_id, a.ticket_type_id, a.package_id, a.package_unit,
-       a.name, a.email, a.phone, a.dob, g.name AS gender,
+       a.name, a.email, a.phone, a.dob, a.gender_id, g.name AS gender,
        tt.name AS ticket_type_name
 FROM attendees a
 JOIN ticket_types tt ON tt.id = a.ticket_type_id
@@ -892,6 +892,7 @@ type ListAttendeeSlotsByOrderIDRow struct {
 	Email          *string
 	Phone          *string
 	Dob            pgtype.Date
+	GenderID       *int16
 	Gender         *string
 	TicketTypeName string
 }
@@ -900,8 +901,12 @@ type ListAttendeeSlotsByOrderIDRow struct {
 // Ordering (spec 010): standalone slots first, then bundle slots contiguous
 // per (package_id, package_unit), so one visitor form maps to one unit. The
 // FIRST row of this ordering is the order's primary contact (spec 011).
-// gender comes back as the master row's NAME (LEFT JOIN: unfilled slots are
-// NULL), keeping the wire contract unchanged over the gender_id FK.
+// gender comes back as BOTH the master row's id and its NAME (spec 011 FR-035,
+// clarified 2026-08-24). Not redundancy: a form submits the id, a guest is shown
+// the name, and a RETIRED entry is absent from the active master list — so a
+// client given only one of the two could not resolve the other, and FR-031's
+// restored form would break in one direction or the other. LEFT JOIN: an
+// unfilled slot is NULL in both.
 func (q *Queries) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.UUID) ([]ListAttendeeSlotsByOrderIDRow, error) {
 	rows, err := q.db.Query(ctx, listAttendeeSlotsByOrderID, orderID)
 	if err != nil {
@@ -921,6 +926,7 @@ func (q *Queries) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.U
 			&i.Email,
 			&i.Phone,
 			&i.Dob,
+			&i.GenderID,
 			&i.Gender,
 			&i.TicketTypeName,
 		); err != nil {
