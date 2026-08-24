@@ -14,8 +14,8 @@ import (
 	"github.com/manjo/ticketing/backend/internal/event"
 	"github.com/manjo/ticketing/backend/internal/order"
 	"github.com/manjo/ticketing/backend/internal/testsupport"
-	"github.com/manjo/ticketing/backend/pkg/httpx"
 	"github.com/manjo/ticketing/backend/pkg/apperr"
+	"github.com/manjo/ticketing/backend/pkg/httpx"
 	"github.com/manjo/ticketing/backend/pkg/money"
 )
 

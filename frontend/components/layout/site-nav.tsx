@@ -14,7 +14,8 @@ const LINKS = [
   {
     href: "/",
     label: "Events",
-    match: (path: string) => path === "/" || path.startsWith("/events"),
+    match: (path: string) =>
+      path === "/" || path.startsWith("/events"),
   },
   {
     href: "/tickets",
@@ -32,9 +33,15 @@ const LINKS = [
  */
 export function SiteNav() {
   const pathname = usePathname();
-  const isEvents = pathname.startsWith("/events");
+  // Both segments, deliberately. Purchase screens live under the PLURAL
+  // "/events"; free registration (spec 022) lives under the SINGULAR "/event",
+  // matching the API's own `GET /event` naming. A `startsWith("/events")` alone
+  // silently stops matching the moment the singular route exists, so the
+  // registration page would render the nav every purchase page hides.
+  const isEventScoped =
+    pathname.startsWith("/events");
 
-  if (isEvents) return null;
+  if (isEventScoped) return null;
 
   return (
     <nav aria-label="Main" className="flex items-center gap-1">

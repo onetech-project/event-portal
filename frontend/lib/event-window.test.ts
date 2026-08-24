@@ -20,6 +20,7 @@ function ticketType(
     sales_end: "2026-08-31T00:00:00Z",
     event_start,
     event_end,
+    is_visible: true,
   };
 }
 

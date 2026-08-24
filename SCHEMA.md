@@ -55,6 +55,21 @@ CREATE TABLE ticket_types (
     -- (FR-003) — a ticket may stay on sale after the day it admits to.
     event_start TIMESTAMP WITH TIME ZONE NOT NULL,
     event_end TIMESTAMP WITH TIME ZONE NOT NULL,
+    -- Acquisition CHANNEL, not merely listing (migration 0016, spec 022).
+    -- FALSE means this type is obtained by REGISTERING at
+    -- /events/:slug/register/:id rather than by buying, and carries all three
+    -- behaviours: hidden from every guest purchase surface, refused by booking,
+    -- checkout and availability, and ineligible for package composition. The
+    -- name is narrower than the rule (FR-001a) — there is no way to only hide a
+    -- type; clearing this also makes it free to register for.
+    -- DEFAULT TRUE, and that is load-bearing: this column is the negation of the
+    -- `is_registration_only` it replaced, so a DEFAULT FALSE copied from that
+    -- draft would make every ticket type in the system invisible at once, with
+    -- no error raised anywhere (SC-009 exists to catch exactly that).
+    -- Deliberately unconstrained against `price` (FR-003) — a registration
+    -- charges nothing whatever is stored, so pricing these at 0 is convention,
+    -- not an invariant, and a CHECK would encode a rule the spec rejects.
+    is_visible BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     -- `>=`, unlike packages_sales_window_chk's strict `>`: an event whose
@@ -153,6 +168,21 @@ CREATE TABLE orders (
     terms_agreed_at TIMESTAMP WITH TIME ZONE, -- durable T&C agreement record; checkout refuses NULL
     event_terms_id UUID REFERENCES event_terms(id) ON DELETE SET NULL, -- which terms document was agreed
     email_sent BOOLEAN DEFAULT FALSE,
+    -- NOTE: there is deliberately NO is_registration column (spec 022, decision
+    -- reversed 2026-08-20; Constitution Principle IV v6.0.0).
+    --
+    -- PAID has two origins — a gateway-settled purchase and a free registration —
+    -- and the second is DERIVED, not stored: an order is a registration when it
+    -- carries an order_items line for a ticket type with is_visible = FALSE.
+    -- Containment guarantees such a type can never be bought or bundled, so one
+    -- such line can only have come from the registration path.
+    --
+    -- Any surface reporting revenue MUST apply that derivation; the status alone
+    -- no longer implies money moved.
+    --
+    -- The accepted cost, recorded because the schema cannot enforce it: the value
+    -- is not stable over time. Making an invitation ticket type purchasable again
+    -- retroactively reclassifies every historical order that used it.
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -328,6 +358,11 @@ CREATE INDEX idx_package_tickets_ticket_type_id ON package_tickets(ticket_type_i
 -- Partial: package lines are the minority and the only rows the delete-guard scans.
 CREATE INDEX idx_order_items_package_id ON order_items(package_id) WHERE package_id IS NOT NULL;
 CREATE INDEX idx_attendees_order_id ON attendees(order_id);
+-- attendees.email is deliberately UNINDEXED. A draft of spec 022 added
+-- idx_attendees_email_lower for a per-address duplicate check; FR-023 removed
+-- that rule (an address may register as many times as quota allows), and no
+-- other read filters on the address. An index kept "in case" would be pure write
+-- amplification on attendee insert, which is the path this feature loads.
 
 -- The expiry sweeper's only query: PENDING orders whose payment deadline passed.
 -- Partial, so it stays roughly the size of the live payment window.

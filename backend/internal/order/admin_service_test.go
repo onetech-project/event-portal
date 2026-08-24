@@ -255,3 +255,104 @@ func TestAdminListAttendeesReturnsAnEmptySliceNotNil(t *testing.T) {
 	assert.NotNil(t, page.Items)
 	assert.Empty(t, page.Items)
 }
+
+// --- Spec 022 US4: registrations are ordinary records here -------------------
+
+// A registration arranged through the REAL registration path, then read back
+// through the admin lists. Arranged rather than seeded because a direct INSERT
+// would not exercise the write path under test and, per AGENTS.md, would make
+// the setup lie about what the system actually produces.
+func newAdminRegistrationFixture(t *testing.T) (adminOrderFixture, registrationFixture) {
+	t.Helper()
+	rf := newRegistrationFixture(t, 5)
+	require.NoError(t, rf.svc.RegisterFree(context.Background(), rf.ticket.ID, rf.request()))
+	rf.svc.WaitForRegistrationFulfillment()
+
+	events := event.NewService(rf.pool, event.NewRepository(rf.pool),
+		order.NewRepository(rf.pool), testsupport.DiscardLogger())
+	admin := order.NewAdminService(order.NewRepository(rf.pool), eventLookupAdapter{svc: events})
+
+	return adminOrderFixture{svc: admin, pool: rf.pool, event: rf.event}, rf
+}
+
+// FR-033 / US4 scenario 1. Since spec 022, PAID no longer implies money moved: a
+// registration is written directly at PAID with a zero total. An admin surface
+// that reads the status alone will report a free registration as revenue, so the
+// origin has to be legible on the row itself rather than inferred.
+func TestAdminListOrdersMarksARegistrationAsSuchWithAZeroTotal(t *testing.T) {
+	f, _ := newAdminRegistrationFixture(t)
+
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
+
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	row := page.Items[0]
+
+	assert.Equal(t, "PAID", row.Status)
+	assert.True(t, row.IsRegistration,
+		"a status of PAID is not enough to tell a registration from a sale")
+	assert.Equal(t, "0.00", row.TotalAmount.String())
+}
+
+// The other half of the same rule: a PURCHASE must not be labelled a
+// registration. Asserting only the positive would pass against a field hardcoded
+// true.
+func TestAdminListOrdersDoesNotMarkAPurchaseAsARegistration(t *testing.T) {
+	f := newAdminOrderFixture(t)
+	ord := testsupport.SeedOrder(t, f.pool, "ORD-BOUGHT", "PAID")
+	testsupport.SeedOrderItem(t, f.pool, ord.ID, f.reg.ID, 1)
+
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{})
+
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.False(t, page.Items[0].IsRegistration)
+}
+
+// FR-053, and the reason it exists: the registrant is never shown the address
+// their e-ticket went to (FR-039), so an operator helping someone who never
+// received it has a NAME and at best a guess at the address. A lookup demanding
+// the exact address is not a recovery route.
+func TestOperatorCanFindARegistrationByPartialNameOrEmail(t *testing.T) {
+	f, _ := newAdminRegistrationFixture(t)
+
+	for _, term := range []string{"Halo", "halo", "example.com", "REGISTRANT"} {
+		t.Run(term, func(t *testing.T) {
+			search := term
+			page, err := f.svc.ListAttendees(context.Background(),
+				order.AttendeeFilter{Search: &search})
+
+			require.NoError(t, err)
+			require.Len(t, page.Items, 1, "a partial, case-insensitive match must find the registrant")
+			assert.Equal(t, "Halo Registrant", page.Items[0].Name)
+			assert.True(t, page.Items[0].IsRegistration,
+				"and the operator must be able to see it has no receipt to resend")
+		})
+	}
+}
+
+func TestOperatorSearchExcludesNonMatchingRegistrants(t *testing.T) {
+	f, _ := newAdminRegistrationFixture(t)
+
+	absent := "nobody-by-that-name"
+	page, err := f.svc.ListAttendees(context.Background(), order.AttendeeFilter{Search: &absent})
+
+	require.NoError(t, err)
+	assert.Empty(t, page.Items)
+	assert.Equal(t, int64(0), page.Total, "and the count must agree with the rows, not with an unfiltered read")
+}
+
+// The count and the rows come from two queries whose WHERE clauses must stay
+// identical (order.sql says so beside them). A search applied to one and not the
+// other shows an operator "3 results" above a single row, or pages them into
+// emptiness.
+func TestOperatorSearchFiltersTheCountAndTheRowsTogether(t *testing.T) {
+	f, _ := newAdminRegistrationFixture(t)
+
+	search := "Halo"
+	page, err := f.svc.ListOrders(context.Background(), order.OrderFilter{Search: &search})
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(page.Items)), page.Total,
+		"the paired count query must carry the same filter as the row query")
+}

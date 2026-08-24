@@ -38,6 +38,10 @@ func (a eventProviderAdapter) TicketTypeForCheckout(ctx context.Context, tx pgx.
 		// Mirrors cmd/api: dropping it here would leave every availability check
 		// in these tests judging demand against a remaining quota of zero.
 		QuotaRemaining: row.Quota,
+		// Also mirrors cmd/api (spec 022). Dropping it would silently disable the
+		// FR-008 refusal in every test that goes through this adapter, so the
+		// seam would look guarded while being wide open.
+		IsVisible: row.IsVisible,
 	}, nil
 }
 
@@ -61,7 +65,36 @@ func (a eventProviderAdapter) CurrentTerms(ctx context.Context, eventID uuid.UUI
 	if err != nil {
 		return order.EventTermsInfo{}, err
 	}
-	return order.EventTermsInfo{ID: row.ID, EventID: eventID}, nil
+	info := order.EventTermsInfo{ID: row.ID, EventID: eventID}
+	if row.UpdatedAt != nil {
+		info.UpdatedAt = *row.UpdatedAt
+	}
+	return info, nil
+}
+
+// Mirrors the production adapter (cmd/api/adapters.go) exactly, including the
+// collapse of every event-domain "not found" onto ONE sentinel — spec 022 FR-012
+// forbids the wire distinguishing them, and a test adapter that distinguished
+// them would let a regression through.
+func (a eventProviderAdapter) RegistrationTargetBySlug(ctx context.Context, slug string, ticketTypeID uuid.UUID) (order.RegistrationTarget, error) {
+	target, err := a.svc.RegistrationTargetBySlug(ctx, slug, ticketTypeID)
+	if errors.Is(err, event.ErrNotFound) {
+		return order.RegistrationTarget{}, order.ErrRegistrationTargetMissing
+	}
+	if err != nil {
+		return order.RegistrationTarget{}, err
+	}
+	return order.RegistrationTarget{
+		TicketTypeID:   target.TicketTypeID,
+		TicketTypeName: target.TicketTypeName,
+		EventID:        target.EventID,
+		EventName:      target.EventName,
+		EventSlug:      target.EventSlug,
+		IsVisible:      target.IsVisible,
+		SalesStart:     target.SalesStart,
+		SalesEnd:       target.SalesEnd,
+		QuotaRemaining: target.QuotaRemaining,
+	}, nil
 }
 
 func (a eventProviderAdapter) PackageForCheckout(ctx context.Context, tx pgx.Tx, id uuid.UUID) (order.PackageInfo, error) {

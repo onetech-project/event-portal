@@ -244,9 +244,27 @@ function TicketTypesSection({ event }: Readonly<{ event: EventAdminDetail }>) {
           <Card key={ticketType.id}>
             <CardContent className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <p className="font-medium">{ticketType.name}</p>
+                <p className="flex flex-wrap items-center gap-2 font-medium">
+                  {ticketType.name}
+                  {/*
+                    FR-004: an admin must be able to tell at a glance which types
+                    are distributed by invitation. The badge says INVITATION
+                    rather than "hidden" because hidden understates it — such a
+                    type is also free, whatever price sits beside it.
+                  */}
+                  {ticketType.is_visible ? null : (
+                    <span className="rounded-full bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
+                      Invitation only
+                    </span>
+                  )}
+                </p>
                 <p className="text-sm text-muted-foreground">
                   {formatCurrency(ticketType.price)}
+                  {ticketType.is_visible ? null : (
+                    <span className="ml-1 italic">
+                      — not charged; this type is registered for, not bought
+                    </span>
+                  )}
                 </p>
                 {/* The remark the booking card shows in place of the standard
                     non-refundable notice; absent means that wording stands. */}

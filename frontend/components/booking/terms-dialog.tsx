@@ -3,13 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { TermsDialogShell } from "@/components/terms/terms-dialog-shell";
+import { useTermsAgreement } from "@/components/terms/terms-viewer";
 import { API_CODES, ApiError } from "@/lib/api-client";
 import {
   GENERAL_REFUSAL,
@@ -76,7 +71,7 @@ export function TermsDialog({
   onAvailabilityRefusal: (message: RefusalMessage) => void;
 }) {
   const router = useRouter();
-  const [agreed, setAgreed] = useState(false);
+
   // Set once book succeeds, so a failed agreement retries against the same
   // order instead of booking (and holding quota) twice.
   const [bookedOrderId, setBookedOrderId] = useState<string | null>(null);
@@ -85,6 +80,15 @@ export function TermsDialog({
   // commits, so without this latch the button would drop out of its busy state
   // mid-navigation and offer a retry for work that already succeeded.
   const [navigating, setNavigating] = useState(false);
+  // Spec 022, clarified 2026-08-21: `agreed` is the guest's to set. They may tick
+  // the box having read nothing, and reaching the end of the document ticks it
+  // for them as a convenience. Agree follows the checkbox, never the scroll.
+  //
+  // useTermsAgreement resets on close, which matters: this dialog's own reset
+  // runs only through handleOpenChange (a parent flipping `open` skips it), so
+  // state kept outside it would carry a stale acceptance into the next opening
+  // and silently break "reopening starts unchecked".
+  const { agreed, setAgreed, onReachedEnd } = useTermsAgreement(open);
 
   const terms = useEventTerms(eventSlug, open);
   const book = useBookOrder();
@@ -98,7 +102,6 @@ export function TermsDialog({
   function handleOpenChange(next: boolean) {
     onOpenChange(next);
     if (!next) {
-      setAgreed(false);
       // A booked-but-unagreed order left behind here is intentionally
       // abandoned: checkout refuses it and the hold sweeper reclaims it.
       setBookedOrderId(null);
@@ -120,7 +123,11 @@ export function TermsDialog({
         orderId = booked.order_id;
         setBookedOrderId(orderId);
       }
-      await agreement.mutateAsync({ orderId, eventTermsId: terms.data.id });
+      await agreement.mutateAsync({
+        orderId,
+        eventTermsId: terms.data.id,
+        eventTermsUpdatedAt: terms.data.updated_at,
+      });
       // Latched before the push, not after: the mutations are settled from here
       // on, and this is the only thing keeping the button out of its idle state
       // while the order page loads.
@@ -133,7 +140,11 @@ export function TermsDialog({
       // The document changed while the guest was reading: show the current
       // version and make them tick again for what they will actually agree to.
       if (error instanceof ApiError && error.code === API_CODES.termsChanged) {
-        setAgreed(false);
+        // The document changed under them. Close and reopen so the gate resets
+        // and they must read the CURRENT version through before agreeing again —
+        // leaving the dialog open would show new text above an already-satisfied
+        // gate, which is the very thing this refusal exists to prevent.
+        handleOpenChange(false);
         void terms.refetch();
         return;
       }
@@ -155,88 +166,26 @@ export function TermsDialog({
   const errorMessage = agreementErrorMessage(book.error) ?? agreementErrorMessage(agreement.error);
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="flex max-h-[calc(100dvh-6rem)] max-w-144.5 flex-col gap-0 rounded-2xl p-0 sm:max-w-3xl">
-        {/* An empty bar the close button sits in, so the rule below it clears
-            the button rather than running under it. */}
-        <div className="h-15 shrink-0" />
-
-        <div className="flex min-h-0 flex-1 flex-col border-t px-4 pt-4 pb-4">
-          <div className="pb-3">
-            <p className="text-base leading-6 text-terms-heading">
-              Terms &amp; Conditions for:
-            </p>
-            <DialogTitle className="text-base leading-6 font-bold text-terms-heading">
-              {eventName}
-            </DialogTitle>
-          </div>
-
-          <hr className="border-t" />
-
-          <div className="min-h-0 flex-1 overflow-y-auto py-3.5 text-sm leading-5 text-terms-ink">
-            {terms.isPending ? (
-              <p className="text-muted-foreground">Loading terms…</p>
-            ) : terms.isError ? (
-              <p className="text-muted-foreground">
-                {terms.error instanceof ApiError &&
-                terms.error.code === API_CODES.termsNotAuthored
-                  ? "This event's Terms & Conditions are not available yet. Please try again later."
-                  : "We could not load the Terms & Conditions. Please close this dialog and try again."}
-              </p>
-            ) : (
-              // Sanitized server-side on write (bluemonday); rendered verbatim.
-              <div
-                className="terms-content [&_ol]:list-decimal [&_ol]:space-y-3.5 [&_ol]:pl-10 [&_ul]:list-disc [&_ul]:pl-6 [&_p]:pb-3.5"
-                dangerouslySetInnerHTML={{ __html: terms.data.content }}
-              />
-            )}
-          </div>
-
-          <hr className="border-t" />
-
-          {errorMessage ? (
-            <p role="alert" className="pt-3 text-sm leading-5 text-destructive">
-              {errorMessage}
-            </p>
-          ) : null}
-
-          <label className="flex items-center gap-2 pt-3 text-sm leading-5 text-terms-ink">
-            <Checkbox checked={agreed} onCheckedChange={setAgreed} />I agree to
-            terms &amp; conditions
-          </label>
-
-          <div className="flex gap-8 pt-3">
-            <DialogClose className="flex h-12 flex-1 items-center justify-center rounded-lg border border-brand bg-background text-base font-bold text-brand transition-colors hover:bg-brand-surface">
-              Cancel
-            </DialogClose>
-
-            {agreed && terms.isSuccess ? (
-              <button
-                type="button"
-                onClick={handleAgree}
-                disabled={busy}
-                className="flex h-12 flex-1 items-center justify-center rounded-lg bg-brand text-base font-bold text-brand-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
-              >
-                {busy
-                  ? navigating
-                    ? "Opening your order…"
-                    : "Booking…"
-                  : failed
-                    ? "Retry"
-                    : "Agree"}
-              </button>
-            ) : (
-              <span
-                aria-disabled="true"
-                className="flex h-12 flex-1 items-center justify-center rounded-lg bg-muted text-base font-bold text-muted-foreground"
-              >
-                Agree
-              </span>
-            )}
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <TermsDialogShell
+      open={open}
+      onOpenChange={handleOpenChange}
+      eventSlug={eventSlug}
+      eventName={eventName}
+      agreed={agreed}
+      onAgreedChange={setAgreed}
+      onReachedEnd={onReachedEnd}
+      error={errorMessage}
+      action={{
+        // Booking places an order behind this press, so the label reports what
+        // is happening. Registration has nothing to wait for and stays "Agree".
+        label: busy ? (navigating ? "Opening your order…" : "Booking…") : failed ? "Retry" : "Agree",
+        onClick: handleAgree,
+        disabled: busy,
+        // Agreeing to a document that failed to load would record consent to
+        // nothing.
+        ready: terms.isSuccess,
+      }}
+    />
   );
 }
 

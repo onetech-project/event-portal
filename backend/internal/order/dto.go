@@ -125,6 +125,20 @@ type AvailabilityReason struct {
 type AgreementRequest struct {
 	Agreed       bool      `json:"agreed"`
 	EventTermsID uuid.UUID `json:"event_terms_id"`
+	// EventTermsUpdatedAt is the VERSION the guest read, and it is what actually
+	// detects a mid-flow edit.
+	//
+	// The id above cannot. `UpsertEventTerms` is `ON CONFLICT (event_id) DO
+	// UPDATE` on a UNIQUE event_id, so an admin edit overwrites the row IN PLACE
+	// and preserves its id — meaning the id comparison this endpoint shipped with
+	// could never fire for the case it was written for. Discovered while building
+	// spec 022, which needs a working check on its own surface and could not have
+	// one while this surface had a dead one.
+	//
+	// Optional on the wire: a client that omits it falls back to the id
+	// comparison, which is exactly the pre-022 behaviour. That keeps a stale
+	// browser tab working rather than refusing it outright.
+	EventTermsUpdatedAt *time.Time `json:"event_terms_updated_at"`
 }
 
 // PublicOrderEvent names the event an order belongs to. The slug is what lets an
@@ -395,7 +409,12 @@ type OrderSummary struct {
 	BuyerEmail  string      `json:"buyer_email"`
 	Status      string      `json:"status"`
 	TotalAmount money.Money `json:"total_amount"`
-	CreatedAt   *time.Time  `json:"created_at"`
+	// IsRegistration distinguishes a free registration from a purchase
+	// (spec 022 FR-033). Since spec 022, PAID no longer implies money moved: a
+	// registration is written directly at PAID with a zero total. Any surface
+	// reporting REVENUE must read this column, never the status alone.
+	IsRegistration bool       `json:"is_registration"`
+	CreatedAt      *time.Time `json:"created_at"`
 }
 
 // AttendeeSummary is an admin read-only attendee row
@@ -405,6 +424,10 @@ type AttendeeSummary struct {
 	Email          string `json:"email"`
 	TicketTypeName string `json:"ticket_type_name"`
 	OrderNumber    string `json:"order_number"`
+	// IsRegistration marks an attendee who registered rather than bought
+	// (spec 022). Carried so an operator resending an undelivered e-ticket knows
+	// which document to expect — a registration has no receipt.
+	IsRegistration bool `json:"is_registration"`
 }
 
 // validateItemLines checks the selected lines shared by booking and checkout:

@@ -99,6 +99,7 @@ func (h *AdminHandler) listOrders(c echo.Context) error {
 		return err
 	}
 	filter.EventID = eventID
+	filter.Search = optionalSearchParam(c)
 	// Paging is corrected rather than refused, unlike the filters above: a bad
 	// status names something that does not exist, while a bad page names a
 	// position that drifted (spec 021 research R8).
@@ -122,11 +123,35 @@ func (h *AdminHandler) listAttendees(c echo.Context) error {
 	}
 
 	attendees, err := h.svc.ListAttendees(c.Request().Context(),
-		AttendeeFilter{OrderID: orderID, EventID: eventID, Page: httpx.BindPage(c)})
+		AttendeeFilter{
+			OrderID: orderID,
+			EventID: eventID,
+			Search:  optionalSearchParam(c),
+			Page:    httpx.BindPage(c),
+		})
 	if err != nil {
 		return err
 	}
 	return httpx.Respond(c, http.StatusOK, attendees)
+}
+
+// optionalSearchParam reads `?search=`, the operator's free-text lookup
+// (spec 022 FR-053).
+//
+// Whitespace-only is treated as ABSENT, not as an empty match: `%%` would match
+// every row, so a stray space in the search box would silently look like an
+// unfiltered list rather than like a filter that found everything. It is not
+// refused — a search term is text an operator typed, not a name of something
+// that must exist, so there is nothing to report as invalid.
+//
+// Deliberately NOT length-capped here. The cache key hashes it (cache.optSearch),
+// so a long term cannot bloat Redis, and ILIKE handles the rest.
+func optionalSearchParam(c echo.Context) *string {
+	raw := strings.TrimSpace(c.QueryParam("search"))
+	if raw == "" {
+		return nil
+	}
+	return &raw
 }
 
 func optionalUUIDParam(c echo.Context, name string) (*uuid.UUID, error) {

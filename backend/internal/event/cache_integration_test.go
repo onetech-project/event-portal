@@ -392,3 +392,68 @@ func TestTicketTypeWritesAreScopedToTheirOwnEvent(t *testing.T) {
 	assert.False(t, ticketListCached(t, c, a.ID), "the written event's list is orphaned")
 	assert.True(t, ticketListCached(t, c, b.ID), "the other event's list is untouched")
 }
+
+// Spec 022 T046 / FR-006 + Principle VII: the containment filter lives in SQL, so
+// what gets CACHED is the already-filtered list. Two directions matter, and both
+// are silent failures rather than errors.
+//
+// Hiding a type must orphan the cached list, or the guest page keeps selling
+// something the admin just withdrew — the leak US2 exists to prevent, arriving
+// through the cache rather than through a missing filter.
+func TestHidingATicketTypeRemovesItFromTheCachedGuestList(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "cache-tt-hide", "PUBLISHED")
+	tt := testsupport.SeedTicketType(t, pool, ev.ID, "Regular", "150000.00", 10)
+
+	warm, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-hide")
+	require.NoError(t, err)
+	require.Len(t, warm, 1, "a visible type is on the guest list")
+	require.True(t, ticketListCached(t, c, ev.ID))
+
+	hidden := false
+	req := validTicketTypeRequest()
+	req.Name = "Regular"
+	req.IsVisible = &hidden
+	_, err = svc.UpdateTicketType(ctx, tt.ID, req)
+	require.NoError(t, err)
+
+	assert.False(t, ticketListCached(t, c, ev.ID),
+		"hiding must orphan the cached list, or the guest page keeps offering it")
+
+	after, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-hide")
+	require.NoError(t, err)
+	assert.Empty(t, after,
+		"an invitation-only type must not appear on any guest purchase surface, cached or not")
+}
+
+// The other direction. A type created invisible must never enter the cached guest
+// list in the first place — and un-hiding it must make it appear on the very next
+// read, not at TTL expiry.
+func TestUnhidingATicketTypeReturnsItToTheCachedGuestList(t *testing.T) {
+	pool, svc, c, _ := newEventTestRig(t)
+	ctx := context.Background()
+
+	ev := testsupport.SeedEvent(t, pool, "cache-tt-unhide", "PUBLISHED")
+	tt := testsupport.SeedRegistrationTicketType(t, pool, ev.ID, "Invitation Access", 10)
+
+	warm, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-unhide")
+	require.NoError(t, err)
+	require.Empty(t, warm, "an invitation-only type is not on the guest list")
+	require.True(t, ticketListCached(t, c, ev.ID), "and the EMPTY list is what got cached")
+
+	visible := true
+	req := validTicketTypeRequest()
+	req.Name = "Invitation Access"
+	req.IsVisible = &visible
+	_, err = svc.UpdateTicketType(ctx, tt.ID, req)
+	require.NoError(t, err)
+
+	assert.False(t, ticketListCached(t, c, ev.ID))
+
+	after, err := svc.TicketTypesForEventSlug(ctx, "cache-tt-unhide")
+	require.NoError(t, err)
+	assert.Len(t, after, 1,
+		"un-hiding must be visible on the next guest read, not at TTL expiry")
+}

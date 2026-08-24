@@ -47,6 +47,10 @@ func (a eventProviderAdapter) TicketTypeForCheckout(ctx context.Context, tx pgx.
 		// across costs no query, no round trip and no lock. See the field's own
 		// doc comment for why booking must not read it.
 		QuotaRemaining: row.Quota,
+		// Spec 022: the event domain's flag reaching the order domain the only way
+		// Principle II permits — through this adapter, which is the one place
+		// allowed to see both.
+		IsVisible: row.IsVisible,
 	}, nil
 }
 
@@ -95,7 +99,40 @@ func (a eventProviderAdapter) CurrentTerms(ctx context.Context, eventID uuid.UUI
 	if err != nil {
 		return order.EventTermsInfo{}, err
 	}
-	return order.EventTermsInfo{ID: row.ID, EventID: eventID}, nil
+	// UpdatedAt is what actually detects an edit: UpsertEventTerms overwrites in
+	// place and preserves the row id, so the id alone can never report a change
+	// (spec 022). Nil means a document written before the column existed; the
+	// zero time is then compared, which fails closed — the guest re-reads.
+	info := order.EventTermsInfo{ID: row.ID, EventID: eventID}
+	if row.UpdatedAt != nil {
+		info.UpdatedAt = *row.UpdatedAt
+	}
+	return info, nil
+}
+
+func (a eventProviderAdapter) RegistrationTargetBySlug(ctx context.Context, slug string, ticketTypeID uuid.UUID) (order.RegistrationTarget, error) {
+	target, err := a.events.RegistrationTargetBySlug(ctx, slug, ticketTypeID)
+	if errors.Is(err, event.ErrNotFound) {
+		// Every cause the event domain reports as "not found" — unpublished
+		// event, unknown slug, unknown ticket type, type belonging to another
+		// event — becomes ONE sentinel here, so no handler can accidentally
+		// distinguish them on the wire (spec 022 FR-012).
+		return order.RegistrationTarget{}, order.ErrRegistrationTargetMissing
+	}
+	if err != nil {
+		return order.RegistrationTarget{}, err
+	}
+	return order.RegistrationTarget{
+		TicketTypeID:   target.TicketTypeID,
+		TicketTypeName: target.TicketTypeName,
+		EventID:        target.EventID,
+		EventName:      target.EventName,
+		EventSlug:      target.EventSlug,
+		IsVisible:      target.IsVisible,
+		SalesStart:     target.SalesStart,
+		SalesEnd:       target.SalesEnd,
+		QuotaRemaining: target.QuotaRemaining,
+	}, nil
 }
 
 // --- order.PaymentGateway: checkout's view of the payment provider ---------
@@ -396,6 +433,20 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 		buyerPhone = *rec.BuyerPhone
 	}
 
+	// Spec 022: which of the two delivery shapes this order gets.
+	//
+	// DERIVED by the order read, not stored (Principle IV v6.0.0): the order
+	// carries a line for a ticket type that is not guest-visible. Still never
+	// inferred here from a zero total or a missing payments row — both of those
+	// are absences an abandoned purchase also shows, and a purchasable type priced
+	// at zero is explicitly legal (FR-003).
+	//
+	// Because it is derived, this value can change for an order that has already
+	// been delivered: if an admin makes that ticket type purchasable again, a
+	// RESEND of this registration will render a receipt for an order that never
+	// had a payment. Accepted deliberately when the stored marker was removed.
+	isRegistration := rec.IsRegistration
+
 	// The receipt's Transaction Details block. A failure here must not stop a
 	// delivery: the order is PAID either way, and a receipt missing its
 	// instrument is a far better outcome than a buyer with no tickets.
@@ -434,6 +485,7 @@ func (a notificationOrderAdapter) OrderForDelivery(ctx context.Context, orderID 
 			// payment time than the original.
 			PaidAt: settlement.PaidAt,
 		},
+		IsRegistration: isRegistration,
 	}, nil
 }
 

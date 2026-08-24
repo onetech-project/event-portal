@@ -33,6 +33,8 @@ import type {
   TicketTypeAdminView,
   TicketTypeSummary,
   ValidationResult,
+  RegistrationPrereqs,
+  RegistrationSubmission,
 } from "./types";
 
 /**
@@ -45,6 +47,8 @@ export const queryKeys = {
   eventTicketTypes: (slug: string) => ["events", slug, "ticket-types"] as const,
   eventPackages: (slug: string) => ["events", slug, "packages"] as const,
   eventTerms: (slug: string) => ["events", slug, "terms"] as const,
+  registrationPrereqs: (slug: string, ticketTypeId: string) =>
+    ["registration", slug, ticketTypeId] as const,
   ticket: (code: string) => ["tickets", code] as const,
   order: (orderNumber: string) => ["orders", orderNumber] as const,
   genders: ["genders"] as const,
@@ -59,21 +63,30 @@ export const queryKeys = {
   adminPackages: (eventId: string) => ["admin", "packages", eventId] as const,
   adminFees: (params?: ListParams) =>
     ["admin", "fees", params?.page ?? null, params?.pageSize ?? null] as const,
-  adminOrders: (status?: string, eventId?: string, params?: ListParams) =>
+  // `search` is part of the key, not a detail: omitting it would serve one
+  // operator search's cached page as the answer to a different one.
+  adminOrders: (status?: string, eventId?: string, search?: string, params?: ListParams) =>
     [
       "admin",
       "orders",
       status ?? null,
       eventId ?? null,
+      search ?? null,
       params?.page ?? null,
       params?.pageSize ?? null,
     ] as const,
-  adminAttendees: (orderId?: string, eventId?: string, params?: ListParams) =>
+  adminAttendees: (
+    orderId?: string,
+    eventId?: string,
+    search?: string,
+    params?: ListParams,
+  ) =>
     [
       "admin",
       "attendees",
       orderId ?? null,
       eventId ?? null,
+      search ?? null,
       params?.page ?? null,
       params?.pageSize ?? null,
     ] as const,
@@ -211,11 +224,72 @@ export function useBookOrder() {
  */
 export function useRecordAgreement() {
   return useMutation({
-    mutationFn: ({ orderId, eventTermsId }: { orderId: string; eventTermsId: string }) =>
+    mutationFn: ({
+      orderId,
+      eventTermsId,
+      eventTermsUpdatedAt,
+    }: {
+      orderId: string;
+      eventTermsId: string;
+      /**
+       * The VERSION read, which is what actually detects a mid-flow edit.
+       *
+       * The id alone cannot: an admin edit overwrites the terms row in place and
+       * preserves its id, so the id comparison this endpoint shipped with could
+       * never fire for the case it existed to catch (spec 022 fixed both sides).
+       */
+      eventTermsUpdatedAt: string | null;
+    }) =>
       apiFetch<void>(`/ticket/terms-condition/${encodeURIComponent(orderId)}`, {
         method: "POST",
-        body: { agreed: true, event_terms_id: eventTermsId },
+        body: {
+          agreed: true,
+          event_terms_id: eventTermsId,
+          event_terms_updated_at: eventTermsUpdatedAt,
+        },
       }),
+  });
+}
+
+// --- Free registration (spec 022) -----------------------------------------
+
+/**
+ * What the registration form needs to render, and whether it may render at all
+ * (GET /ticket/register/:ticketTypeId?slug=…).
+ *
+ * No retry: every refusal — unknown type, a purchasable one, a closed window, no
+ * places left — is a settled 404 that will answer identically next time, and
+ * retrying an unauthenticated endpoint gains nothing but load.
+ */
+export function useRegistrationPrereqs(slug: string, ticketTypeId: string) {
+  return useQuery({
+    queryKey: queryKeys.registrationPrereqs(slug, ticketTypeId),
+    queryFn: () =>
+      apiFetch<RegistrationPrereqs>(
+        `/ticket/register/${encodeURIComponent(ticketTypeId)}?slug=${encodeURIComponent(slug)}`,
+      ),
+    enabled: slug !== "" && ticketTypeId !== "",
+    retry: false,
+  });
+}
+
+/**
+ * Submits the registration (POST /ticket/register/:ticketTypeId).
+ *
+ * `retry: false` for the same reason as useBookOrder: an automatic retry on an
+ * ambiguous transport failure could register the same person twice. The
+ * duplicate-email rule would refuse the second, but the guest would then be told
+ * they are already registered by their own successful attempt — a confusing
+ * failure invented entirely by the retry.
+ */
+export function useSubmitRegistration(ticketTypeId: string) {
+  return useMutation({
+    mutationFn: (body: RegistrationSubmission) =>
+      apiFetch<{ registered: boolean }>(
+        `/ticket/register/${encodeURIComponent(ticketTypeId)}`,
+        { method: "POST", body },
+      ),
+    retry: false,
   });
 }
 
@@ -549,13 +623,19 @@ function invalidateTicketTypes(
 
 // --- Admin: read-only views ----------------------------------------------
 
-export function useAdminOrders(status?: string, eventId?: string, paging?: ListParams) {
+export function useAdminOrders(
+  status?: string,
+  eventId?: string,
+  search?: string,
+  paging?: ListParams,
+) {
   return useQuery({
-    queryKey: queryKeys.adminOrders(status, eventId, paging),
+    queryKey: queryKeys.adminOrders(status, eventId, search, paging),
     queryFn: () => {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
       if (eventId) params.set("event_id", eventId);
+      if (search) params.set("search", search);
       appendPaging(params, paging);
       const query = params.toString();
       return adminFetch<Page<OrderSummary>>(`/admin/orders${query ? `?${query}` : ""}`);
@@ -563,13 +643,19 @@ export function useAdminOrders(status?: string, eventId?: string, paging?: ListP
   });
 }
 
-export function useAdminAttendees(orderId?: string, eventId?: string, paging?: ListParams) {
+export function useAdminAttendees(
+  orderId?: string,
+  eventId?: string,
+  search?: string,
+  paging?: ListParams,
+) {
   return useQuery({
-    queryKey: queryKeys.adminAttendees(orderId, eventId, paging),
+    queryKey: queryKeys.adminAttendees(orderId, eventId, search, paging),
     queryFn: () => {
       const params = new URLSearchParams();
       if (orderId) params.set("order_id", orderId);
       if (eventId) params.set("event_id", eventId);
+      if (search) params.set("search", search);
       appendPaging(params, paging);
       const query = params.toString();
       return adminFetch<Page<AttendeeSummary>>(`/admin/attendees${query ? `?${query}` : ""}`);

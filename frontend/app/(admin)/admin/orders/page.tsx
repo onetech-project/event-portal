@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Loading, PageHeading, StatusAlert } from "@/components/ui/feedback";
 import {
   Select,
@@ -39,6 +40,7 @@ export default function AdminOrdersPage() {
   const list = useListParams();
   const status = list.filters.status ?? ALL;
   const eventId = list.filters.event_id ?? ALL;
+  const search = list.filters.search ?? "";
 
   // The order whose payment story is open, if any. Reached by order number from
   // this list, because that is what a guest hands support when they call.
@@ -56,6 +58,7 @@ export default function AdminOrdersPage() {
   } = useAdminOrders(
     status === ALL ? undefined : status,
     eventId === ALL ? undefined : eventId,
+    search || undefined,
     list.params,
   );
 
@@ -118,6 +121,19 @@ export default function AdminOrdersPage() {
               </SelectContent>
             </Select>
           </Field>
+
+          {/* FR-053: partial name, email or order number — the operator's lookup. */}
+          <Field label="Find an order" className="sm:col-span-2">
+            <Input
+              type="search"
+              placeholder="Order number, buyer name, or part of an email"
+              defaultValue={search}
+              onChange={(e) => {
+                const next = e.currentTarget.value.trim();
+                list.setFilter("search", next === "" ? undefined : next);
+              }}
+            />
+          </Field>
         </CardContent>
       </Card>
 
@@ -160,10 +176,26 @@ export default function AdminOrdersPage() {
                     <div>{order.buyer_name}</div>
                     <div className="text-xs text-muted-foreground">{order.buyer_email}</div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="space-y-1">
                     <Badge variant="secondary">{order.status}</Badge>
+                    {/*
+                      FR-033. PAID no longer implies money moved: a registration
+                      is written straight to PAID with a zero total. Without this
+                      the two are indistinguishable on the row an operator reads.
+                    */}
+                    {order.is_registration ? (
+                      <div>
+                        <Badge variant="outline">Registration</Badge>
+                      </div>
+                    ) : null}
                   </TableCell>
-                  <TableCell>{formatCurrency(order.total_amount)}</TableCell>
+                  <TableCell>
+                    {order.is_registration ? (
+                      <span className="text-muted-foreground">Free</span>
+                    ) : (
+                      formatCurrency(order.total_amount)
+                    )}
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatDateTime(order.created_at)}
                   </TableCell>

@@ -1,5 +1,105 @@
 <!--
 Sync Impact Report
+Version change: 5.0.0 -> 6.0.0 (MAJOR - an existing rule is REDEFINED, and a mandatory
+requirement is REMOVED. Principle IV required a registration-originated order to be
+"marked at creation", making the marker part of the permission that admitted the second
+origin of `PAID`. That requirement is withdrawn: the distinction is now derived from the
+ticket type the order's line references. Removing a MUST from a NON-NEGOTIABLE principle
+is backward-incompatible for any consumer that relied on it, which is a MAJOR bump by the
+same reasoning the 3.4.0 -> 4.0.0 report recorded.)
+
+Trigger: explicit direction, 2026-08-20, during spec 022 implementation. The stored
+marker was questioned and the derivation chosen in its place.
+
+Modified sections:
+  - Principle IV (Transactional Integrity & Idempotency) - "MUST be marked at creation as
+    registration-originated" is replaced by "the distinction is derived, not stored: an
+    order is registration-originated exactly when it carries a line for a ticket type
+    that is not guest-visible". The obligation on revenue surfaces is unchanged and
+    restated: they MUST apply the derivation, and MUST NOT read the status as evidence
+    money moved.
+
+COST ACCEPTED, RECORDED HERE BECAUSE NOTHING ELSE CAN ENFORCE IT: a derived value is not
+stable over time. An admin who makes an invitation ticket type purchasable again
+retroactively reclassifies every historical order that used it, and a resend of an old
+registration would then render a receipt for an order that never had a payment. A stored
+marker could not do that. This was raised before the decision and chosen anyway; it is
+documented rather than mitigated, because the schema has no way to prevent it.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - SCHEMA.md - UPDATED WITH THIS CHANGE: `orders.is_registration` is removed and the
+    derivation documented in its place.
+  - ARCHITECTURE.md, PRD.md - UPDATED WITH THIS CHANGE where they named the marker.
+
+Added principles: none. Removed sections: none.
+
+Templates requiring follow-up: none.
+
+---
+
+Version change: 4.2.0 -> 5.0.0 (MAJOR - two existing rules are REDEFINED, not merely
+extended. Principle IV said "no path other than a gateway webhook may move an order to
+`PAID`", an absolute that did not fail to contemplate free registration so much as
+forbid it; that prohibition becomes a permission, scoped to orders without a payment
+session. The Critical Data Flow Rules said delivery carries "exactly two document
+attachments" with neither sendable without the other; that becomes two for a paid order
+and exactly one for a registration. Turning a prohibition into a permission is a
+backward-incompatible redefinition by the same reasoning the 3.4.0 -> 4.0.0 report
+recorded for its reversal, and unlike the 3.2.0 and 3.3.0 MINOR bumps, which genuinely
+governed cases the previous text had never addressed.)
+
+Trigger: spec 022 (Free Ticket Registration). An organiser needs to issue complimentary
+invitation tickets: a guest fills one form, accepts the event's Terms & Conditions, and
+is emailed an e-ticket. No money is owed at any point, so there is no payment to confirm
+and no receipt that could honestly be issued.
+
+Modified sections:
+  - Principle IV (Transactional Integrity & Idempotency) - the webhook-only route to
+    `PAID` is narrowed to orders that HAVE a payment session, where it stays absolute. A
+    registration-originated order is admitted: zero total, no payment session, no gateway
+    call, no `payments` row, no `order_fees`, quota deducted through the same atomic
+    row-locked UPDATE inside one transaction, and unreachable by any webhook or sweeper.
+    It MUST be marked registration-originated at creation. Rationale extended to state
+    what `PAID` now means across both origins - "this order is final and its tickets are
+    issuable" - and to record the honest cost: `PAID` alone no longer implies money
+    moved, which is why the marker is mandatory and why any revenue surface MUST read it.
+  - Critical Data Flow Rules, ticket-generation bullet - the two-attachment rule is
+    scoped to PAID-by-payment orders. A registration carries exactly ONE attachment, the
+    E-Ticket alone, and its message states no monetary amount anywhere. The all-or-nothing
+    render rule applies unchanged to the one document it does send.
+
+Added principles: none. Removed sections: none.
+
+Governance-document sync (ARCHITECTURE.md, PRD.md, SCHEMA.md):
+  - ARCHITECTURE.md - UPDATED WITH THIS CHANGE: SS3.4 gains the Free Registration write
+    path and a note that the terms-agreement version token is `event_terms.updated_at`,
+    never the row id.
+  - PRD.md - UPDATED WITH THIS CHANGE: SS1.4 gains a Free Registration block and the
+    one-attachment delivery case.
+  - SCHEMA.md - the amendment ITSELF has no schema impact; spec 022's migration 000016
+    (`ticket_types.is_visible`) updates SCHEMA.md in its own
+    commit, as Governance and
+    AGENTS.md both require.
+
+Templates requiring follow-up: none. The plan template's Constitution Check reads this
+file at runtime.
+
+Follow-up TODOs:
+  - The 4.2.0 report's Follow-up TODO about echo's IPExtractor is STALE and is retired
+    here. Verified rather than assumed: backend/cmd/api/main.go:333-345 sets
+    `echo.ExtractIPDirect()` by default and honours X-Forwarded-For only from
+    TRUSTED_PROXY_CIDRS. Spec 018 closed it; the repository is compliant with Principle
+    IX's client-identity rule.
+  - Spec 022 uncovered a PRE-EXISTING defect, recorded here rather than left silent:
+    `UpsertEventTerms` is `ON CONFLICT (event_id) DO UPDATE` on a UNIQUE `event_id`, so
+    an admin edit preserves the row id. The booking flow's `TERMS_CHANGED` refusal
+    compares ids and therefore cannot fire for the case its own doc comment describes.
+    Spec 022 fixes it on both surfaces by comparing `updated_at`, with the regression seen
+    failing first (tasks T053a-T053d).
+-->
+
+<!--
+Sync Impact Report
 Version change: 4.1.0 -> 4.2.0 (MINOR - a new principle is added. No existing principle
 is removed or redefined, matching the 3.1.0 -> 3.2.0 precedent for adding a principle.
 Note honestly that current code does NOT yet satisfy the new principle's client-identity
@@ -567,8 +667,24 @@ The re-deduction is all-or-nothing across every ticket type the order holds: if 
 short, nothing moves, the order's status is unchanged, no tickets are issued, and the
 handler still answers `200 OK` (a body may carry the refusal; the status code may not,
 because a retry would fail identically). An order the *gateway* rejected or cancelled
-MUST NOT be settled this way — only the system's own expiry verdict is reversible — and
-no path other than a gateway webhook may move an order to `PAID`.
+MUST NOT be settled this way — only the system's own expiry verdict is reversible.
+No order that has a payment session MAY reach `PAID` by any path other than a gateway
+webhook. That rule is absolute and unchanged: wherever money is owed, exactly one
+authority — the gateway's notification — decides that it arrived.
+`PAID` additionally carries orders that were never payable. A **free registration**
+(spec 022) writes a zero-total order directly at `PAID`, never opening a payment session,
+never calling the gateway, and never writing a `payments` row. The two origins of `PAID`
+MUST remain distinguishable, and that distinction is **derived, not stored**: an order is
+registration-originated exactly when it carries a line for a ticket type that is not
+guest-visible. Containment guarantees such a type can never be bought or bundled, so one
+such line can only have come from the registration path. Every surface that reports
+revenue MUST apply that derivation; the status alone MUST NOT be read as evidence money
+moved. Such an order MUST carry a
+total of zero and no `order_fees`; MUST deduct quota through the same atomic, row-locked
+`UPDATE` this principle already mandates, inside one transaction with its `orders`,
+`order_items` and `attendees` rows; and MUST obey the no-network-call and no-cache-call
+rules above without exception. A registration-originated order MUST NOT be reachable by
+any webhook, MUST NOT be swept by the expiry sweeper, and MUST NOT restore quota.
 Rationale: Prevents overselling, double-processing of payments, and slow/blocked
 webhook responses that payment providers may retry or flag as failing. The
 no-network-call rule exists because the quota-deducting `UPDATE` holds a row lock
@@ -582,8 +698,21 @@ the *notification* path — not a second, staff-only path — has to be able to 
 job. Requiring that recovery run through the same webhook code every ordinary purchase
 exercises is the whole point: a rescue path used once a month is a path nobody knows is
 broken. Making it all-or-nothing keeps the no-overselling guarantee intact when the
-seats have since been resold, and forbidding any non-webhook route to `PAID` keeps
-exactly one source of payment truth.
+seats have since been resold, and confining every *payable* order to the webhook route
+keeps exactly one source of payment truth.
+The registration carve-out is granted because the invariant it appears to break is not
+the one that was ever load-bearing. What `PAID` had to guarantee was: *no order is
+treated as settled unless the gateway said so*. A free registration is never settled,
+because nothing was ever owed — there is no payment to confirm, no gateway that could
+confirm it, and no second source of truth to disagree with. What `PAID` actually means
+across both origins is narrower and now stated plainly: **this order is final and its
+tickets are issuable.** The alternative — a separate terminal status — was rejected
+deliberately: issuance, ticket lookup, e-ticket rendering, resend, admin listing and
+validation are all keyed on `PAID`, so a second issued-state would fan out into every one
+of those read paths and leave a permanent trap for the next path that forgets it. The
+honest cost is recorded rather than hidden: `PAID` alone no longer implies money moved,
+which is precisely why the registration marker is mandatory rather than advisory. Any
+surface reporting revenue MUST read that marker, not the status.
 
 ### V. Payment Gateway Abstraction
 The `internal/payment` domain MUST expose a `Gateway` interface
@@ -818,7 +947,8 @@ limit which cannot actually be enforced is never documented as though it can.
   generated per `Attendee`. Delivery is to the buyer alone: **exactly one email**,
   addressed to the order's primary-contact snapshot `orders.buyer_email` — the
   first holder form's address, that form being both ticket holder 1 and the buyer
-  — carrying **exactly two document attachments**: a Payment Receipt document, and a single
+  — carrying, **for a paid order**, **exactly two document attachments**: a Payment
+  Receipt document, and a single
   E-Ticket document holding **every** ticket in the order, one page per ticket.
   The receipt also remains itemized in the email body; the attachment exists so a
   buyer can file or forward the proof of payment without the email around it. The
@@ -828,6 +958,15 @@ limit which cannot actually be enforced is never documented as though it can.
   render, no email goes out at all. Images the body references inline (the brand
   mark, the location pin) are message parts, not documents, and are excluded from
   that count — a buyer's attachment list still shows exactly two files.
+  A **registration-originated** order (Principle IV) carries **exactly one document
+  attachment**: the E-Ticket document alone. It has no receipt, in the body or as an
+  attachment, and its message MUST state no monetary amount anywhere — a receipt for a
+  zero-amount registration would be a proof of payment for a payment that never
+  happened, which is worse than sending none. The all-or-nothing render rule applies
+  unchanged to the one document it does send: a failed render sends nothing, leaves
+  `email_sent` FALSE, and keeps resend armed. Everything else about delivery is
+  identical across both origins — one email, to `orders.buyer_email` alone, the
+  E-Ticket still carrying no monetary figure.
   The other holders' `attendees.email` values are holder identity, not
   delivery addresses, and MUST NOT be mailed. `email_sent` MUST be set only after
   that email has been delivered; a failure leaves it FALSE so resend stays armed.
@@ -910,4 +1049,4 @@ Versioning policy (semantic versioning for governance):
 - MINOR: New principle or materially expanded guidance added.
 - PATCH: Wording clarifications and non-semantic fixes.
 
-**Version**: 4.2.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-18
+**Version**: 6.0.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-20

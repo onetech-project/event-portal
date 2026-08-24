@@ -3,32 +3,27 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Info } from "lucide-react";
 import { useMemo } from "react";
-import {
-  Controller,
-  useForm,
-  type Control,
-  type FieldPath,
-} from "react-hook-form";
+import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { OrderSummaryPanel } from "@/components/order/order-summary-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field } from "@/components/ui/field";
+import { HolderFields } from "@/components/order/holder-fields";
 import { StatusAlert } from "@/components/ui/feedback";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { groupOrderSlots, type SlotGroup } from "@/components/order/slot-groups";
 import { API_CODES, ApiError } from "@/lib/api-client";
+import {
+  dobSchema,
+  dobToIso,
+  genderSchema,
+  holderEmailSchema,
+  holderNameSchema,
+  phoneSchema,
+} from "@/lib/holder-fields";
 import { useGenders, useStartCheckout } from "@/lib/queries";
-import type { GenderOption, TicketOrderDetail } from "@/lib/types";
+import type { TicketOrderDetail } from "@/lib/types";
 import QrisIcon from "../icons/qris";
 
 /**
@@ -52,50 +47,11 @@ import QrisIcon from "../icons/qris";
  * contract stays per-slot.
  */
 
-// DOB is typed as DD/MM/YYYY text — no native calendar control (clarified
-// 2026-08-06) — and crosses the wire as ISO YYYY-MM-DD via dobToIso.
-const DOB_PATTERN = /^\d{2}\/\d{2}\/\d{4}$/;
-
-const dobSchema = z
-  .string()
-  .min(1, "Date of birth is required.")
-  .regex(DOB_PATTERN, "Enter a date as DD/MM/YYYY.")
-  .refine((value) => !DOB_PATTERN.test(value) || dobToIso(value) !== null, {
-    message: "Enter a real calendar date.",
-  })
-  .refine(
-    (value) => {
-      const iso = dobToIso(value);
-      // Compared as ISO strings against the guest's LOCAL today (both are
-      // zero-padded, so lexical order is chronological). Parsing to a Date
-      // would read the value as UTC midnight and reject today's date for
-      // anyone east of UTC during their morning — today must be accepted.
-      return iso === null || iso <= todayIso();
-    },
-    { message: "Date of birth cannot be in the future." },
-  );
-
-// The gender option set comes from GET /ticket/genders (master data), so the
-// schema only requires a choice; the server checks membership.
-const genderSchema = z.string().min(1, "Select a gender.");
-
-// Spec 011 FR-006 (clarified 2026-08-07, floor raised 2026-08-13) — 12-15
-// digits, and nothing but digits. Length is the whole rule: no prefix is
-// required, and the digits are counted on the value exactly as typed. The guest
-// may enter `628123456789` or `081234567890` and whichever they chose is what
-// gets stored — but a shorter local-form number like `08123456789` is eleven
-// digits and is refused, which is the one case the raised floor changes. The
-// message matches the server's word-for-word: both surface on the same inline
-// field slot.
-const PHONE_MESSAGE = "Enter a phone number of 12-15 digits.";
-
-const phoneSchema = z.string().regex(/^[0-9]{12,15}$/, PHONE_MESSAGE);
-
 const visitorSchema = z.object({
   /** The slot ids this card fills (a whole bundle unit, or one standalone slot). */
   slot_ids: z.array(z.string()).min(1),
-  name: z.string().trim().min(1, "Full name is required."),
-  email: z.email("Enter a valid email address."),
+  name: holderNameSchema,
+  email: holderEmailSchema,
   phone: phoneSchema,
   dob: dobSchema,
   gender: genderSchema,
@@ -117,7 +73,6 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
   const groups = useMemo(() => groupOrderSlots(order.slots), [order.slots]);
 
   const {
-    register,
     control,
     handleSubmit,
     setError,
@@ -234,58 +189,24 @@ export function OrderForms({ order }: { order: TicketOrderDetail }) {
                 ) : null}
               </CardHeader>
               <CardContent className="grid gap-4 sm:grid-cols-2">
-                <div className="sm:col-span-2">
-                  <Field
-                    label="Full name"
-                    required
-                    error={errors.attendees?.[index]?.name?.message}
-                  >
-                    <Input
-                      className="h-auto px-3 py-4"
-                      placeholder="As written on ID card"
-                      {...register(`attendees.${index}.name`)}
-                    />
-                  </Field>
-                </div>
-                <Field
-                  label="Email address"
-                  required
-                  error={errors.attendees?.[index]?.email?.message}
-                >
-                  <Input
-                    className="h-auto px-3 py-4"
-                    placeholder="name@example.com"
-                    {...register(`attendees.${index}.email`)}
-                  />
-                </Field>
-                <Field
-                  label="Phone number"
-                  required
-                  error={errors.attendees?.[index]?.phone?.message}
-                >
-                  <PhoneInput
-                    control={control}
-                    name={`attendees.${index}.phone`}
-                  />
-                </Field>
-                <Field
-                  label="Gender"
-                  required
-                  error={errors.attendees?.[index]?.gender?.message}
-                >
-                  <GenderSelect
-                    control={control}
-                    name={`attendees.${index}.gender`}
-                    options={genders}
-                  />
-                </Field>
-                <Field
-                  label="Date of birth"
-                  required
-                  error={errors.attendees?.[index]?.dob?.message}
-                >
-                  <DobInput control={control} name={`attendees.${index}.dob`} />
-                </Field>
+                <HolderFields
+                  control={control}
+                  fields={{
+                    name: `attendees.${index}.name`,
+                    email: `attendees.${index}.email`,
+                    phone: `attendees.${index}.phone`,
+                    gender: `attendees.${index}.gender`,
+                    dob: `attendees.${index}.dob`,
+                  }}
+                  errors={{
+                    name: errors.attendees?.[index]?.name?.message,
+                    email: errors.attendees?.[index]?.email?.message,
+                    phone: errors.attendees?.[index]?.phone?.message,
+                    gender: errors.attendees?.[index]?.gender?.message,
+                    dob: errors.attendees?.[index]?.dob?.message,
+                  }}
+                  genders={genders}
+                />
               </CardContent>
             </Card>
           ))}
@@ -456,190 +377,6 @@ function GroupTitle({ group }: { group: SlotGroup }) {
  * makes the retired option leave the list the moment the guest picks something
  * else — a list widened from the seed would keep offering it forever.
  */
-function GenderSelect({
-  control,
-  name,
-  options,
-}: {
-  control: Control<OrderFormsValues>;
-  name: FieldPath<OrderFormsValues>;
-  options: GenderOption[] | undefined;
-}) {
-  return (
-    <Controller
-      control={control}
-      name={name}
-      render={({ field }) => (
-        <Select
-          value={field.value === "" ? null : (field.value as string)}
-          onValueChange={(value) => field.onChange(value ?? "")}
-        >
-          <SelectTrigger
-            aria-label="Gender"
-            className="px-3 py-4 w-full data-[size=default]:h-fit "
-          >
-            {/* The trigger shows the human label, never the stored value. */}
-            <SelectValue>
-              {(value: string | null) =>
-                value === null ? "Select" : genderLabel(value)
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent align="start" alignItemWithTrigger={false}>
-            {optionsIncluding(options, field.value as string).map((option) => (
-              // A retired entry is not in the master list and so has no id of
-              // its own; its name is unique within the list and is what the
-              // value is anyway, so it serves as the key.
-              <SelectItem key={option.name} value={option.name} className="p-3">
-                {genderLabel(option.name)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      )}
-    />
-  );
-}
-
-/**
- * Phone as a free-text, digits-only field (FR-006, clarified 2026-08-07). No
- * country code is supplied by the interface: the guest types the whole number
- * in whichever form they think in, `62…` or `08…`, and it is stored exactly
- * that way. The only thing the mask does is keep non-digits out, because
- * `type="tel"` and `inputMode="numeric"` are keyboard hints rather than filters
- * — a physical keyboard types letters straight through both — so without it the
- * field would accept anything until the schema complained on blur. Controlled
- * through a Controller so the masked value is what RHF validates and submits.
- */
-function PhoneInput({
-  control,
-  name,
-}: {
-  control: Control<OrderFormsValues>;
-  name: FieldPath<OrderFormsValues>;
-}) {
-  return (
-    <Controller
-      control={control}
-      name={name}
-      render={({ field }) => (
-        <Input
-          className="h-auto px-3 py-4"
-          inputMode="numeric"
-          type="tel"
-          // Twelve digits: the placeholder must not advertise an example the
-          // field would refuse (FR-006's floor, raised 2026-08-13).
-          placeholder="081234567890"
-          value={field.value as string}
-          onChange={(event) => field.onChange(phoneDigits(event.target.value))}
-          onBlur={field.onBlur}
-          name={field.name}
-          ref={field.ref}
-        />
-      )}
-    />
-  );
-}
-
-/**
- * Date of birth as DD/MM/YYYY text — no native calendar control (clarified
- * 2026-08-06). The mask feeds the slashes in as the guest types digits, which
- * is what lets the numeric mobile keypad (no "/" key) still produce the
- * format. Controlled through a Controller so the masked value is what RHF
- * validates.
- */
-function DobInput({
-  control,
-  name,
-}: {
-  control: Control<OrderFormsValues>;
-  name: FieldPath<OrderFormsValues>;
-}) {
-  return (
-    <Controller
-      control={control}
-      name={name}
-      render={({ field }) => (
-        <Input
-          className="h-auto px-3 py-4"
-          placeholder="DD/MM/YYYY"
-          inputMode="numeric"
-          maxLength={10}
-          value={field.value as string}
-          onChange={(event) => field.onChange(maskDob(event.target.value))}
-          onBlur={field.onBlur}
-          name={field.name}
-          ref={field.ref}
-        />
-      )}
-    />
-  );
-}
-
-/** "FEMALE" → "Female": the master list stores the canonical uppercase value. */
-/**
- * The offered genders, plus `held` when it is set and the list does not already
- * contain it (FR-031). Returns the master list untouched in every ordinary case,
- * so the widening costs nothing on a card holding an active gender.
- */
-function optionsIncluding(
-  options: GenderOption[] | undefined,
-  held: string,
-): Array<{ name: string }> {
-  const list = options ?? [];
-  if (held === "" || list.some((option) => option.name === held)) return list;
-  return [...list, { name: held }];
-}
-
-function genderLabel(name: string): string {
-  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
-}
-
-/** "31/12/1999" → "1999-12-31"; null when not a real calendar date. */
-function dobToIso(value: string): string | null {
-  if (!DOB_PATTERN.test(value)) return null;
-  const day = Number(value.slice(0, 2));
-  const month = Number(value.slice(3, 5));
-  const year = Number(value.slice(6));
-  // Round-trip through Date to reject e.g. 31/02/2000 (Date rolls it over).
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month - 1 ||
-    date.getUTCDate() !== day
-  ) {
-    return null;
-  }
-  return `${value.slice(6)}-${value.slice(3, 5)}-${value.slice(0, 2)}`;
-}
-
-/** The guest's local calendar date as ISO, e.g. "2026-08-06". */
-function todayIso(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
-
-/**
- * Whatever was typed or pasted → the digits of it, capped at the 15 the server
- * accepts. Nothing else is touched: a leading 0 stays a leading 0 and a leading
- * 62 stays a leading 62, because FR-006 keeps whichever form the guest chose.
- * A pasted "+62 812-3456-789" therefore lands on "628123456789" — the
- * separators and the "+" fall away, the number itself does not change form.
- */
-function phoneDigits(raw: string): string {
-  return raw.replace(/\D/g, "").slice(0, 15);
-}
-
-/** Keeps only digits and re-inserts the slashes: "31121999" → "31/12/1999". */
-function maskDob(raw: string): string {
-  const digits = raw.replace(/\D/g, "").slice(0, 8);
-  return [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)]
-    .filter((part) => part !== "")
-    .join("/");
-}
-
 /** Words a non-field checkout failure for the guest. */
 function checkoutErrorMessage(error: ApiError): string {
   if (error.code === API_CODES.termsNotRecorded) {

@@ -856,3 +856,155 @@ func TestEmailHeaderMarkScalesDownOnNarrowViewports(t *testing.T) {
 	assert.Contains(t, body, "max-width:100%")
 	assert.Contains(t, body, "height:auto")
 }
+
+// --- spec 022: the registration delivery shape -------------------------------
+
+// asRegistration turns the fixture's order into a free registration: zero total,
+// no fees, marked registration-originated. It stays PAID, which is the point —
+// constitution v5.0.0 admits a second origin for that status, and delivery must
+// tell them apart by the MARKER, not by the status.
+func asRegistration(f deliveryFixture) {
+	f.orders.order.IsRegistration = true
+	f.orders.order.TotalAmount = decimal.Zero
+	f.orders.order.Subtotal = nil
+	f.orders.order.Fees = nil
+	f.orders.order.Items = []notification.ReceiptLine{{
+		Name:            "Invitation Access",
+		Quantity:        1,
+		UnitPrice:       decimal.Zero,
+		Subtotal:        decimal.Zero,
+		AdmissionStarts: []time.Time{time.Date(2026, 9, 1, 19, 0, 0, 0, time.UTC)},
+	}}
+}
+
+// FR-035/FR-036 and the constitution's amended ticket-generation rule: exactly
+// ONE attachment, the e-ticket. A receipt for a zero-amount registration would be
+// a proof of payment for a payment that never happened.
+func TestRegistrationDeliverySendsTheETicketAlone(t *testing.T) {
+	f := newDeliveryFixture(t)
+	asRegistration(f)
+	f.tickets.tickets = []notification.TicketDetail{
+		holderTicket("REG234DEFG", "Halo Registrant", "halo@example.com"),
+	}
+
+	recipient, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	assert.Equal(t, "budi@example.com", recipient)
+
+	require.Len(t, f.mailer.sent, 1)
+	msg := f.mailer.sent[0]
+
+	require.Len(t, msg.Attachments, 1, "a registration carries the e-ticket and nothing else")
+	assert.Contains(t, msg.Attachments[0].Filename, "tickets-",
+		"and the one document must be the e-ticket, not a receipt")
+	assert.True(t, strings.HasPrefix(string(msg.Attachments[0].Content), "%PDF-"))
+}
+
+// The subject must not promise a receipt the message does not carry.
+func TestRegistrationDeliverySubjectDoesNotPromiseAReceipt(t *testing.T) {
+	f := newDeliveryFixture(t)
+	asRegistration(f)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	subject := f.mailer.sent[0].Subject
+	assert.Equal(t, "[ORD-20260731-ABCDEF] E-Ticket for Jazz Night 2026", subject)
+	assert.NotContains(t, subject, "E-receipt")
+}
+
+// FR-036: no monetary amount ANYWHERE. The attachments are not the only place
+// money appears — the body's Ticket Details block would otherwise render
+// "Total Payment  IDR 0", which is exactly the claim the missing receipt exists
+// to avoid making.
+func TestRegistrationDeliveryBodyStatesNoMonetaryAmount(t *testing.T) {
+	f := newDeliveryFixture(t)
+	asRegistration(f)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[0].HTMLBody
+	assert.NotContains(t, body, "Total Payment")
+	assert.NotContains(t, body, "Ticket Details")
+	assert.NotContains(t, body, "IDR", "no figure, not even a zero one")
+	assert.NotContains(t, body, "Rp")
+}
+
+// The paid path must be untouched by the branch. If this regresses, a buyer who
+// paid stops receiving their proof of payment — a worse failure than the one the
+// branch was added to fix.
+func TestPaidDeliveryStillCarriesBothDocuments(t *testing.T) {
+	f := newDeliveryFixture(t)
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	msg := f.mailer.sent[0]
+	require.Len(t, msg.Attachments, 2)
+	assert.Contains(t, msg.Attachments[0].Filename, "receipt-", "receipt first, still")
+	assert.Contains(t, msg.Attachments[1].Filename, "tickets-")
+	assert.Contains(t, msg.HTMLBody, "Total Payment")
+}
+
+// Spec 022 T065 / FR-038a. Admin resend is the SOLE recovery route for an
+// undelivered registration: the confirmation page tells the guest their e-ticket
+// was sent before delivery has actually completed (FR-039, decided deliberately),
+// and shows no address, so nothing on the guest's screen will ever correct a
+// failure. If this path assumes a payment, a receipt or a non-zero total, an
+// undelivered registration is unrecoverable and the guest is never told.
+//
+// Exercised through SendTicketEmail because that is literally what the admin
+// endpoint calls — the same function the first delivery used, which is the
+// property being pinned. A separate resend code path would be free to drift.
+func TestResendingARegistrationStillSendsTheETicketAlone(t *testing.T) {
+	f := newDeliveryFixture(t)
+	asRegistration(f)
+	f.tickets.tickets = []notification.TicketDetail{
+		holderTicket("REG234DEFG", "Halo Registrant", "halo@example.com"),
+	}
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	recipient, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	assert.Equal(t, "budi@example.com", recipient,
+		"the admin is shown the address that was actually mailed")
+
+	require.Len(t, f.mailer.sent, 2)
+	first, second := f.mailer.sent[0], f.mailer.sent[1]
+
+	require.Len(t, second.Attachments, 1,
+		"a resent registration carries the e-ticket and still no receipt")
+	assert.Equal(t, first.Attachments[0].Filename, second.Attachments[0].Filename)
+	assert.Equal(t, first.Subject, second.Subject)
+	assert.Equal(t, first.To, second.To)
+
+	// The code the guest may already be holding must survive the resend.
+	plain, err := notification.RenderTicketsPDFPlain(f.orders.order, f.tickets.tickets, testBrand())
+	require.NoError(t, err)
+	assert.Contains(t, string(plain), "REG234DEFG",
+		"a resend reuses the issued code; regenerating one would invalidate a pass already at the door")
+}
+
+// A registration has a zero total and no fees. Anything on the resend path that
+// divides by, formats, or reasons about a total would fail here rather than in
+// production, where it would fail after the guest was told the ticket was sent.
+func TestResendingARegistrationNeverPrintsAMonetaryFigure(t *testing.T) {
+	f := newDeliveryFixture(t)
+	asRegistration(f)
+	f.tickets.tickets = []notification.TicketDetail{
+		holderTicket("REG234DEFG", "Halo Registrant", "halo@example.com"),
+	}
+
+	_, err := f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+	_, err = f.svc.SendTicketEmail(context.Background(), f.orderID)
+	require.NoError(t, err)
+
+	body := f.mailer.sent[1].HTMLBody
+	for _, forbidden := range []string{"Rp", "IDR", "Total", "Receipt", "Subtotal"} {
+		assert.NotContains(t, body, forbidden,
+			"a resent registration email must carry no money and no receipt")
+	}
+}

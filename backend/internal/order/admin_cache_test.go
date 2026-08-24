@@ -66,7 +66,7 @@ var firstPage = cache.Paging{Page: 1, Size: httpx.DefaultPageSize}
 
 func (f adminCacheFixture) orderVariantCached(t *testing.T, status *string, eventID *uuid.UUID) bool {
 	t.Helper()
-	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(status, eventID, firstPage))
+	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(status, eventID, nil, firstPage))
 	require.NoError(t, err)
 	return ok
 }
@@ -168,7 +168,7 @@ func TestOneOrderChangeInvalidatesEveryWarmFilterVariant(t *testing.T) {
 	}
 
 	// Attendee lists share the same scope and go with them.
-	_, ok, err := f.cache.Get(ctx, cache.AttendeesAdminKey(nil, &ev.ID, firstPage))
+	_, ok, err := f.cache.Get(ctx, cache.AttendeesAdminKey(nil, &ev.ID, nil, firstPage))
 	require.NoError(t, err)
 	require.False(t, ok, "attendee variants share the orders scope")
 

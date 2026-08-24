@@ -76,6 +76,12 @@ export const ticketTypeFormSchema = z
     // call — this form has no access to them.
     eventStart: trimmedRequired("Event start"),
     eventEnd: trimmedRequired("Event end"),
+    // Spec 022 FR-001a. NOT a listing preference: false means the type is
+    // obtained by registering rather than by buying — off every guest purchase
+    // surface, refused by booking and checkout, and ineligible for packages.
+    // Defaults true, matching the column, so a form that never touches it
+    // cannot take a ticket off sale.
+    isVisible: z.boolean(),
   })
   .superRefine((value, ctx) => {
     if (new Date(value.salesEnd) < new Date(value.salesStart)) {
@@ -92,6 +98,7 @@ export const ticketTypeFormSchema = z
         message: "The event must not end before it starts.",
       });
     }
+
   });
 
 export type TicketTypeForm = z.infer<typeof ticketTypeFormSchema>;

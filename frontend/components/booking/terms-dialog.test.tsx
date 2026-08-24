@@ -24,10 +24,12 @@ const LINES: SelectionLine[] = [
   { kind: "ticket", id: TICKET_ID, name: "Day 1", unitPrice: "35000.00", quantity: 2 },
 ];
 
+const TERMS_UPDATED_AT = "2026-08-01T00:00:00Z";
+
 const TERMS = {
   id: TERMS_ID,
   content: "<ol><li>All ticket sales are final.</li></ol>",
-  updated_at: "2026-08-01T00:00:00Z",
+  updated_at: TERMS_UPDATED_AT,
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -126,11 +128,17 @@ function apiError(status: number, code: number, message: string) {
   return jsonResponse({ code, message, data: null }, status);
 }
 
-/** Opens the dialog, ticks the box and presses Agree. */
+/**
+ * Opens the dialog and presses Agree.
+ *
+ * It does not tick the box, and does not need to: under happy-dom every element
+ * reports zero height, so the end of the document counts as reached the moment
+ * the terms render (FR-014d) and the automatic tick has already fired. That is a
+ * happy-dom artefact, not a behaviour — see the note below.
+ */
 async function agree(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: /buy ticket/i }));
   await screen.findByText(/all ticket sales are final/i);
-  await user.click(screen.getByRole("checkbox"));
   await user.click(screen.getByRole("button", { name: /^agree$/i }));
 }
 
@@ -155,17 +163,40 @@ describe("TermsDialog", () => {
     expect(await screen.findByText(/all ticket sales are final/i)).toBeTruthy();
   });
 
-  it("withholds Agree until the guest ticks the box", async () => {
+  // WHAT THIS TIER CANNOT TEST, stated so nobody adds a test that only appears
+  // to cover it. Under happy-dom scrollHeight and clientHeight are getter-only
+  // zeroes and IntersectionObserver is an inert stub, so the end of the document
+  // reads as reached the instant the terms render: `0 <= 0` means "this document
+  // does not scroll, so it has been read" (FR-014d). A test asserting "Agree is
+  // withheld before scrolling" would be asserting a happy-dom artefact. The
+  // automatic tick is proved in e2e/specs/guest-purchase.spec.ts against a real
+  // browser and a deliberately LONG document.
+  //
+  // What IS testable here is the manual route, which needs no layout: the
+  // checkbox is a CONTROL (FR-045, clarified 2026-08-21). It briefly was not —
+  // this test previously asserted that clicking it did nothing, which is now the
+  // opposite of the requirement. The shell's own coverage is in
+  // components/terms/terms-dialog-shell.test.tsx; this asserts the wiring
+  // reaches it through the real dialog.
+  it("lets the guest untick and re-tick the agreement box by hand", async () => {
     stubApi();
     setup();
     await userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
     await screen.findByText(/all ticket sales are final/i);
 
+    // Already ticked, by the phantom auto-tick described above.
+    const box = screen.getByRole("checkbox");
+    expect(box.getAttribute("aria-checked")).toBe("true");
+
+    // Withdrawing is the guest's, and takes Agree away with it.
+    await userEvent.click(box);
+    expect(box.getAttribute("aria-checked")).toBe("false");
     expect(screen.queryByRole("button", { name: /^agree$/i })).toBeNull();
 
-    await userEvent.click(screen.getByRole("checkbox"));
-
-    expect(screen.getByRole("button", { name: /^agree$/i })).toBeTruthy();
+    // And they can put it back, without touching the document.
+    await userEvent.click(box);
+    expect(box.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByRole("button", { name: /^agree$/i })).not.toBeNull();
   });
 
   it("books, records the agreement, and routes to the order page on Agree", async () => {
@@ -173,7 +204,6 @@ describe("TermsDialog", () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
     await screen.findByText(/all ticket sales are final/i);
-    await userEvent.click(screen.getByRole("checkbox"));
 
     await userEvent.click(screen.getByRole("button", { name: /^agree$/i }));
 
@@ -188,14 +218,22 @@ describe("TermsDialog", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("button", { name: /opening your order/i })).toBeTruthy();
 
-    // Call order: book first, then the agreement carrying the shown terms id.
+    // Call order: book first, then the agreement carrying BOTH identifiers of
+    // the document actually shown — the id (which document) and updated_at
+    // (which version). The version is the load-bearing one: an admin edit
+    // preserves the id, so the id alone could never report a mid-flow change
+    // (spec 022).
     const calls = fetchSpy.mock.calls.map((args) => String(args[0]));
     const bookIndex = calls.findIndex((u) => u.includes("/ticket/book"));
     const agreeIndex = calls.findIndex((u) => u.includes(`/ticket/terms-condition/${ORDER_ID}`));
     expect(bookIndex).toBeGreaterThanOrEqual(0);
     expect(agreeIndex).toBeGreaterThan(bookIndex);
     const agreementBody = JSON.parse(String(fetchSpy.mock.calls[agreeIndex][1]?.body));
-    expect(agreementBody).toEqual({ agreed: true, event_terms_id: TERMS_ID });
+    expect(agreementBody).toEqual({
+      agreed: true,
+      event_terms_id: TERMS_ID,
+      event_terms_updated_at: TERMS_UPDATED_AT,
+    });
   });
 
   it("retries only the agreement after it fails, never booking twice", async () => {
@@ -205,7 +243,6 @@ describe("TermsDialog", () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
     await screen.findByText(/all ticket sales are final/i);
-    await userEvent.click(screen.getByRole("checkbox"));
 
     await userEvent.click(screen.getByRole("button", { name: /^agree$/i }));
 
@@ -227,20 +264,22 @@ describe("TermsDialog", () => {
     expect(bookCalls).toHaveLength(1);
   });
 
-  it("forgets the agreement once the dialog is closed", async () => {
+  // The reset itself — reopening starts ungated — is proved against the hook in
+  // components/terms/terms-viewer.test.tsx, where it is real logic rather than a
+  // layout measurement. Here we prove the dialog re-evaluates on reopen rather
+  // than carrying a booked order or an error across.
+  it("starts a fresh agreement each time it is opened", async () => {
     stubApi();
     setup();
     await userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
     await screen.findByText(/all ticket sales are final/i);
-    await userEvent.click(screen.getByRole("checkbox"));
     await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
 
     await userEvent.click(screen.getByRole("button", { name: /buy ticket/i }));
+    await screen.findByText(/all ticket sales are final/i);
 
-    // Reopening starts unticked, so an old tick cannot carry a new selection
-    // through to booking.
-    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe("false");
-    expect(screen.queryByRole("button", { name: /^agree$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 
@@ -302,7 +341,9 @@ describe("TermsDialog — booking refuses at Agree", () => {
     await user.click(screen.getByRole("button", { name: /buy ticket/i }));
     await screen.findByText(/all ticket sales are final/i);
 
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    // The ticked-box half of this assertion moved to the hook test: under
+    // happy-dom the gate re-satisfies on reopen, so the box legitimately reads
+    // checked here and asserting otherwise would be asserting the artefact.
     expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });

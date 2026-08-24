@@ -116,6 +116,41 @@ export type EventTerms = {
 };
 
 /**
+ * What the free-registration form needs to render (spec 022).
+ *
+ * Carries NO price, no fee and no quota figure — FR-015 forbids the first two on
+ * this surface, and a quota number would be live inventory the page must not
+ * display or gate on.
+ */
+export type RegistrationPrereqs = {
+  ticket_type_id: string;
+  ticket_type_name: string;
+  event: { id: string; name: string; slug: string };
+  /** WHICH document was shown. */
+  event_terms_id: string;
+  /**
+   * WHICH VERSION was shown — and the only one of the two that can detect an
+   * edit. An admin edit overwrites the terms row in place and preserves its id,
+   * so an id comparison could never report a change.
+   */
+  event_terms_updated_at: string;
+  genders: GenderOption[];
+};
+
+/** The registration submit body. One holder, one ticket. */
+export type RegistrationSubmission = {
+  slug: string;
+  name: string;
+  email: string;
+  phone: string;
+  /** Date only, YYYY-MM-DD. */
+  dob: string;
+  gender: string;
+  agreed: boolean;
+  event_terms_updated_at: string;
+};
+
+/**
  * One refusal from POST /ticket/availability, addressed to the line that caused
  * it. `item_index` is null for an order-level reason — today only
  * `TERMS_MISSING`, which is a property of the event, not of any one line.
@@ -392,6 +427,20 @@ export type TicketTypeAdminView = {
    */
   event_start: string;
   event_end: string;
+  /**
+   * FALSE means REGISTRATION-ONLY, not merely unlisted (spec 022 FR-001a).
+   *
+   * Such a type is hidden from every guest purchase surface, refused by booking
+   * and checkout, ineligible for packages, and obtained through
+   * /events/[slug]/register/[id] instead. There is no way to only hide a type:
+   * clearing this also makes it free to register for, which is why the admin
+   * form says so at the point of use rather than labelling it "visible".
+   *
+   * The admin projection is deliberately UNFILTERED — containment applies to the
+   * purchase path, not to administration — so this arrives false on rows that no
+   * guest list will ever show.
+   */
+  is_visible: boolean;
 };
 
 export type EventAdminDetail = EventAdminView & {
@@ -435,6 +484,15 @@ export type OrderSummary = {
   buyer_email: string;
   status: string;
   total_amount: string;
+  /**
+   * TRUE for a free registration (spec 022 FR-033).
+   *
+   * Read this, never the status alone. Since spec 022, `PAID` no longer implies
+   * money moved — a registration is written directly at PAID with a zero total —
+   * so any surface reporting revenue that keys on the status will count free
+   * invitations as sales.
+   */
+  is_registration: boolean;
   created_at: string | null;
 };
 
@@ -443,6 +501,8 @@ export type AttendeeSummary = {
   email: string;
   ticket_type_name: string;
   order_number: string;
+  /** Registered rather than bought (spec 022) — so there is no receipt to resend. */
+  is_registration: boolean;
 };
 
 export type ValidationResult = {

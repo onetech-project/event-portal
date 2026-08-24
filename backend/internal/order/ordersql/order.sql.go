@@ -23,16 +23,23 @@ WHERE ($1::uuid IS NULL OR a.order_id = $1::uuid)
         $2::uuid[] IS NULL
         OR a.ticket_type_id = ANY($2::uuid[])
       )
+  AND (
+        $3::text IS NULL
+        OR a.name         ILIKE '%' || $3::text || '%'
+        OR a.email        ILIKE '%' || $3::text || '%'
+        OR o.order_number ILIKE '%' || $3::text || '%'
+      )
 `
 
 type CountAttendeesAdminParams struct {
 	OrderID       uuid.NullUUID
 	TicketTypeIds []uuid.UUID
+	Search        *string
 }
 
 // Pairs with ListAttendeesAdmin below. Keep the two WHERE clauses identical.
 func (q *Queries) CountAttendeesAdmin(ctx context.Context, arg CountAttendeesAdminParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countAttendeesAdmin, arg.OrderID, arg.TicketTypeIds)
+	row := q.db.QueryRow(ctx, countAttendeesAdmin, arg.OrderID, arg.TicketTypeIds, arg.Search)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -65,11 +72,18 @@ WHERE ($1::text IS NULL OR os.name = $1::text)
               AND oi.ticket_type_id = ANY($2::uuid[])
         )
       )
+  AND (
+        $3::text IS NULL
+        OR o.order_number ILIKE '%' || $3::text || '%'
+        OR o.buyer_name   ILIKE '%' || $3::text || '%'
+        OR o.buyer_email  ILIKE '%' || $3::text || '%'
+      )
 `
 
 type CountOrdersAdminParams struct {
 	Status        *string
 	TicketTypeIds []uuid.UUID
+	Search        *string
 }
 
 // Admin read-only views ----------------------------------------------------
@@ -85,13 +99,14 @@ type CountOrdersAdminParams struct {
 // on page 2 while hiding a different record entirely (spec 021 research R4).
 // Pairs with ListOrdersAdmin below. Keep the two WHERE clauses identical.
 func (q *Queries) CountOrdersAdmin(ctx context.Context, arg CountOrdersAdminParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countOrdersAdmin, arg.Status, arg.TicketTypeIds)
+	row := q.db.QueryRow(ctx, countOrdersAdmin, arg.Status, arg.TicketTypeIds, arg.Search)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const createAttendeeSlot = `-- name: CreateAttendeeSlot :one
+
 INSERT INTO attendees (order_id, ticket_type_id, package_id, package_unit)
 VALUES ($1, $2, $3, $4)
 RETURNING id, order_id, ticket_type_id, package_id, package_unit, name, email, phone, dob, gender_id
@@ -117,6 +132,18 @@ type CreateAttendeeSlotRow struct {
 	GenderID     *int16
 }
 
+// Spec 022 FR-023: there is deliberately NO per-address query here.
+//
+// An earlier draft carried EmailHasIssuedTicketForEvent (does this address
+// already hold a place at this event?) and LockRegistrationIdentity (an advisory
+// xact lock keyed on event+lower(email), taken first so the check above was not
+// a read-then-write race). Both are gone: the rule they enforced was removed,
+// and an address may now register as many times as remaining quota allows.
+//
+// Nothing in the registration write path may be keyed on the email address
+// (FR-023a). Two submissions of one address must not contend, which is why the
+// lock went with the check rather than being kept "just in case" — a lock with
+// no invariant to protect is pure serialisation of the hot path.
 // An EMPTY slot: ticket-type-bound at booking, identity filled at checkout.
 // package_unit ties bundle slots to their purchased unit (spec 010).
 func (q *Queries) CreateAttendeeSlot(ctx context.Context, arg CreateAttendeeSlotParams) (CreateAttendeeSlotRow, error) {
@@ -156,7 +183,12 @@ SELECT i.id, i.order_number, i.buyer_name, i.buyer_email, i.buyer_phone, i.total
        os.name AS status,
        i.payment_provider, i.payment_url, i.email_sent, i.created_at, i.updated_at,
        i.payment_qr_string, i.payment_expires_at, i.terms_agreed_at, i.event_terms_id,
-       i.subtotal
+       i.subtotal,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = i.id AND NOT tt.is_visible
+       ) AS is_registration
 FROM inserted i
 JOIN order_statuses os ON os.id = i.status_id
 `
@@ -186,6 +218,7 @@ type CreateBookedOrderRow struct {
 	TermsAgreedAt    *time.Time
 	EventTermsID     uuid.NullUUID
 	Subtotal         decimal.NullDecimal
+	IsRegistration   bool
 }
 
 // Spec 008: two-phase booking ------------------------------------------------
@@ -222,6 +255,7 @@ func (q *Queries) CreateBookedOrder(ctx context.Context, arg CreateBookedOrderPa
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
 		&i.Subtotal,
+		&i.IsRegistration,
 	)
 	return i, err
 }
@@ -333,6 +367,125 @@ func (q *Queries) CreateOrderItem(ctx context.Context, arg CreateOrderItemParams
 	return i, err
 }
 
+const createRegistrationOrder = `-- name: CreateRegistrationOrder :one
+WITH inserted AS (
+    INSERT INTO orders (order_number, total_amount, subtotal, status_id,
+                        buyer_name, buyer_email, buyer_phone,
+                        terms_agreed_at, event_terms_id)
+    VALUES ($1, 0, 0, (SELECT ost.id FROM order_statuses ost WHERE ost.name = 'PAID'),
+            $2, $3, $4, now(), $5)
+    RETURNING id, order_number, buyer_name, buyer_email, buyer_phone, total_amount,
+              status_id, payment_provider, payment_url, email_sent, created_at,
+              updated_at, payment_qr_string, payment_expires_at, terms_agreed_at,
+              event_terms_id, subtotal
+)
+SELECT i.id, i.order_number, i.buyer_name, i.buyer_email, i.buyer_phone, i.total_amount,
+       os.name AS status,
+       i.payment_provider, i.payment_url, i.email_sent, i.created_at, i.updated_at,
+       i.payment_qr_string, i.payment_expires_at, i.terms_agreed_at, i.event_terms_id,
+       i.subtotal,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = i.id AND NOT tt.is_visible
+       ) AS is_registration
+FROM inserted i
+JOIN order_statuses os ON os.id = i.status_id
+`
+
+type CreateRegistrationOrderParams struct {
+	OrderNumber  string
+	BuyerName    *string
+	BuyerEmail   *string
+	BuyerPhone   *string
+	EventTermsID uuid.NullUUID
+}
+
+type CreateRegistrationOrderRow struct {
+	ID               uuid.UUID
+	OrderNumber      string
+	BuyerName        *string
+	BuyerEmail       *string
+	BuyerPhone       *string
+	TotalAmount      decimal.Decimal
+	Status           string
+	PaymentProvider  *string
+	PaymentUrl       *string
+	EmailSent        *bool
+	CreatedAt        *time.Time
+	UpdatedAt        *time.Time
+	PaymentQrString  *string
+	PaymentExpiresAt *time.Time
+	TermsAgreedAt    *time.Time
+	EventTermsID     uuid.NullUUID
+	Subtotal         decimal.NullDecimal
+	IsRegistration   bool
+}
+
+// Spec 022: the free-registration order. Created FINAL — PAID, zero total — in one
+// statement.
+//
+// NOTHING marks it as a registration. The distinction is DERIVED from the ticket
+// type its single line references (decision reversed 2026-08-20), so
+// `is_registration` in the row this returns is necessarily FALSE: the line is
+// inserted after this statement, so at this instant the order has no items to
+// derive from. No caller reads it from here — the delivery path re-reads through
+// GetOrderByID once the line exists — and it is returned only because the Go layer
+// casts this row to GetOrderByIDRow and the two column lists must match.
+//
+// Everything is inline BECAUSE IT HAS TO BE. The two obvious "insert then patch"
+// queries are both guarded on PENDING and would silently affect zero rows here:
+// UpdateOrderBuyer and RecordTermsAgreement. Their repository wrappers map "0
+// rows" to false, which the service reports as 410 ORDER_EXPIRED — so a
+// registration that actually succeeded would be reported to the guest as gone.
+//
+// buyer_email in particular is load-bearing: notification.SendTicketEmail reads
+// orders.buyer_email and refuses an empty snapshot outright, so a registration
+// that left it NULL would issue a ticket and then silently fail to deliver it —
+// after the guest has already been told it was sent (spec 022 FR-039e).
+//
+// payment_expires_at is left NULL, not set: it is what every order read renders a
+// live countdown from, and what the expiry sweeper's partial index selects on.
+// A registration is already final and must never look payable or be swept.
+//
+// No order_fees rows accompany this insert and no payments row ever will
+// (FR-027, FR-029). Constitution Principle IV v5.0.0 admits this as the one path
+// to PAID without a gateway.
+//
+// Same CTE shape as CreateBookedOrder, and the same column list: the Go layer
+// casts this row to GetOrderByIDRow, so the two must stay identical.
+func (q *Queries) CreateRegistrationOrder(ctx context.Context, arg CreateRegistrationOrderParams) (CreateRegistrationOrderRow, error) {
+	row := q.db.QueryRow(ctx, createRegistrationOrder,
+		arg.OrderNumber,
+		arg.BuyerName,
+		arg.BuyerEmail,
+		arg.BuyerPhone,
+		arg.EventTermsID,
+	)
+	var i CreateRegistrationOrderRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrderNumber,
+		&i.BuyerName,
+		&i.BuyerEmail,
+		&i.BuyerPhone,
+		&i.TotalAmount,
+		&i.Status,
+		&i.PaymentProvider,
+		&i.PaymentUrl,
+		&i.EmailSent,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PaymentQrString,
+		&i.PaymentExpiresAt,
+		&i.TermsAgreedAt,
+		&i.EventTermsID,
+		&i.Subtotal,
+		&i.IsRegistration,
+	)
+	return i, err
+}
+
 const deleteFee = `-- name: DeleteFee :execrows
 DELETE FROM fees WHERE id = $1
 `
@@ -351,7 +504,12 @@ SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total
        os.name AS status,
        o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at,
        o.payment_qr_string, o.payment_expires_at, o.terms_agreed_at, o.event_terms_id,
-       o.subtotal
+       o.subtotal,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = o.id AND NOT tt.is_visible
+       ) AS is_registration
 FROM orders o
 JOIN order_statuses os ON os.id = o.status_id
 WHERE o.id = $1
@@ -375,6 +533,7 @@ type GetOrderByIDRow struct {
 	TermsAgreedAt    *time.Time
 	EventTermsID     uuid.NullUUID
 	Subtotal         decimal.NullDecimal
+	IsRegistration   bool
 }
 
 // Reads --------------------------------------------------------------------
@@ -385,6 +544,21 @@ type GetOrderByIDRow struct {
 // `status`, so the generated Order struct still carries `Status string` holding
 // PENDING/PAID/CANCELLED/EXPIRED. That is the whole reason migration 0013 costs
 // no Go changes (research R19) — keep the alias if you touch these.
+//
+// `is_registration` is DERIVED, not stored (spec 022, decision reversed
+// 2026-08-20). An order is a registration when it carries a line for a
+// registration-only ticket type — containment guarantees such a type can never be
+// bought or bundled, so one such line can only have come from the registration
+// path.
+//
+// The JOIN reaches into the event domain's table. Principle II permits that on a
+// READ; the registration WRITE still reaches quota only through EventProvider.
+//
+// KNOWN AND ACCEPTED CONSEQUENCE: this value is not stable over time. An admin who
+// makes an invitation ticket type purchasable again retroactively reclassifies
+// every order that used it, and a resend of an old registration would then render
+// a receipt for an order that never had a payment. That was raised and the
+// derivation was chosen deliberately over a stored marker.
 func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (GetOrderByIDRow, error) {
 	row := q.db.QueryRow(ctx, getOrderByID, id)
 	var i GetOrderByIDRow
@@ -406,6 +580,7 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (GetOrderByIDR
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
 		&i.Subtotal,
+		&i.IsRegistration,
 	)
 	return i, err
 }
@@ -415,7 +590,12 @@ SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total
        os.name AS status,
        o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at,
        o.payment_qr_string, o.payment_expires_at, o.terms_agreed_at, o.event_terms_id,
-       o.subtotal
+       o.subtotal,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = o.id AND NOT tt.is_visible
+       ) AS is_registration
 FROM orders o
 JOIN order_statuses os ON os.id = o.status_id
 WHERE o.order_number = $1
@@ -439,6 +619,7 @@ type GetOrderByNumberRow struct {
 	TermsAgreedAt    *time.Time
 	EventTermsID     uuid.NullUUID
 	Subtotal         decimal.NullDecimal
+	IsRegistration   bool
 }
 
 func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (GetOrderByNumberRow, error) {
@@ -462,6 +643,7 @@ func (q *Queries) GetOrderByNumber(ctx context.Context, orderNumber string) (Get
 		&i.TermsAgreedAt,
 		&i.EventTermsID,
 		&i.Subtotal,
+		&i.IsRegistration,
 	)
 	return i, err
 }
@@ -753,7 +935,12 @@ func (q *Queries) ListAttendeeSlotsByOrderID(ctx context.Context, orderID uuid.U
 }
 
 const listAttendeesAdmin = `-- name: ListAttendeesAdmin :many
-SELECT a.id, a.order_id, a.ticket_type_id, a.name, a.email, o.order_number
+SELECT a.id, a.order_id, a.ticket_type_id, a.name, a.email, o.order_number,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = o.id AND NOT tt.is_visible
+       ) AS is_registration
 FROM attendees a
 JOIN orders o ON o.id = a.order_id
 WHERE ($1::uuid IS NULL OR a.order_id = $1::uuid)
@@ -761,33 +948,51 @@ WHERE ($1::uuid IS NULL OR a.order_id = $1::uuid)
         $2::uuid[] IS NULL
         OR a.ticket_type_id = ANY($2::uuid[])
       )
+  AND (
+        $3::text IS NULL
+        OR a.name         ILIKE '%' || $3::text || '%'
+        OR a.email        ILIKE '%' || $3::text || '%'
+        OR o.order_number ILIKE '%' || $3::text || '%'
+      )
 ORDER BY o.created_at DESC, a.name ASC, a.id ASC
-LIMIT $4::int OFFSET $3::int
+LIMIT $5::int OFFSET $4::int
 `
 
 type ListAttendeesAdminParams struct {
 	OrderID       uuid.NullUUID
 	TicketTypeIds []uuid.UUID
+	Search        *string
 	RowOffset     int32
 	RowLimit      int32
 }
 
 type ListAttendeesAdminRow struct {
-	ID           uuid.UUID
-	OrderID      uuid.UUID
-	TicketTypeID uuid.UUID
-	Name         *string
-	Email        *string
-	OrderNumber  string
+	ID             uuid.UUID
+	OrderID        uuid.UUID
+	TicketTypeID   uuid.UUID
+	Name           *string
+	Email          *string
+	OrderNumber    string
+	IsRegistration bool
 }
 
 // a.id breaks the tie that `created_at, name` leaves open constantly: one
 // order's attendees all share created_at, and two people with the same name in
 // one order is ordinary rather than exotic.
+// Spec 022 FR-053: `search` is the operator's recovery route, not a convenience.
+// A registrant is never shown the address their e-ticket went to (FR-039), so an
+// operator helping someone who never received it cannot be given the exact
+// address to look up. Matching a PARTIAL name or email is therefore the only
+// thing that turns "I registered and nothing arrived" into a resend.
+//
+// ILIKE with leading wildcards cannot use a btree index and will seq-scan. That
+// is accepted: this is an authenticated, low-frequency admin read, unlike the
+// registration write path where a scan sat inside a quota row lock.
 func (q *Queries) ListAttendeesAdmin(ctx context.Context, arg ListAttendeesAdminParams) ([]ListAttendeesAdminRow, error) {
 	rows, err := q.db.Query(ctx, listAttendeesAdmin,
 		arg.OrderID,
 		arg.TicketTypeIds,
+		arg.Search,
 		arg.RowOffset,
 		arg.RowLimit,
 	)
@@ -805,6 +1010,7 @@ func (q *Queries) ListAttendeesAdmin(ctx context.Context, arg ListAttendeesAdmin
 			&i.Name,
 			&i.Email,
 			&i.OrderNumber,
+			&i.IsRegistration,
 		); err != nil {
 			return nil, err
 		}
@@ -1022,7 +1228,13 @@ func (q *Queries) ListOrderItemsByOrderID(ctx context.Context, orderID uuid.UUID
 const listOrdersAdmin = `-- name: ListOrdersAdmin :many
 SELECT o.id, o.order_number, o.buyer_name, o.buyer_email, o.buyer_phone, o.total_amount,
        os.name AS status,
-       o.payment_provider, o.payment_url, o.email_sent, o.created_at, o.updated_at
+       o.payment_provider, o.payment_url, o.email_sent,
+       EXISTS (
+           SELECT 1 FROM order_items oi
+           JOIN ticket_types tt ON tt.id = oi.ticket_type_id
+           WHERE oi.order_id = o.id AND NOT tt.is_visible
+       ) AS is_registration,
+       o.created_at, o.updated_at
 FROM orders o
 JOIN order_statuses os ON os.id = o.status_id
 WHERE ($1::text IS NULL OR os.name = $1::text)
@@ -1034,13 +1246,20 @@ WHERE ($1::text IS NULL OR os.name = $1::text)
               AND oi.ticket_type_id = ANY($2::uuid[])
         )
       )
+  AND (
+        $3::text IS NULL
+        OR o.order_number ILIKE '%' || $3::text || '%'
+        OR o.buyer_name   ILIKE '%' || $3::text || '%'
+        OR o.buyer_email  ILIKE '%' || $3::text || '%'
+      )
 ORDER BY o.created_at DESC, o.id DESC
-LIMIT $4::int OFFSET $3::int
+LIMIT $5::int OFFSET $4::int
 `
 
 type ListOrdersAdminParams struct {
 	Status        *string
 	TicketTypeIds []uuid.UUID
+	Search        *string
 	RowOffset     int32
 	RowLimit      int32
 }
@@ -1056,6 +1275,7 @@ type ListOrdersAdminRow struct {
 	PaymentProvider *string
 	PaymentUrl      *string
 	EmailSent       *bool
+	IsRegistration  bool
 	CreatedAt       *time.Time
 	UpdatedAt       *time.Time
 }
@@ -1066,6 +1286,7 @@ func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams
 	rows, err := q.db.Query(ctx, listOrdersAdmin,
 		arg.Status,
 		arg.TicketTypeIds,
+		arg.Search,
 		arg.RowOffset,
 		arg.RowLimit,
 	)
@@ -1087,6 +1308,7 @@ func (q *Queries) ListOrdersAdmin(ctx context.Context, arg ListOrdersAdminParams
 			&i.PaymentProvider,
 			&i.PaymentUrl,
 			&i.EmailSent,
+			&i.IsRegistration,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

@@ -312,6 +312,20 @@ func run(log *logger.Logger) error {
 	// paid with and when it settled, both of which live on the payments table.
 	deliveryOrders.payments = paymentSvc
 
+	// Free registration's post-commit work (spec 022). The SAME two values the
+	// payment webhook uses, satisfying order's own identically-shaped interfaces
+	// — a domain may not import another domain's interfaces, so both declare
+	// their own and this file, the one place allowed to see every domain,
+	// satisfies both from one ticket service and one deliverer.
+	//
+	// Wired here rather than at construction because orderSvc is built before
+	// ticketSvc and notificationSvc exist. Same loop, same reason, as the two
+	// back-references above.
+	orderSvc.WithFulfillment(
+		ticketSvc, // order.TicketIssuer
+		ticketDelivererAdapter{notifications: notificationSvc}, // order.TicketDeliverer
+	)
+
 	adminSvc := admin.NewService(adminRepo, admin.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL), log)
 
 	// --- HTTP -------------------------------------------------------------
@@ -397,6 +411,23 @@ func run(log *logger.Logger) error {
 		rateLimit(cfg.Throttle.Availability.Active(cfg.Throttle.Enabled),
 			cfg.Throttle.Availability.Rate, cfg.Throttle.Availability.Burst, cfg.Throttle.IdleTTL))
 	orderHandler.RegisterAvailabilityRoute(availabilityGroup)
+
+	// Free registration (spec 022). The submit deducts quota AND sends real mail
+	// on an unauthenticated surface, so it gets its own per-IP budget rather
+	// than sharing booking's — a registrant and a buyer should not be able to
+	// throttle each other out.
+	//
+	// The group is constructed in BOTH modes: `rateLimit` substitutes a
+	// pass-through when the switch is off rather than being skipped, so an
+	// unmatched /api/v1 path answers identically either way (Principle IX).
+	registerGroup := e.Group("/api/v1",
+		rateLimit(cfg.Throttle.Register.Active(cfg.Throttle.Enabled),
+			cfg.Throttle.Register.Rate, cfg.Throttle.Register.Burst, cfg.Throttle.IdleTTL))
+	orderHandler.RegisterRegistrationRoute(registerGroup)
+	// The form's prerequisites read rides the unthrottled guest group: it creates
+	// nothing and sends nothing, and throttling it would refuse a guest reloading
+	// the page they are trying to reach.
+	orderHandler.RegisterRegistrationReadRoute(api)
 
 	// The public ticket lookup is rate limited per IP so ticket-code enumeration
 	// is impractical (spec FR-020).
@@ -497,6 +528,12 @@ func run(log *logger.Logger) error {
 	// before the process exits.
 	log.Info("waiting for in-flight post-payment work")
 	paymentSvc.WaitForFulfillment()
+
+	// Free registration fulfils off the request path too, and its goroutine is
+	// tracked separately because it is dispatched by a different domain. A
+	// registration accepted moments before SIGTERM must still issue and deliver.
+	log.Info("waiting for in-flight registration fulfilment")
+	orderSvc.WaitForRegistrationFulfillment()
 
 	// Flush buffered spans last: shutting the exporter down earlier would drop
 	// the traces for the requests just drained.

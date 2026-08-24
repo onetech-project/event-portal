@@ -295,7 +295,6 @@ func TestAdminEventOptionsReturnsAnEmptyArrayNotNull(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(testsupport.UnwrapData(t, rec.Body.Bytes())))
 }
 
-
 func TestAdminGetEventIncludesItsTicketTypes(t *testing.T) {
 	e, pool := newAdminAPI(t)
 	ev := testsupport.SeedEvent(t, pool, "detailed", "PUBLISHED")
@@ -311,10 +310,17 @@ func TestAdminGetEventIncludesItsTicketTypes(t *testing.T) {
 	require.Len(t, types, 1)
 
 	first := types[0].(map[string]any)
+	// is_visible joins the admin projection in spec 022. Admin reads are
+	// NOT filtered — containment applies to the purchase path, not to
+	// administration (FR-009) — so the admin table can label these types.
 	assert.ElementsMatch(t,
 		[]string{"id", "event_id", "name", "description", "price", "quota", "sold",
-			"sales_start", "sales_end", "event_start", "event_end"},
+			"sales_start", "sales_end", "event_start", "event_end", "is_visible"},
 		keysOf(first))
+	assert.Equal(t, true, first["is_visible"],
+		"an ordinary ticket type is visible and purchasable by default — this is the "+
+			"wire-level guard on the DEFAULT TRUE, and it fails loudly if the column's "+
+			"default is ever copied back from the is_registration_only draft")
 	assert.InDelta(t, 42.0, first["quota"], 0.001)
 	assert.InDelta(t, 0.0, first["sold"], 0.001)
 }

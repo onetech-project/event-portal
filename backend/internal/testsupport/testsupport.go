@@ -109,6 +109,25 @@ func SeedTicketType(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name st
 	return TicketType{ID: id, EventID: eventID, Name: name, Price: amount, Quota: quota}
 }
 
+// SeedRegistrationTicketType inserts a REGISTRATION-ONLY ticket type (spec 022):
+// obtained by registering, never by buying. Priced at zero by convention — the
+// column is deliberately independent of price (FR-003), so the price here is a
+// realistic default rather than something the flag implies.
+func SeedRegistrationTicketType(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, quota int32) TicketType {
+	t.Helper()
+
+	var id uuid.UUID
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO ticket_types (event_id, name, price, quota, sales_start, sales_end,
+		                          event_start, event_end, is_visible)
+		VALUES ($1, $2, 0, $3, now() - interval '1 day', now() + interval '29 days',
+		        now() + interval '30 days', now() + interval '31 days', FALSE)
+		RETURNING id`, eventID, name, quota).Scan(&id)
+	require.NoError(t, err)
+
+	return TicketType{ID: id, EventID: eventID, Name: name, Price: decimal.Zero, Quota: quota}
+}
+
 // SeedTicketTypeWindow inserts a ticket type with an explicit sales window, used to
 // exercise the not-yet-open and already-closed cases.
 func SeedTicketTypeWindow(t *testing.T, pool *pgxpool.Pool, eventID uuid.UUID, name string, quota int32, start, end time.Time) TicketType {

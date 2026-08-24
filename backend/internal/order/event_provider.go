@@ -18,6 +18,16 @@ var ErrInsufficientQuota = errors.New("order: insufficient quota")
 // Providers translate their own not-found onto this one.
 var ErrNoTerms = errors.New("order: event has no terms")
 
+// ErrRegistrationTargetMissing reports that a free-registration link resolves to
+// nothing a guest may register for (spec 022).
+//
+// ONE sentinel for several distinct causes — unknown event, unpublished event,
+// unknown ticket type, ticket type belonging to a different event — because
+// FR-012 forbids disclosing which. Splitting it into precise sentinels would put
+// the distinction one careless handler away from the wire, so the collapse
+// happens here, at the boundary, rather than being re-decided per call site.
+var ErrRegistrationTargetMissing = errors.New("order: no such registration target")
+
 // ErrGatewaySessionDuplicate reports that the gateway had already issued a code
 // for this order's reference and refused to issue another. The adapter
 // translates the payment domain's own sentinel onto this one.
@@ -28,11 +38,40 @@ var ErrNoTerms = errors.New("order: event has no terms")
 // the order can never be paid and the guest must start again.
 var ErrGatewaySessionDuplicate = errors.New("order: gateway already issued a code for this reference")
 
-// EventTermsInfo is the slice of a terms document the booking flow needs: the
-// identity to stamp on the order when agreement is recorded.
+// EventTermsInfo is the slice of a terms document the agreement flows need.
+//
+// TWO fields identify a document, and they are not interchangeable. ID says
+// WHICH document — that is what gets stamped on the order. UpdatedAt says WHICH
+// VERSION, and it is the only one of the two that can detect an edit.
+//
+// That distinction is load-bearing rather than pedantic. `UpsertEventTerms` is
+// `ON CONFLICT (event_id) DO UPDATE SET content = ..., updated_at = now()` and
+// `event_terms.event_id` is UNIQUE, so an admin edit OVERWRITES IN PLACE and
+// preserves the row id. A staleness check comparing ids therefore cannot fire
+// for the case it exists to catch — which is exactly the defect spec 022 found
+// in RecordAgreement and fixed on both surfaces.
 type EventTermsInfo struct {
-	ID      uuid.UUID
-	EventID uuid.UUID
+	ID        uuid.UUID
+	EventID   uuid.UUID
+	UpdatedAt time.Time
+}
+
+// RegistrationTarget is the ticket type a free registration is issuing from,
+// resolved within a guest-visible event (spec 022).
+//
+// IsVisible arrives as data rather than as a refusal so THIS domain
+// decides the refusal — every failure on that surface must be indistinguishable
+// (FR-012), and that is only guaranteeable in one place.
+type RegistrationTarget struct {
+	TicketTypeID   uuid.UUID
+	TicketTypeName string
+	EventID        uuid.UUID
+	EventName      string
+	EventSlug      string
+	IsVisible      bool
+	SalesStart     time.Time
+	SalesEnd       time.Time
+	QuotaRemaining int32
 }
 
 // TicketTypeInfo is the slice of a ticket type checkout needs: the authoritative
@@ -55,6 +94,14 @@ type TicketTypeInfo struct {
 	// that lock exists to prevent, and would do it silently — the happy path
 	// would look identical. TestConcurrentBookingCannotOversell guards it.
 	QuotaRemaining int32
+	// IsVisible means this type is obtained by REGISTERING, not by
+	// buying (spec 022 FR-008). Every purchase path — book, checkout,
+	// availability, and package expansion — resolves a ticket type through
+	// TicketTypeForCheckout, so refusing it in expandTicket refuses it in all
+	// four at once. Refusing it only in Book would leave the advisory
+	// availability check answering "buyable", which would put the refusal AFTER
+	// the Terms & Conditions gate that spec 013 deliberately placed it before.
+	IsVisible bool
 }
 
 // PackageInfo is the slice of a bundle checkout needs: the authoritative price,
@@ -110,6 +157,26 @@ type EventProvider interface {
 	// (409001), and agreement recording compares the id the guest saw against
 	// this current one (409002).
 	CurrentTerms(ctx context.Context, eventID uuid.UUID) (EventTermsInfo, error)
+	// RegistrationTargetBySlug resolves a ticket type inside a guest-visible
+	// event for the free-registration path, returning ErrRegistrationTargetMissing
+	// when the event is not visible, the type does not exist, or they do not
+	// belong together. The caller collapses all three onto one refusal.
+	RegistrationTargetBySlug(ctx context.Context, slug string, ticketTypeID uuid.UUID) (RegistrationTarget, error)
+}
+
+// TicketIssuer generates one ticket per attendee once an order is final.
+//
+// Declared HERE rather than imported from internal/payment, which declares an
+// identical pair. A domain must not import another domain (Principle II), so
+// the duplication is the rule working, not a smell — the composition root
+// satisfies both from the same ticket service.
+type TicketIssuer interface {
+	IssueTicketsForOrder(ctx context.Context, orderID uuid.UUID) error
+}
+
+// TicketDeliverer emails the holder their ticket.
+type TicketDeliverer interface {
+	SendTicketEmail(ctx context.Context, orderID uuid.UUID) error
 }
 
 // PaymentItem is one line shown on the provider's payment page.

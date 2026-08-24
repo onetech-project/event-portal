@@ -21,12 +21,12 @@ func TestDifferentPagesTakeDifferentKeys(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, k := range []Key{
-		OrdersAdminKey(&paid, &id, Paging{Page: 1, Size: 20}),
-		OrdersAdminKey(&paid, &id, Paging{Page: 2, Size: 20}),
-		OrdersAdminKey(&paid, &id, Paging{Page: 1, Size: 50}),
-		OrdersAdminKey(&paid, &id, Paging{Page: 2, Size: 50}),
-		AttendeesAdminKey(&id, nil, Paging{Page: 1, Size: 20}),
-		AttendeesAdminKey(&id, nil, Paging{Page: 2, Size: 20}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 1, Size: 20}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 2, Size: 20}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 1, Size: 50}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 2, Size: 50}),
+		AttendeesAdminKey(&id, nil, nil, Paging{Page: 1, Size: 20}),
+		AttendeesAdminKey(&id, nil, nil, Paging{Page: 2, Size: 20}),
 		EventsAdminKey(Paging{Page: 1, Size: 20}),
 		EventsAdminKey(Paging{Page: 2, Size: 20}),
 		EventsAdminKey(Paging{Page: 1, Size: 100}),
@@ -42,12 +42,12 @@ func TestPagingRendersInAFixedOrderAfterTheFilters(t *testing.T) {
 	paid := "PAID"
 
 	require.Equal(t,
-		"list:orders_admin:st=PAID:ev="+id.String()+":p=3:n=50:g",
-		OrdersAdminKey(&paid, &id, Paging{Page: 3, Size: 50}).EntryPrefix())
+		"list:orders_admin:st=PAID:ev="+id.String()+":q=_:p=3:n=50:g",
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 3, Size: 50}).EntryPrefix())
 
 	require.Equal(t,
-		"list:attendees_admin:or="+id.String()+":ev=_:p=2:n=20:g",
-		AttendeesAdminKey(&id, nil, Paging{Page: 2, Size: 20}).EntryPrefix())
+		"list:attendees_admin:or="+id.String()+":ev=_:q=_:p=2:n=20:g",
+		AttendeesAdminKey(&id, nil, nil, Paging{Page: 2, Size: 20}).EntryPrefix())
 
 	require.Equal(t,
 		"list:events_admin:p=4:n=100:g",
@@ -60,8 +60,8 @@ func TestPagedKeysAreStable(t *testing.T) {
 	pg := Paging{Page: 7, Size: 50}
 	for i := 0; i < 50; i++ {
 		require.Equal(t,
-			OrdersAdminKey(&paid, &id, pg).EntryPrefix(),
-			OrdersAdminKey(&paid, &id, pg).EntryPrefix())
+			OrdersAdminKey(&paid, &id, nil, pg).EntryPrefix(),
+			OrdersAdminKey(&paid, &id, nil, pg).EntryPrefix())
 	}
 }
 
@@ -69,16 +69,16 @@ func TestPagingDoesNotChangeTheScope(t *testing.T) {
 	// If paging reached the scope, one write would have to know which pages were
 	// warm in order to invalidate them. It must not.
 	id := uuid.New()
-	require.Equal(t, Orders(), OrdersAdminKey(nil, nil, Paging{Page: 9, Size: 50}).Scope)
-	require.Equal(t, Orders(), AttendeesAdminKey(nil, &id, Paging{Page: 9, Size: 50}).Scope)
+	require.Equal(t, Orders(), OrdersAdminKey(nil, nil, nil, Paging{Page: 9, Size: 50}).Scope)
+	require.Equal(t, Orders(), AttendeesAdminKey(nil, &id, nil, Paging{Page: 9, Size: 50}).Scope)
 	require.Equal(t, Events(), EventsAdminKey(Paging{Page: 9, Size: 50}).Scope)
 }
 
 func TestPagingDoesNotChangeTheFamily(t *testing.T) {
 	// Family is the Prometheus label. A page number reaching it would make the
 	// label set unbounded.
-	require.Equal(t, FamilyOrdersAdmin, OrdersAdminKey(nil, nil, Paging{Page: 9, Size: 50}).Family)
-	require.Equal(t, FamilyAttendeesAdmin, AttendeesAdminKey(nil, nil, Paging{Page: 9, Size: 50}).Family)
+	require.Equal(t, FamilyOrdersAdmin, OrdersAdminKey(nil, nil, nil, Paging{Page: 9, Size: 50}).Family)
+	require.Equal(t, FamilyAttendeesAdmin, AttendeesAdminKey(nil, nil, nil, Paging{Page: 9, Size: 50}).Family)
 	require.Equal(t, FamilyEventsAdmin, EventsAdminKey(Paging{Page: 9, Size: 50}).Family)
 }
 
@@ -89,11 +89,11 @@ func TestOneBumpInvalidatesEveryPageOfEveryVariant(t *testing.T) {
 	id := uuid.New()
 	paid := "PAID"
 	variants := []Key{
-		OrdersAdminKey(nil, nil, Paging{Page: 1, Size: 20}),
-		OrdersAdminKey(nil, nil, Paging{Page: 2, Size: 20}),
-		OrdersAdminKey(&paid, &id, Paging{Page: 3, Size: 50}),
-		OrdersAdminKey(&paid, &id, Paging{Page: 1, Size: 100}),
-		AttendeesAdminKey(nil, &id, Paging{Page: 4, Size: 20}),
+		OrdersAdminKey(nil, nil, nil, Paging{Page: 1, Size: 20}),
+		OrdersAdminKey(nil, nil, nil, Paging{Page: 2, Size: 20}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 3, Size: 50}),
+		OrdersAdminKey(&paid, &id, nil, Paging{Page: 1, Size: 100}),
+		AttendeesAdminKey(nil, &id, nil, Paging{Page: 4, Size: 20}),
 	}
 	for _, k := range variants {
 		require.NoError(t, c.Set(ctx, k, []byte(`{"items":[]}`)))

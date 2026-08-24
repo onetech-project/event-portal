@@ -458,6 +458,117 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /api/v1/ticket/register/{ticket_type_id}:
+    get:
+      tags: [Public - Booking & Checkout]
+      summary: Prerequisites for a free registration form
+      operationId: registrationPrerequisites
+      parameters:
+        - name: ticket_type_id
+          in: path
+          required: true
+          description: A **registration-only** ticket type (`is_visible = false`).
+          schema: { type: string, format: uuid }
+        - name: slug
+          in: query
+          required: true
+          description: The event slug the ticket type must belong to.
+          schema: { type: string }
+          example: jazz-night-2026
+      description: |
+        Everything the registration form needs: the event's name, the ticket type's name, the
+        gender master list, and the current Terms & Conditions version token.
+
+        **Every refusal is the same refusal.** An id naming nothing, a malformed id, another
+        event's ticket type, a purchasable ticket type, an unpublished event and a closed window
+        all return the identical `404 TICKET_TYPE_NOT_FOUND` with the identical message. That is
+        deliberate (spec 022 FR-012): this endpoint is unauthenticated, so distinguishable
+        refusals would let a caller enumerate which ticket types exist, which are free, and which
+        events are published, purely by guessing.
+
+        Unthrottled — it creates nothing and sends nothing. The POST below is throttled.
+
+        `Cache-Control: no-store`: live availability decided this response.
+      responses:
+        '200':
+          description: The form may be shown.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RegistrationPrereqs'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Public - Booking & Checkout]
+      summary: Submit a free registration
+      operationId: submitRegistration
+      parameters:
+        - name: ticket_type_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      description: |
+        Issues one free e-ticket. Creates an order at `PAID` with a **zero total**, one line, one
+        attendee and one ticket, then emails the e-ticket — no payment session, no gateway call,
+        no receipt.
+
+        Re-applies every gate the GET applied. Hiding a form is not enforcement: a caller that
+        never loaded the page is refused here, identically (spec 022 US3 scenario 2).
+
+        **There is no duplicate-address refusal.** An address may register as many times as
+        remaining quota allows, each submission producing its own order, attendee and e-ticket
+        (spec 022 FR-023). The numeric code `409007`, once `EMAIL_ALREADY_REGISTERED`, is retired
+        and unassigned — a client still keyed on it will match nothing rather than silently start
+        matching an unrelated conflict.
+
+        Throttled per source. With no per-address rule left, that throttle is the **only** bound
+        on submission volume through this link: `RATE_LIMIT_REGISTER_BURST` (default 10) and
+        `RATE_LIMIT_REGISTER_RATE` (default 0.2/s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistrationRequest'
+      responses:
+        '201':
+          description: Registered; the e-ticket is on its way.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          registered: { type: boolean, example: true }
+        '400':
+          description: Validation failure, or quota exhausted between page load and submit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            `TERMS_CHANGED` — the document was republished after the guest read it. Compared on
+            `updated_at`, never the id: an edit overwrites the row in place and preserves its id,
+            so an id comparison could never fire.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /api/v1/ticket/genders:
     get:
       tags: [Public - Booking & Checkout]
@@ -2550,6 +2661,73 @@ components:
           type: string
           description: What checkout submits. The id is not read by any client.
           example: MALE
+
+    RegistrationPrereqs:
+      type: object
+      description: What the free registration form needs to render (spec 022).
+      properties:
+        event:
+          type: object
+          properties:
+            name: { type: string, example: Jazz Night 2026 }
+            slug: { type: string, example: jazz-night-2026 }
+        ticket_type_name: { type: string, example: Invitation Access }
+        event_terms_updated_at:
+          type: string
+          format: date-time
+          description: |
+            The VERSION token to echo back on submit. Deliberately `updated_at`, not the terms id:
+            an admin edit overwrites the terms row in place and preserves its id, so an id could
+            never report that the document changed under the guest.
+        genders:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenderOption'
+
+    RegistrationRequest:
+      type: object
+      description: |
+        One holder, one free ticket. No quantity and no line items — the ticket type is in the
+        path and a registration is always exactly one place.
+      required: [slug, name, email, phone, dob, gender, agreed, event_terms_updated_at]
+      properties:
+        slug:
+          type: string
+          description: The event the ticket type must belong to. A mismatch is refused as not-found.
+          example: jazz-night-2026
+        name: { type: string, example: Halo Registrant }
+        email:
+          type: string
+          format: email
+          description: |
+            Where the e-ticket goes. NOT checked against prior registrations — an address may
+            register as many times as quota allows (spec 022 FR-023).
+        phone:
+          type: string
+          pattern: '^[0-9]{12,15}$'
+          description: |
+            12-15 digits and nothing else, identical to the holder forms. `+628125567820` is
+            refused: `+` is not a digit. The rule is inherited, not re-negotiated per surface.
+          example: '628125567820'
+        dob:
+          type: string
+          format: date
+          description: ISO `YYYY-MM-DD`. Must be a real date and not in the future.
+          example: '1996-04-12'
+        gender:
+          type: string
+          description: A **name** from `GET /api/v1/ticket/genders`, not an id.
+          example: MALE
+        agreed:
+          type: boolean
+          description: Must be true. False is refused `TERMS_NOT_ACCEPTED`.
+        event_terms_updated_at:
+          type: string
+          format: date-time
+          description: |
+            The version the guest actually read, from the GET above. A superseded value is
+            refused `409 TERMS_CHANGED` rather than silently binding the guest to text they never
+            saw.
 
     CheckoutVisitor:
       type: object

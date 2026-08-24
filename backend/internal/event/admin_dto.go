@@ -72,6 +72,11 @@ type TicketTypeAdminView struct {
 	// own dates, which EventAdminDetail already carries.
 	EventStart time.Time `json:"event_start"`
 	EventEnd   time.Time `json:"event_end"`
+	// IsVisible means this type is obtained by REGISTERING, not by
+	// buying (spec 022). Shown to admins so the table can distinguish it; it is
+	// deliberately NOT filtered out of admin reads — containment applies to the
+	// purchase path, not to administration (FR-009).
+	IsVisible bool `json:"is_visible"`
 }
 
 // EventRequest is the create/update body for an event. Both verbs take the same
@@ -150,6 +155,29 @@ type TicketTypeRequest struct {
 	// the parent event's dates is checked by the service, which has the event.
 	EventStart time.Time `json:"event_start"`
 	EventEnd   time.Time `json:"event_end"`
+	// IsVisible governs whether this type is sold or registered for (spec 022).
+	//
+	// A POINTER, and that is the whole point of it. This column is the NEGATION
+	// of the is_registration_only it replaced, so `false` no longer means "an
+	// ordinary ticket" — it means invisible, registration-only, off every guest
+	// purchase surface, and free to register for (FR-001a). With a plain bool, a
+	// client that omits the key sends Go's zero value and silently withdraws the
+	// ticket type from sale. UpdateTicketType is an ABSOLUTE full replace, so
+	// that would fire on an edit of any unrelated field — an admin fixing a typo
+	// in the name would take the ticket off sale and never be told.
+	//
+	// Absent therefore means VISIBLE (see Visible()), which matches the column's
+	// DEFAULT TRUE. Hiding must be an explicit `"is_visible": false`.
+	IsVisible *bool `json:"is_visible"`
+}
+
+// Visible resolves IsVisible's tri-state to the boolean the write path needs.
+//
+// Absent means visible. See the field comment: under this column's polarity the
+// unsafe direction is the zero value, so absence must not reach the database as
+// false.
+func (r TicketTypeRequest) Visible() bool {
+	return r.IsVisible == nil || *r.IsVisible
 }
 
 // Validate checks the fields that do not require a database lookup. Whether

@@ -35,6 +35,16 @@ func TestDefaultsReproduceThePreviousConstants(t *testing.T) {
 	assert.Equal(t, 10, th.TicketLookup.Burst, "was TICKET_LOOKUP_BURST's default")
 	assert.Equal(t, 0.2, th.Checkout.Rate, "was gatewayCallRate")
 	assert.Equal(t, 3, th.Checkout.Burst, "was gatewayCallBurst")
+
+	// Spec 022: a NEW surface, so it reproduces no prior constant. It carries
+	// checkout's sustained RATE because it is at least as expensive —
+	// unauthenticated, deducts quota, and sends real mail — but NOT checkout's
+	// burst. FR-023 removed the one-address-per-event rule, so submitting this
+	// form repeatedly from one device became the intended way to register a
+	// group; at a burst of 3 the fourth guest is refused.
+	assert.True(t, th.Register.Enabled, "registration throttle must default to on")
+	assert.Equal(t, 0.2, th.Register.Rate)
+	assert.Equal(t, 10, th.Register.Burst)
 	assert.Equal(t, 10, th.StatusStream.MaxConns, "was defaultStreamCap")
 
 	// guestResendRate was 1.0/60.0. The window idiom must reproduce it exactly.
@@ -213,10 +223,74 @@ func TestRefillWindowMatchesTheShippedValues(t *testing.T) {
 		{"availability", cfg.Throttle.Availability},
 		{"ticket lookup", cfg.Throttle.TicketLookup},
 		{"checkout", cfg.Throttle.Checkout},
+		{"register", cfg.Throttle.Register},
 	} {
 		assert.Less(t, c.p.RefillWindow(), cfg.Throttle.IdleTTL,
 			"%s refills in %s, which must stay under the %s retention",
 			c.name, c.p.RefillWindow(), cfg.Throttle.IdleTTL)
 	}
 	assert.Less(t, cfg.Throttle.Resend.Window, cfg.Throttle.IdleTTL)
+}
+
+// Spec 022: the registration surface must be reachable by its OWN switch and by
+// the master switch, and it must join the startup report. A policy that is not in
+// ratePolicies() is silently unvalidated and silently unreported — which is how a
+// new throttle escapes both Principle IX guarantees while looking configured.
+func TestRegistrationThrottleHonoursBothSwitches(t *testing.T) {
+	setRequired(t)
+
+	t.Run("its own switch", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("RATE_LIMIT_REGISTER_ENABLED", "false")
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.False(t, cfg.Throttle.Register.Active(cfg.Throttle.Enabled),
+			"its own switch must disable it")
+		assert.True(t, cfg.Throttle.Checkout.Active(cfg.Throttle.Enabled),
+			"and must leave every other surface alone")
+	})
+
+	t.Run("the master switch", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("RATE_LIMIT_ENABLED", "false")
+		cfg, err := config.Load()
+		require.NoError(t, err)
+		assert.False(t, cfg.Throttle.Register.Active(cfg.Throttle.Enabled),
+			"master off must disable it regardless of its own switch")
+	})
+}
+
+// Principle IX: invalid configuration refuses startup, naming the offending
+// setting. The registration surface must be covered by that sweep like the rest.
+func TestRegistrationThrottleRejectsInvalidValues(t *testing.T) {
+	setRequired(t)
+	t.Setenv("RATE_LIMIT_REGISTER_RATE", "-1")
+
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RATE_LIMIT_REGISTER_RATE",
+		"the rejection must name the setting an operator has to fix")
+}
+
+// Spec 022 FR-034: the registration burst is a REQUIREMENT, not a tuning choice.
+//
+// FR-023 removed the one-address-per-event rule, which made repeated submission
+// from one source the intended way to register a group. The burst is what decides
+// how large a group can be registered without the product refusing its own use
+// case, so a value that drifts back toward checkout's 3 is a regression against
+// the spec rather than a config preference.
+//
+// The sustained rate is asserted separately and deliberately: FR-034 requires the
+// burst to rise WITHOUT the rate rising with it. Raising both would loosen the
+// bulk-abuse ceiling, and with no per-address rule left this throttle is the only
+// thing bounding abuse through the unlisted link at all.
+func TestRegistrationBurstAdmitsAWholeGroup(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, cfg.Throttle.Register.Burst, 10,
+		"a guest registering a group of ten from one device must not be refused partway")
+	assert.InDelta(t, 0.2, cfg.Throttle.Register.Rate, 0.0001,
+		"the sustained ceiling stays at 12/min — only the burst was raised")
 }

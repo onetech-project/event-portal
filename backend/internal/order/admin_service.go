@@ -84,14 +84,23 @@ type PackageDisplay struct {
 type OrderFilter struct {
 	Status  *string
 	EventID *uuid.UUID
-	Page    httpx.PageRequest
+	// Search is a partial, case-insensitive match on order number, buyer name or
+	// buyer email (spec 022 FR-053). Nil means no filter; it is NOT the same as
+	// the empty string, which would match everything and is normalised away.
+	Search *string
+	Page   httpx.PageRequest
 }
 
 // AttendeeFilter narrows the admin attendee list. A nil field means "no filter".
 type AttendeeFilter struct {
 	OrderID *uuid.UUID
 	EventID *uuid.UUID
-	Page    httpx.PageRequest
+	// Search matches a PARTIAL attendee name or email, or an order number
+	// (spec 022 FR-053). This is the operator's recovery route for an undelivered
+	// registration: the registrant is never shown the address their ticket went
+	// to, so a lookup demanding the exact address is not a recovery route.
+	Search *string
+	Page   httpx.PageRequest
 }
 
 // paging renders a filter's page as the cache-key component. Kept here so the
@@ -134,7 +143,7 @@ func (s *AdminService) WithCache(c cache.Lists) *AdminService {
 // read's count.
 func (s *AdminService) ListOrders(ctx context.Context, filter OrderFilter) (httpx.Page[OrderSummary], error) {
 	filter.Page = filter.Page.Normalize()
-	key := cache.OrdersAdminKey(filter.Status, filter.EventID, paging(filter.Page))
+	key := cache.OrdersAdminKey(filter.Status, filter.EventID, filter.Search, paging(filter.Page))
 	return cache.Through(ctx, s.cache, key,
 		func(ctx context.Context) (httpx.Page[OrderSummary], error) {
 			return s.listOrders(ctx, filter)
@@ -157,6 +166,7 @@ func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) (http
 	total, err := s.repo.queries.CountOrdersAdmin(ctx, ordersql.CountOrdersAdminParams{
 		Status:        filter.Status,
 		TicketTypeIds: ticketTypeIDs,
+		Search:        filter.Search,
 	})
 	if err != nil {
 		return httpx.Page[OrderSummary]{}, fmt.Errorf("count orders: %w", err)
@@ -169,6 +179,7 @@ func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) (http
 	rows, err := s.repo.queries.ListOrdersAdmin(ctx, ordersql.ListOrdersAdminParams{
 		Status:        filter.Status,
 		TicketTypeIds: ticketTypeIDs,
+		Search:        filter.Search,
 		RowLimit:      int32(page.Limit()),
 		RowOffset:     int32(page.Offset()),
 	})
@@ -179,13 +190,14 @@ func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) (http
 	out := make([]OrderSummary, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, OrderSummary{
-			ID:          row.ID,
-			OrderNumber: row.OrderNumber,
-			BuyerName:   strv(row.BuyerName),
-			BuyerEmail:  strv(row.BuyerEmail),
-			Status:      row.Status,
-			TotalAmount: money.From(row.TotalAmount),
-			CreatedAt:   row.CreatedAt,
+			ID:             row.ID,
+			OrderNumber:    row.OrderNumber,
+			BuyerName:      strv(row.BuyerName),
+			BuyerEmail:     strv(row.BuyerEmail),
+			Status:         row.Status,
+			TotalAmount:    money.From(row.TotalAmount),
+			IsRegistration: row.IsRegistration,
+			CreatedAt:      row.CreatedAt,
 		})
 	}
 	return httpx.NewPage(out, page, total), nil
@@ -198,7 +210,7 @@ func (s *AdminService) listOrders(ctx context.Context, filter OrderFilter) (http
 // names on one page rather than on every attendee in the system.
 func (s *AdminService) ListAttendees(ctx context.Context, filter AttendeeFilter) (httpx.Page[AttendeeSummary], error) {
 	filter.Page = filter.Page.Normalize()
-	key := cache.AttendeesAdminKey(filter.OrderID, filter.EventID, paging(filter.Page))
+	key := cache.AttendeesAdminKey(filter.OrderID, filter.EventID, filter.Search, paging(filter.Page))
 	return cache.Through(ctx, s.cache, key,
 		func(ctx context.Context) (httpx.Page[AttendeeSummary], error) {
 			return s.listAttendees(ctx, filter)
@@ -217,6 +229,7 @@ func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter)
 	total, err := s.repo.queries.CountAttendeesAdmin(ctx, ordersql.CountAttendeesAdminParams{
 		OrderID:       toNullUUID(filter.OrderID),
 		TicketTypeIds: ticketTypeIDs,
+		Search:        filter.Search,
 	})
 	if err != nil {
 		return httpx.Page[AttendeeSummary]{}, fmt.Errorf("count attendees: %w", err)
@@ -229,6 +242,7 @@ func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter)
 	rows, err := s.repo.queries.ListAttendeesAdmin(ctx, ordersql.ListAttendeesAdminParams{
 		OrderID:       toNullUUID(filter.OrderID),
 		TicketTypeIds: ticketTypeIDs,
+		Search:        filter.Search,
 		RowLimit:      int32(page.Limit()),
 		RowOffset:     int32(page.Offset()),
 	})
@@ -248,6 +262,7 @@ func (s *AdminService) listAttendees(ctx context.Context, filter AttendeeFilter)
 			Email:          strv(row.Email),
 			TicketTypeName: names[row.TicketTypeID],
 			OrderNumber:    row.OrderNumber,
+			IsRegistration: row.IsRegistration,
 		})
 	}
 	return httpx.NewPage(out, page, total), nil

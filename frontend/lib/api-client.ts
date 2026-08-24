@@ -23,6 +23,9 @@ export const API_CODES = {
   notFound: 404001,
   termsNotAuthored: 404002,
   termsMissing: 409001,
+  // 409007 was EMAIL_ALREADY_REGISTERED. Spec 022 FR-023 removed the rule — an
+  // address may register as many times as quota allows — and the server retired
+  // the number rather than reassigning it, so nothing is mapped here either.
   termsChanged: 409002,
   termsNotRecorded: 409003,
   paymentAlreadyStarted: 409004,

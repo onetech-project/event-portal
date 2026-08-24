@@ -46,6 +46,9 @@ type AdminTicketTypeParams struct {
 	SalesEnd    timeValue
 	EventStart  timeValue
 	EventEnd    timeValue
+	// IsVisible travels on BOTH writes. UpdateTicketType replaces every
+	// column, so omitting it here would silently clear the flag (spec 022).
+	IsVisible bool
 }
 
 // --- Admin event reads ----------------------------------------------------
@@ -322,6 +325,7 @@ func (r *Repository) ListTicketTypesAdmin(ctx context.Context, eventID uuid.UUID
 			ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 			Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
 			EventStart: row.EventStart, EventEnd: row.EventEnd,
+			IsVisible: row.IsVisible,
 		})
 	}
 	return out, nil
@@ -340,6 +344,7 @@ func (r *Repository) GetTicketTypeAdmin(ctx context.Context, id uuid.UUID) (Tick
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
 		EventStart: row.EventStart, EventEnd: row.EventEnd,
+		IsVisible: row.IsVisible,
 	}, nil
 }
 
@@ -355,6 +360,8 @@ func (r *Repository) CreateTicketType(ctx context.Context, p AdminTicketTypePara
 		SalesEnd:    p.SalesEnd,
 		EventStart:  p.EventStart,
 		EventEnd:    p.EventEnd,
+
+		IsVisible: p.IsVisible,
 	})
 	if err != nil {
 		return TicketTypeRow{}, fmt.Errorf("create ticket type: %w", err)
@@ -363,6 +370,7 @@ func (r *Repository) CreateTicketType(ctx context.Context, p AdminTicketTypePara
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
 		EventStart: row.EventStart, EventEnd: row.EventEnd,
+		IsVisible: row.IsVisible,
 	}, nil
 }
 
@@ -383,6 +391,8 @@ func (r *Repository) UpdateTicketType(ctx context.Context, id uuid.UUID, p Admin
 		SalesEnd:    p.SalesEnd,
 		EventStart:  p.EventStart,
 		EventEnd:    p.EventEnd,
+
+		IsVisible: p.IsVisible,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TicketTypeRow{}, ErrNotFound
@@ -394,6 +404,7 @@ func (r *Repository) UpdateTicketType(ctx context.Context, id uuid.UUID, p Admin
 		ID: row.ID, EventID: row.EventID, Name: row.Name, Description: row.Description,
 		Price: row.Price, Quota: row.Quota, SalesStart: row.SalesStart, SalesEnd: row.SalesEnd,
 		EventStart: row.EventStart, EventEnd: row.EventEnd,
+		IsVisible: row.IsVisible,
 	}, nil
 }
 

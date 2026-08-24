@@ -41,6 +41,14 @@ The goal of this MVP is validation, not scalability. High availability, microser
 **Payment & Delivery:**
 *   Webhook updates Order status (`Pending` -> `Paid` / `Cancelled` / `Expired`).
 *   On `Paid`: Backend generates 1 Ticket per Attendee (with unique Ticket Code + QR Code) and sends **exactly one email to the buyer** — the address on the first ticket holder form — carrying **two document attachments** — a Payment Receipt document and one E-Ticket document holding every ticket in the order (one page per ticket, no prices; the receipt is also itemized in the body). The other holders' emails are identity, not delivery addresses (spec 011 FR-012 / constitution v3.0.0).
+*   A **free registration** (spec 022) is the one order that reaches `Paid` without a payment: it sends **one attachment**, the E-Ticket alone, with no receipt in the body or attached and no monetary amount anywhere. Everything else about delivery is identical.
+
+**Free Registration (spec 022):**
+*   A ticket type can be marked **registration-only**. Such a type is hidden from every guest purchase surface, cannot be added to a package, and is refused by booking, checkout and availability. It remains fully visible and editable in the admin console.
+*   A guest reaches it at `/events/{slug}/register/{ticketId}`, fills one holder form (Name, Email, Phone, Gender, Date of Birth), reads the event's Terms & Conditions **through to the end** and accepts them, confirms in a review dialog, and is emailed a free E-Ticket. No payment, no fee, no receipt, no price shown at any point.
+*   The same read-to-the-end gate applies to the booking flow's Terms & Conditions dialog, so agreeing means the same thing on both surfaces.
+*   An email address that already holds an issued ticket for that event is refused. Abandoned, cancelled and expired orders do not block.
+*   Recovery for undelivered registration mail is **operator-assisted**: the confirmation page shows no address and no reference, so an admin resends after locating the registration by name or partial email.
 
 **Admin QR Validation:**
 *   Admin validator accepts manual `Ticket Code` input as primary, or Camera QR scan as secondary.

@@ -197,6 +197,18 @@ export default defineConfig({
             // is how this rig first proved the rule works. Shortened here rather
             // than raising retention, so the rig stays quick.
             RATE_LIMIT_RESEND_WINDOW: "5s",
+            // Same reason, second occurrence (spec 022). Free registration ships
+            // with burst 10 at 0.2/s — a 50s refill, deliberately large so a
+            // guest registering a group of ten from one device is not refused
+            // partway. That exceeds this rig's 30s retention and startup refuses,
+            // which is the rule working twice.
+            //
+            // Shortened here, not raised there: this instance exists to trip
+            // limits quickly, and 3/0.2 is a 15s refill that fits. The shipped
+            // default is asserted in the Go tier
+            // (TestRegistrationBurstAdmitsAWholeGroup), so lowering it for the rig
+            // cannot quietly become lowering it for production.
+            RATE_LIMIT_REGISTER_BURST: "3",
             // Left ON at shipped values so the per-surface switch has something
             // to contrast against (FR-022).
             RATE_LIMIT_AVAILABILITY_ENABLED: "true",

@@ -12,7 +12,7 @@ import { config } from "./env";
 
 export type ApiResult<T> = { status: number; data: T };
 
-async function request<T>(
+export async function request<T>(
   path: string,
   init: RequestInit & { token?: string } = {},
 ): Promise<ApiResult<T>> {
@@ -279,6 +279,17 @@ export async function createTicketType(
      */
     eventStart?: string;
     eventEnd?: string;
+    /**
+     * Spec 022. FALSE makes this a REGISTRATION-ONLY type: off every guest
+     * purchase surface, unbundleable, and obtainable only at
+     * /events/:slug/register/:id — free, whatever price is set.
+     *
+     * Defaults to `true`, matching the column. Left undefined the key is not
+     * sent at all, which the server also reads as visible — but the default is
+     * stated here rather than relied upon, because under this column's polarity
+     * the unsafe direction is the falsy one.
+     */
+    isVisible?: boolean;
   },
 ): Promise<SeededTicketType> {
   const { status, data } = await request<SeededTicketType>("/admin/ticket-types", {
@@ -293,6 +304,7 @@ export async function createTicketType(
       sales_end: options.salesEnd ?? isoDaysFromNow(29),
       event_start: options.eventStart ?? defaultEventWindow().start,
       event_end: options.eventEnd ?? defaultEventWindow().end,
+      is_visible: options.isVisible ?? true,
     }),
   });
 
@@ -618,4 +630,130 @@ export async function resendTicketEmail(orderNumber: string): Promise<ApiResult<
     method: "POST",
     body: JSON.stringify({ order_id: orderNumber }),
   });
+}
+
+/**
+ * A Terms & Conditions document long enough that it must actually be SCROLLED.
+ *
+ * The default fixture is `<p>These are the UAT terms and conditions.</p>`, which
+ * fits inside the dialog's reading area. The read-through gate treats a document
+ * shorter than its viewport as already read (FR-014d) — correctly, since there is
+ * nothing to scroll — so every scenario using the short fixture satisfies the gate
+ * by being shown, and proves nothing about the gate.
+ *
+ * That is the "green because nobody looked" case Principle VIII exists to prevent:
+ * the suite would pass identically against a build with the gate deleted. Any
+ * scenario asserting the gate MUST seed this instead.
+ *
+ * 60 numbered clauses is comfortably past the dialog's max height at every
+ * viewport the suite runs, without being so large it slows the render.
+ */
+export function longTermsHtml(clauses = 60): string {
+  const items = Array.from(
+    { length: clauses },
+    (_, i) =>
+      `<li>Clause ${i + 1}. This clause exists to make the document taller than the ` +
+      `reading area, so the read-through gate has something to gate on.</li>`,
+  ).join("");
+  return `<ol>${items}<li id="last-clause">Final clause. You have reached the end.</li></ol>`;
+}
+
+/** Seeds an event whose terms are long enough to exercise the read-through gate. */
+export async function putLongTerms(token: string, eventId: string): Promise<void> {
+  await putTerms(token, eventId, longTermsHtml());
+}
+
+/**
+ * A published event carrying BOTH a purchasable ticket type and a
+ * registration-only one (spec 022), plus long terms.
+ *
+ * Both types on one event on purpose: it is the arrangement that catches
+ * containment failing in either direction — the invitation type leaking onto the
+ * guest list, or the filter being so eager it hides the purchasable one too.
+ */
+export async function createRegistrationEvent(
+  token: string,
+  options: {
+    slug: string;
+    name?: string;
+    quota?: number;
+    registrationQuota?: number;
+    /**
+     * Seed an event that is running NOW, so an issued ticket is inside its
+     * admission window and validates as `Valid` rather than `NOT_YET_VALID`.
+     *
+     * Off by default: the standard +30d/+31d window is what every other scenario
+     * wants, and a door-validation scenario is the exception. A ticket's
+     * admission window must sit inside its event's own dates (spec 015 FR-005),
+     * so both move together — which is why this is one flag and not two dates.
+     */
+    admittingNow?: boolean;
+  },
+): Promise<{
+  event: SeededEvent;
+  purchasable: SeededTicketType;
+  registration: SeededTicketType;
+}> {
+  // Computed ONCE and reused, with the ticket window strictly INSIDE the event's.
+  // Calling isoHoursFromNow twice would read the clock twice, and an admission
+  // window equal to its parent's can land microseconds outside it — containment
+  // then fails with a 400 that reads like a bug in the fixture rather than a
+  // race (spec 015 FR-005).
+  const eventStart = isoHoursFromNow(-2);
+  const eventEnd = isoHoursFromNow(8);
+  const admitStart = isoHoursFromNow(-1);
+  const admitEnd = isoHoursFromNow(6);
+
+  const { event, ticketType } = await createSellableEvent(token, {
+    slug: options.slug,
+    name: options.name,
+    quota: options.quota ?? 10,
+    ...(options.admittingNow
+      ? { startDate: eventStart, endDate: eventEnd, eventStart: admitStart, eventEnd: admitEnd }
+      : {}),
+  });
+  await putLongTerms(token, event.id);
+
+  const registration = await createTicketType(token, {
+    eventId: event.id,
+    name: "Invitation Access",
+    // Priced at zero by convention only — FR-003 makes the column independent of
+    // price, and a registration charges nothing whatever is stored.
+    price: "0.00",
+    quota: options.registrationQuota ?? 5,
+    isVisible: false,
+    ...(options.admittingNow ? { eventStart: admitStart, eventEnd: admitEnd } : {}),
+  });
+
+  return { event, purchasable: ticketType, registration };
+}
+
+/**
+ * The API's response with the ENVELOPE INTACT — `{ code, message, data }` — not
+ * unwrapped the way `request` returns it.
+ *
+ * `request` returns `body.data ?? body`, which is right for reading a success
+ * payload and wrong for comparing two refusals: every 404 carries `data: null`,
+ * so two refusals compared through `request` are equal whatever their code and
+ * message say. A scenario asserting that refusals are INDISTINGUISHABLE
+ * (spec 022 FR-012) would then pass against a server that distinguished them
+ * perfectly — the exact false green the assertion exists to prevent.
+ */
+export async function requestRaw(
+  path: string,
+  init: RequestInit & { token?: string } = {},
+): Promise<{ status: number; body: unknown }> {
+  const { token, headers, ...rest } = init;
+
+  const response = await fetch(`${config.apiURL}${path}`, {
+    ...rest,
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...headers,
+    },
+  });
+
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : {} };
 }

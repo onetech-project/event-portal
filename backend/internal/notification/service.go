@@ -55,6 +55,15 @@ type OrderDelivery struct {
 	Event DeliveryEvent
 	// Payment is the receipt's Transaction Details block (spec 016 FR-010).
 	Payment PaymentSummary
+	// IsRegistration marks a free registration (spec 022): an order that reached
+	// PAID without a payment, and therefore has no receipt to issue.
+	//
+	// It is read from orders.is_registration, never inferred. Every inference
+	// candidate — a zero total, no payments row — is an absence an abandoned
+	// purchase also shows, and getting this wrong sends a buyer a proof of
+	// payment for a payment that never happened, or withholds one from a buyer
+	// who paid.
+	IsRegistration bool
 }
 
 // DeliveryEvent is the event an order was placed against, as the documents name
@@ -193,13 +202,20 @@ func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) (strin
 		return "", errors.New("notification: order has no buyer email to deliver to")
 	}
 
-	// Both documents are built BEFORE the send, so a failure in either sends
-	// nothing at all (spec 016 FR-006). A half-delivered email carrying only one
-	// of the two would leave email_sent TRUE and the resend disarmed, which is
-	// the one outcome worse than not sending.
-	receiptPDF, err := RenderReceiptPDF(order, s.brand)
-	if err != nil {
-		return "", fmt.Errorf("render receipt for %s: %w", order.OrderNumber, err)
+	// Documents are built BEFORE the send, so a failure in any of them sends
+	// nothing at all (spec 016 FR-006). A half-delivered email would leave
+	// email_sent TRUE and the resend disarmed, which is the one outcome worse
+	// than not sending. That rule is unchanged for a registration; there is
+	// simply one document rather than two.
+	//
+	// A registration has NO receipt (spec 022 FR-036, constitution v5.0.0): a
+	// proof of payment for a payment that never happened is worse than none.
+	var receiptPDF []byte
+	if !order.IsRegistration {
+		receiptPDF, err = RenderReceiptPDF(order, s.brand)
+		if err != nil {
+			return "", fmt.Errorf("render receipt for %s: %w", order.OrderNumber, err)
+		}
 	}
 
 	// One PDF holding every ticket in the order.
@@ -209,6 +225,30 @@ func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) (strin
 	}
 
 	body, inline := buildEmailBody(order, tickets, s.brand)
+
+	// Exactly two documents for a purchase, exactly one for a registration.
+	// Receipt first when there is one — not required by the spec, but fixed so
+	// two mail clients cannot show the buyer a different first attachment, and so
+	// tests can assert positionally.
+	attachments := make([]Attachment, 0, 2)
+	if !order.IsRegistration {
+		attachments = append(attachments, Attachment{
+			Filename:    fmt.Sprintf("receipt-%s.pdf", order.OrderNumber),
+			ContentType: "application/pdf",
+			Content:     receiptPDF,
+		})
+	}
+	attachments = append(attachments, Attachment{
+		Filename:    fmt.Sprintf("tickets-%s.pdf", order.OrderNumber),
+		ContentType: "application/pdf",
+		Content:     ticketsPDF,
+	})
+
+	// A registration's subject must not promise a receipt it does not carry.
+	subject := fmt.Sprintf("[%s] E-receipt & E-Ticket for %s", order.OrderNumber, tickets[0].EventName)
+	if order.IsRegistration {
+		subject = fmt.Sprintf("[%s] E-Ticket for %s", order.OrderNumber, tickets[0].EventName)
+	}
 
 	if err := s.mailer.Send(Message{
 		To: recipient,
@@ -220,24 +260,13 @@ func (s *Service) SendTicketEmail(ctx context.Context, orderID uuid.UUID) (strin
 		// The event name is READ FROM THE ORDER, never fixed: tickets[0] is safe
 		// because orders are event-scoped (spec 007), so every ticket in an order
 		// carries the same event.
-		Subject:  fmt.Sprintf("[%s] E-receipt & E-Ticket for %s", order.OrderNumber, tickets[0].EventName),
+		Subject:  subject,
 		HTMLBody: body,
 		// The brand mark and the location pin, referenced from the body by
 		// content ID. Not attachments — a buyer still receives exactly two
 		// documents (FR-001).
-		Inline: inline,
-		// Receipt first. Not required by the spec, but fixed here so two mail
-		// clients cannot show the buyer a different first attachment, and so the
-		// tests can assert positionally rather than order-tolerantly.
-		Attachments: []Attachment{{
-			Filename:    fmt.Sprintf("receipt-%s.pdf", order.OrderNumber),
-			ContentType: "application/pdf",
-			Content:     receiptPDF,
-		}, {
-			Filename:    fmt.Sprintf("tickets-%s.pdf", order.OrderNumber),
-			ContentType: "application/pdf",
-			Content:     ticketsPDF,
-		}},
+		Inline:      inline,
+		Attachments: attachments,
 	}); err != nil {
 		// email_sent stays FALSE, so resend remains armed.
 		return "", fmt.Errorf("send to %s: %w", recipient, err)
@@ -354,7 +383,15 @@ func buildEmailBody(order OrderDelivery, tickets []TicketDetail, brand Branding)
 	emailGreeting(&sb, order, eventName)
 	emailOrderPanel(&sb, order)
 	emailEventBlock(&sb, order, eventName)
-	emailTicketDetails(&sb, order)
+	// The Ticket Details block is the money block: per-line prices, fee rows and
+	// a "Total Payment" figure. A registration must state NO monetary amount
+	// anywhere (spec 022 FR-036) — and rendering it against a zero total would
+	// print "Total Payment  IDR 0", which is exactly the claim the missing
+	// receipt exists to avoid making. The attachments are not the only place
+	// money appears.
+	if !order.IsRegistration {
+		emailTicketDetails(&sb, order)
+	}
 	emailBuyerInformation(&sb, order)
 	emailImportantInformation(&sb)
 	emailFooter(&sb, brand)

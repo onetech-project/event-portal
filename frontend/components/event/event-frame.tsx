@@ -35,6 +35,20 @@ export function EventFrame({
   // clarification 2026-08-05): the rail appears from the selection page onward.
   const isDetailPage = /^\/events\/[^/]+\/?$/.test(pathname);
 
+  // Free registration (spec 022 FR-010a) is not a purchase journey at all.
+  //
+  // It lives under this layout only because it shares the `/events/[slug]`
+  // segment, and the App Router gives a nested route no way to opt out of a
+  // parent layout — so the exclusion has to happen here. Left inherited, an
+  // invited guest would be shown a progress rail whose steps include **Payment**
+  // on a surface FR-015 forbids from presenting any payment step, and a countdown
+  // for a sale they are not part of.
+  //
+  // Matched on the URL like the stage itself, so a page cannot contradict its own
+  // address. The event chrome around it is deliberately kept: the registrant is
+  // still looking at one event, and should see whose event it is.
+  const isRegistration = /^\/events\/[^/]+\/register(\/|$)/.test(pathname);
+
   // An event nobody can resolve has no journey to frame, so nothing nested is
   // rendered behind the message (spec FR-007). Doing this here rather than in
   // each page means it cannot be forgotten on one of them.
@@ -59,8 +73,8 @@ export function EventFrame({
           reads as an event starting this second (spec FR-008). The rail has no
           such dependency — it comes from the URL — so it renders immediately and
           the guest keeps their sense of progress while the event loads. */}
-      {event ? <SalesCountdown startDate={event.start_date} /> : null}
-      {isDetailPage ? null : <BookingSteps current={stage} />}
+      {event && !isRegistration ? <SalesCountdown startDate={event.start_date} /> : null}
+      {isDetailPage || isRegistration ? null : <BookingSteps current={stage} />}
       {children}
     </div>
   );

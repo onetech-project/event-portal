@@ -5,8 +5,10 @@ import {
   adminOrders,
   adminOrdersPage,
   bookAsAnotherGuest,
+  createRegistrationEvent,
   createSellableEvent,
   isoHoursFromNow,
+  request,
   updateEvent,
   updateTicketTypeWindow,
 } from "../support/api";
@@ -579,7 +581,16 @@ test.describe("Admin console pagination", () => {
         message: "the last page, not an error and not an empty table",
       })
       .toBe(2);
-    expect(await admin.visibleRowKeys()).toHaveLength(1);
+    // expect.poll, not a bare await: currentPage() above settles as soon as the
+    // PAGINATION reports page 2, but the table body re-renders a tick later. A
+    // one-shot read lands on the empty intermediate table and fails with
+    // "expected 1, received 0" — under load often enough to be a real flake, and
+    // this assertion is the one that catches it.
+    await expect
+      .poll(async () => (await admin.visibleRowKeys()).length, {
+        message: "the last page carries the single remaining row",
+      })
+      .toBe(1);
     // And the address corrects itself, so it no longer claims page 999.
     await expect.poll(() => page.url()).toContain("page=2");
   });
@@ -718,4 +729,121 @@ async function issueOneTicket(
     { what: "the ticket to be issued" },
   );
   return code;
+}
+
+/**
+ * Spec 022 T076. The operator's side of free registration.
+ *
+ * All four scenarios go through the browser rather than the API, because what is
+ * under test is what an operator can SEE and DO — a correct JSON payload behind a
+ * table that never renders it is not the requirement.
+ */
+test.describe("Free registration in the admin console", () => {
+  test("a ticket type can be made invitation-only, and the form says what that costs", async ({
+    page,
+  }) => {
+    const { event } = await createRegistrationEvent(token, { slug: "admin-invitation-field" });
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openEvent(event.id);
+
+    // FR-004: the admin table distinguishes invitation types at a glance.
+    await expect(page.getByText("Invitation only").first()).toBeVisible();
+
+    // FR-001a: the control is named for its consequence. "Visible" alone reads as
+    // a listing preference, and an admin tidying a list would be publishing a
+    // free ticket without being told.
+    await page.getByRole("button", { name: /^edit/i }).first().click();
+    await expect(page.getByText(/free of charge/i)).toBeVisible();
+    await expect(page.getByRole("checkbox").first()).toBeVisible();
+  });
+
+  // FR-007: the picker must not offer a choice the server will reject. Offering
+  // one is how an operator concludes the refusal is a bug.
+  test("an invitation-only type is absent from the package composition picker", async ({
+    page,
+  }) => {
+    const { event, purchasable } = await createRegistrationEvent(token, {
+      slug: "admin-invitation-package",
+    });
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openEvent(event.id);
+
+    await page.getByRole("button", { name: /new package|add package/i }).first().click();
+    await page.getByLabel(/ticket types/i).click();
+
+    await expect(page.getByRole("option", { name: purchasable.name })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Invitation Access" })).toHaveCount(0);
+  });
+
+  // FR-033 / US4 scenario 1, now DERIVED rather than stored (Principle IV v6.0.0).
+  // PAID no longer implies money moved, so the row has to say which kind it is —
+  // otherwise a free invitation reads as revenue on the operator's own screen.
+  test("a registration is listed as a registration, at no charge", async ({ page }) => {
+    const { event, registration } = await createRegistrationEvent(token, {
+      slug: "admin-invitation-order",
+    });
+    await registerViaApi(event.slug, registration.id, "listed@example.com");
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+    await admin.openOrders();
+
+    const row = page.getByRole("row").filter({ hasText: "PAID" }).first();
+    await expect(row).toContainText("Registration");
+    await expect(row).toContainText("Free");
+  });
+
+  // FR-053 + FR-038a together: the ONLY recovery route for undelivered
+  // registration mail. The registrant is never shown the address their ticket
+  // went to, so an operator has a name and at best a guess at the address — and
+  // then has to be able to resend from what they found.
+  test("an operator finds a registrant by partial name and resends the e-ticket", async ({
+    page,
+  }) => {
+    const { event, registration } = await createRegistrationEvent(token, {
+      slug: "admin-invitation-lookup",
+    });
+    await registerViaApi(event.slug, registration.id, "findme@example.com");
+
+    const admin = new AdminConsole(page);
+    await admin.signIn(config.admin.email, config.admin.password);
+
+    await page.goto("/admin/attendees");
+    await page.getByLabel(/find someone/i).fill("Halo");
+
+    const row = page.getByRole("row").filter({ hasText: "Halo Registrant" });
+    await expect(row).toBeVisible();
+    // Legible before the resend: a registration has no receipt to send.
+    await expect(row).toContainText("Registered");
+
+    // And the resend itself works for an order with no payment and no receipt.
+    await admin.openOrders();
+    await page.getByRole("button", { name: /resend email/i }).first().click();
+    await expect(page.getByText(/email resent/i)).toBeVisible();
+  });
+});
+
+/** Registers through the real endpoint — the same call the form makes. */
+async function registerViaApi(slug: string, ticketTypeId: string, email: string): Promise<void> {
+  const { data } = await request<{ updated_at: string }>(
+    `/ticket/terms-condition/${encodeURIComponent(slug)}`,
+  );
+  const { status } = await request(`/ticket/register/${ticketTypeId}`, {
+    method: "POST",
+    body: JSON.stringify({
+      slug,
+      name: "Halo Registrant",
+      email,
+      phone: "628125567820",
+      dob: "1996-04-12",
+      gender: "MALE",
+      agreed: true,
+      event_terms_updated_at: data.updated_at,
+    }),
+  });
+  if (status !== 201) throw new Error(`registration failed with ${status}`);
 }

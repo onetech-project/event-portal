@@ -379,6 +379,26 @@ func (s *Service) ensureComponentsInEvent(ctx context.Context, eventID uuid.UUID
 				fmt.Sprintf("Ticket type %s does not belong to this event.", c.TicketTypeID))
 		}
 	}
+
+	// Spec 022 FR-007: a registration-only type is not purchasable, so a package
+	// cannot sell it. Checked here rather than only in the admin picker, because
+	// hiding an option is not enforcement — a composition write naming one
+	// directly must be refused (the same reasoning FR-008 applies to booking).
+	//
+	// The refusal NAMES the offending type: an admin who cannot see it in the
+	// picker needs to be told which of their components is the problem.
+	for _, c := range components {
+		row, err := s.repo.GetTicketTypeByID(ctx, nil, c.TicketTypeID)
+		if err != nil {
+			return err
+		}
+		// NOT-visible is the offending state. is_visible is the negation of the
+		// is_registration_only this column replaced, so the test inverted here.
+		if !row.IsVisible {
+			return apperr.BadRequest(apperr.CodeValidation,
+				fmt.Sprintf("Ticket type %q is registration-only and cannot be part of a package.", row.Name))
+		}
+	}
 	return nil
 }
 

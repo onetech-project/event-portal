@@ -66,6 +66,12 @@ type OrderRecord struct {
 	// Subtotal is the pre-fee sum of the lines; invalid on orders that predate
 	// fees (migration 0010). TotalAmount stays the single charged amount.
 	Subtotal decimal.NullDecimal
+	// IsRegistration reports a free registration (spec 022): PAID without a
+	// payment. DERIVED by the query, not a stored column (Principle IV v6.0.0) —
+	// true when the order carries a line for a ticket type that is not
+	// guest-visible. Consequently it is not stable across time: an admin making
+	// that type purchasable again flips it for orders already delivered.
+	IsRegistration bool
 }
 
 // OrderItemRecord is the internal view of an order_items row.
@@ -747,6 +753,7 @@ func toOrderRecord(row ordersql.GetOrderByIDRow) OrderRecord {
 		PaymentExpiresAt: row.PaymentExpiresAt,
 		TermsAgreedAt:    row.TermsAgreedAt,
 		EventTermsID:     row.EventTermsID,
+		IsRegistration:   row.IsRegistration,
 	}
 }
 

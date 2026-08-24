@@ -13,7 +13,9 @@ import {
   isoDaysFromNow,
   isoHoursFromNow,
   publicOrder,
+  longTermsHtml,
   publicTicketTypes,
+  putLongTerms,
   putTerms,
   resendTicketEmail,
   updateTicketTypeWindow,
@@ -1367,4 +1369,207 @@ test.describe("Guest purchase, end to end", () => {
     expect(rendered).not.toContain(body.data.ext_ref_id);
   });
 
+});
+
+
+/**
+ * Spec 022 T053 / FR-044-FR-045. The read-through gate on the BOOKING surface.
+ *
+ * The terms are re-seeded LONG here on purpose. Every other scenario in this file
+ * uses the default one-paragraph fixture, which fits inside the dialog — and the
+ * gate treats a document shorter than its reading area as already read (FR-014d),
+ * correctly, since there is nothing to scroll. So those scenarios satisfy the gate
+ * by being shown and would pass identically against a build with the gate removed.
+ *
+ * These two are the ones that would not.
+ */
+test.describe("Agreeing to the terms", () => {
+  test("reaching the end of the document ticks the box and turns Agree up", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "booking-gate",
+      quota: 5,
+    });
+    await putLongTerms(token, event.id);
+
+    const journey = new GuestJourney(page);
+    await journey.openTicketSelection(event.slug);
+    await journey.selectQuantity(ticketType.name, 1);
+    await journey.buyTicket();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(/clause 1\./i)).toBeVisible();
+
+    // Before the end is reached, "Agree" is rendered as an aria-disabled span so
+    // it stays visible and legible while not being actionable. Asserting on the
+    // BUTTON role is what tells the two apart — a text assertion would pass in
+    // both states and prove nothing.
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toHaveCount(0);
+
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+
+    await journey.readTermsToTheEnd();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toBeVisible();
+    await expect(dialog.getByRole("checkbox")).toBeChecked();
+  });
+
+  /**
+   * Spec 022 R201 / FR-014c, FR-045 (clarified 2026-08-21).
+   *
+   * The read-through GATE is gone. A guest who does not want to read may tick
+   * the box and proceed, and Agree follows the checkbox rather than the scroll
+   * position. This is the scenario that distinguishes the two: it never scrolls,
+   * so it can only pass if the checkbox is genuinely a control again.
+   *
+   * Against the pre-2026-08-21 dialog this fails at the first click — the
+   * checkbox carried a no-op `onCheckedChange` and could not be ticked at all.
+   */
+  test("a guest can agree without reading, by ticking the box", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "booking-tick-unread",
+      quota: 5,
+    });
+    await putLongTerms(token, event.id);
+
+    const journey = new GuestJourney(page);
+    await journey.openTicketSelection(event.slug);
+    await journey.selectQuantity(ticketType.name, 1);
+    await journey.buyTicket();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    // Still at the top of a deliberately long document. Nothing has been read,
+    // and the assertion below is what proves it: clause 1 is on screen.
+    await expect(dialog.getByText(/clause 1\./i)).toBeVisible();
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toHaveCount(0);
+
+    // Tick it deliberately, without scrolling a single pixel.
+    await dialog.getByRole("checkbox").click();
+    await expect(dialog.getByRole("checkbox")).toBeChecked();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toBeVisible();
+
+    // And it actually books — the guest is carried onward to the holder forms,
+    // which is the difference between "the button appeared" and "consent counted".
+    await dialog.getByRole("button", { name: /^agree$/i }).click();
+    await page.waitForURL(/\/orders\/[^/]+$/, { timeout: 30_000 });
+  });
+
+  /**
+   * Spec 022 R213 / FR-045a.
+   *
+   * The automatic tick fires at most once per opening and must never overwrite a
+   * deliberate untick. Scrolling away from the end and back is the cheapest way
+   * to make a re-syncing implementation show itself: one that tracks the scroll
+   * position rather than latching will silently re-tick a box the guest cleared
+   * on purpose — an automatic action overriding a deliberate one, about consent.
+   */
+  test("the automatic tick does not override a deliberate untick", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "booking-tick-latch",
+      quota: 5,
+    });
+    await putLongTerms(token, event.id);
+
+    const journey = new GuestJourney(page);
+    await journey.openTicketSelection(event.slug);
+    await journey.selectQuantity(ticketType.name, 1);
+    await journey.buyTicket();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    await journey.readTermsToTheEnd();
+    await expect(dialog.getByRole("checkbox")).toBeChecked();
+
+    // The guest changes their mind.
+    await dialog.getByRole("checkbox").click();
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toHaveCount(0);
+
+    // Scroll away from the end and back. Nothing about this is the guest
+    // agreeing, so nothing about it may tick the box.
+    const region = dialog.getByRole("region", { name: /terms and conditions/i });
+    await region.evaluate((el) => el.scrollTo({ top: 0 }));
+    await region.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+
+    await expect(dialog.getByRole("checkbox")).not.toBeChecked();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toHaveCount(0);
+  });
+
+  test("a guest who reads to the end can complete the booking", async ({ page }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "booking-gate-through",
+      quota: 5,
+    });
+    await putLongTerms(token, event.id);
+
+    const journey = new GuestJourney(page);
+    await journey.openTicketSelection(event.slug);
+    await journey.selectQuantity(ticketType.name, 1);
+
+    const orderNumber = await journey.agreeToTermsAndBook();
+    expect(orderNumber).toMatch(/^ORD-/);
+  });
+});
+
+
+/**
+ * Spec 022 T053a / FR-050-FR-051. The "Terms & Conditions changed" refusal.
+ *
+ * This scenario exists because the refusal was DEAD CODE. `UpsertEventTerms` is
+ * `ON CONFLICT (event_id) DO UPDATE` on a UNIQUE `event_id`, so an admin edit
+ * overwrites the row in place and PRESERVES its id — and the check compared ids.
+ * It could never fire for the case its own doc comment described. The fix
+ * compares `updated_at`; this is what holds it fixed.
+ *
+ * Reverting the comparison back to the id makes this fail, which is how it was
+ * verified rather than assumed.
+ */
+test.describe("Terms republished while the guest is reading them", () => {
+  test("agreeing is refused and the guest must accept the new version", async ({
+    page,
+  }) => {
+    const { event, ticketType } = await createSellableEvent(token, {
+      slug: "terms-republished",
+      quota: 5,
+    });
+    await putLongTerms(token, event.id);
+
+    const journey = new GuestJourney(page);
+    await journey.openTicketSelection(event.slug);
+    await journey.selectQuantity(ticketType.name, 1);
+    await journey.buyTicket();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await journey.readTermsToTheEnd();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toBeVisible();
+
+    // The server compares the version to WHOLE-SECOND precision, so a republish
+    // inside the same second as the guest's read is not detected. Crossing the
+    // boundary is what makes this deterministic — and the wait documents a real
+    // if narrow limitation rather than papering over a flaky test.
+    await new Promise((r) => setTimeout(r, 1_200));
+
+    // The admin republishes underneath them. Different content, and — crucially —
+    // the SAME row id, which is exactly the case an id comparison cannot see.
+    await putTerms(token, event.id, longTermsHtml(70));
+
+    await dialog.getByRole("button", { name: /^agree$/i }).click();
+
+    // Refused: the guest is not carried onward to the holder forms.
+    await expect(dialog).toBeHidden();
+    await expect(page).not.toHaveURL(/\/orders\/[^/]+$/);
+
+    // And re-consenting starts from an unticked box against the CURRENT
+    // document, so Agree is not sitting there already available above text the
+    // guest has never been shown. They need not read it — but they must agree to
+    // it again, deliberately (FR-051).
+    await journey.buyTicket();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /^agree$/i })).toHaveCount(0);
+  });
 });

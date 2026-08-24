@@ -189,13 +189,13 @@ func (k Key) GenerationKey() string { return k.Scope.GenerationKey() }
 // substitution rather than a branch scattered through the domains (FR-021).
 type NoOp struct{}
 
-func (NoOp) Get(context.Context, Key) ([]byte, bool, error)   { return nil, false, nil }
-func (NoOp) Set(context.Context, Key, []byte) error           { return nil }
-func (NoOp) Invalidate(context.Context, ...Scope) error       { return nil }
-func (NoOp) FlushAll(context.Context) (int64, error)          { return 0, nil }
-func (NoOp) Ping(context.Context) error                       { return nil }
-func (NoOp) Enabled() bool                                    { return false }
-func (NoOp) Trusted() bool                                    { return true }
+func (NoOp) Get(context.Context, Key) ([]byte, bool, error) { return nil, false, nil }
+func (NoOp) Set(context.Context, Key, []byte) error         { return nil }
+func (NoOp) Invalidate(context.Context, ...Scope) error     { return nil }
+func (NoOp) FlushAll(context.Context) (int64, error)        { return 0, nil }
+func (NoOp) Ping(context.Context) error                     { return nil }
+func (NoOp) Enabled() bool                                  { return false }
+func (NoOp) Trusted() bool                                  { return true }
 
 // compile-time check
 var _ Lists = NoOp{}

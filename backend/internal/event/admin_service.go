@@ -298,6 +298,8 @@ func (s *Service) CreateTicketType(ctx context.Context, req TicketTypeRequest) (
 		SalesEnd:    req.SalesEnd,
 		EventStart:  req.EventStart,
 		EventEnd:    req.EventEnd,
+
+		IsVisible: req.Visible(),
 	})
 	if err != nil {
 		return TicketTypeAdminView{}, err
@@ -340,6 +342,32 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 		return TicketTypeAdminView{}, err
 	}
 
+	// Spec 022 FR-005: a ticket type inside a bundle cannot BECOME
+	// registration-only. A package sells its constituents, so flagging one mid-
+	// composition would leave a purchasable bundle containing a type that is not
+	// purchasable — the package would still be buyable while its component was
+	// refused at expansion, which is a checkout that fails after the guest has
+	// committed. Only the transition into the flag is guarded; a type that is
+	// already registration-only was never addable to a package in the first place.
+	//
+	// Reads as "the request makes it invisible AND it is currently visible" —
+	// the transition INTO registration-only. Both halves inverted when the
+	// column became is_visible; a half-inverted version of this line would guard
+	// the transition OUT of registration-only, which is always safe and would
+	// leave FR-005 unenforced.
+	if !req.Visible() && existing.IsVisible {
+		packages, err := s.repo.ListPackagesByTicketTypeID(ctx, id)
+		if err != nil {
+			return TicketTypeAdminView{}, err
+		}
+		if len(packages) > 0 {
+			return TicketTypeAdminView{}, apperr.Conflict(apperr.CodePackageCompositionLocked,
+				fmt.Sprintf(
+					"This ticket type cannot become registration-only while it is part of package %q. Remove it from the package first.",
+					packages[0].Name))
+		}
+	}
+
 	updated, err := s.repo.UpdateTicketType(ctx, id, AdminTicketTypeParams{
 		Name:        req.Name,
 		Description: normalizeOptionalText(req.Description),
@@ -349,6 +377,8 @@ func (s *Service) UpdateTicketType(ctx context.Context, id uuid.UUID, req Ticket
 		SalesEnd:    req.SalesEnd,
 		EventStart:  req.EventStart,
 		EventEnd:    req.EventEnd,
+
+		IsVisible: req.Visible(),
 	})
 	if errors.Is(err, ErrNotFound) {
 		return TicketTypeAdminView{}, ticketTypeNotFound()
@@ -473,6 +503,8 @@ func toTicketTypeView(row TicketTypeRow, sold int) TicketTypeAdminView {
 		SalesEnd:    row.SalesEnd,
 		EventStart:  row.EventStart,
 		EventEnd:    row.EventEnd,
+		// Admin sees it; the guest list never does (FR-004 / FR-009).
+		IsVisible: row.IsVisible,
 	}
 }
 

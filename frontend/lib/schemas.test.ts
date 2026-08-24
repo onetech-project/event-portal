@@ -85,6 +85,9 @@ describe("ticketTypeFormSchema", () => {
       salesEnd: "2026-08-31T00:00",
       eventStart: "2026-09-01T09:00",
       eventEnd: "2026-09-01T23:00",
+      // Spec 022: required, and TRUE is the ordinary ticket type. False would
+      // make this fixture an invitation-only type in every case below.
+      isVisible: true,
     };
   }
 
@@ -141,6 +144,8 @@ describe("ticketTypeFormSchema event window", () => {
       salesEnd: "2026-08-31T00:00",
       eventStart: "2026-09-02T09:00",
       eventEnd: "2026-09-02T23:00",
+      // Spec 022: required, and TRUE is the ordinary ticket type.
+      isVisible: true,
     };
   }
 

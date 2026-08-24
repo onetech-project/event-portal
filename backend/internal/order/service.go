@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +51,15 @@ type Service struct {
 	// nil means the checkout response carries no external reference, which is the
 	// same degradation as an order that never opened a session.
 	payments PaymentRecords
+	// issuer and deliverer are the free-registration fulfilment seams (spec 022).
+	// Nil until the composition root installs them; a registration recorded
+	// without them logs loudly rather than silently issuing nothing.
+	issuer    TicketIssuer
+	deliverer TicketDeliverer
+	// fulfillment tracks in-flight post-commit registration work, so graceful
+	// shutdown drains a registration accepted moments before SIGTERM instead of
+	// dropping its ticket on the floor.
+	fulfillment sync.WaitGroup
 }
 
 // NewService builds the order service. Timers default to the contract values;
@@ -317,7 +327,15 @@ func (s *Service) RecordAgreement(ctx context.Context, orderNumber string, req A
 	if err != nil {
 		return err
 	}
-	if current.ID != req.EventTermsID {
+	// The id names WHICH document; updated_at names WHICH VERSION. Only the
+	// second can detect an edit — see AgreementRequest.EventTermsUpdatedAt.
+	//
+	// Truncated to the second because the value round-trips through JSON and
+	// back, and sub-second drift is not a document change.
+	staleDocument := current.ID != req.EventTermsID
+	staleVersion := req.EventTermsUpdatedAt != nil &&
+		!current.UpdatedAt.Truncate(time.Second).Equal(req.EventTermsUpdatedAt.UTC().Truncate(time.Second))
+	if staleDocument || staleVersion {
 		return apperr.Conflict(apperr.CodeTermsChanged,
 			"The Terms & Conditions changed while you were reading them. Please review the current version.")
 	}

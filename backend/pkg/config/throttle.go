@@ -87,6 +87,7 @@ type ThrottleConfig struct {
 	Availability ThrottlePolicy
 	TicketLookup ThrottlePolicy
 	Checkout     ThrottlePolicy
+	Register     ThrottlePolicy
 	Resend       CooldownPolicy
 	StatusStream StreamPolicy
 }
@@ -105,6 +106,7 @@ func (t ThrottleConfig) ratePolicies() []struct {
 		{"RATE_LIMIT_AVAILABILITY", t.Availability},
 		{"RATE_LIMIT_TICKET_LOOKUP", t.TicketLookup},
 		{"RATE_LIMIT_CHECKOUT", t.Checkout},
+		{"RATE_LIMIT_REGISTER", t.Register},
 	}
 }
 
@@ -137,6 +139,30 @@ func (l *loader) throttle() ThrottleConfig {
 			Enabled: l.boolean("RATE_LIMIT_CHECKOUT_ENABLED", true),
 			Rate:    l.float("RATE_LIMIT_CHECKOUT_RATE", 0.2),
 			Burst:   l.integer("RATE_LIMIT_CHECKOUT_BURST", 3),
+		},
+		// Free registration (spec 022). Checkout's sustained RATE, because the
+		// surface is at least as expensive — it deducts quota AND sends real mail,
+		// and it is unauthenticated — but a much larger BURST, because unlike
+		// checkout it is legitimately used many times in a row.
+		//
+		// FR-023 removed the one-address-per-event rule, so submitting this form
+		// repeatedly from one device is now the intended way to register a group.
+		// At checkout's burst of 3 the fourth guest is told "Too many attempts",
+		// which is the feature refusing its own use case. 10 clears a realistic
+		// group in one sitting.
+		//
+		// The sustained rate deliberately does NOT move with it. Burst governs how
+		// large a legitimate group may be; rate governs bulk abuse through the
+		// unlisted link, and with no per-address rule left this throttle is the
+		// only thing bounding that at all (FR-034). Ceiling stays 12/min.
+		//
+		// 10 burst / 0.2 per second is a 50s full refill, still comfortably under
+		// RATE_LIMIT_IDLE_TTL's 3-minute default — that relationship is validated
+		// below and startup REFUSES if it inverts (FR-034a).
+		Register: ThrottlePolicy{
+			Enabled: l.boolean("RATE_LIMIT_REGISTER_ENABLED", true),
+			Rate:    l.float("RATE_LIMIT_REGISTER_RATE", 0.2),
+			Burst:   l.integer("RATE_LIMIT_REGISTER_BURST", 10),
 		},
 		Resend: CooldownPolicy{
 			Enabled: l.boolean("RATE_LIMIT_RESEND_ENABLED", true),

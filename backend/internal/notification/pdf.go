@@ -193,8 +193,8 @@ const (
 // They are offsets from bandHeight now, so the band and the page move together.
 // A band moved without the accent rule draws a 72mm rule straight through it.
 const (
-	headingY = bandHeight + 8   // "Ticket N of M"
-	accentY  = bandHeight + 19  // the accent rule beside the QR panel
+	headingY = bandHeight + 8  // "Ticket N of M"
+	accentY  = bandHeight + 19 // the accent rule beside the QR panel
 	accentH  = 72.0
 	qrX      = 22.0
 	qrY      = bandHeight + 25
@@ -282,7 +282,7 @@ func renderTicketPage(pdf *gofpdf.Fpdf, order OrderDelivery, ticket TicketDetail
 	// VALID FOR — this TICKET TYPE's admission window, never the parent event's
 	// (FR-020, constitution Critical Data Flow Rules).
 	setColor(pdf, pdfGray)
-	pdf.SetFont("Helvetica", "", 7.5)
+	pdf.SetFont("Helvetica", "B", 7.5)
 	pdf.SetXY(marginLeft, dividerY+8)
 	pdf.CellFormat(60, 5, "VALID FOR", "", 0, "L", false, 0, "")
 	setColor(pdf, pdfInk)

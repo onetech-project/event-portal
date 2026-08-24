@@ -105,7 +105,7 @@ func (f paymentCacheFixture) ticketListCached(t *testing.T) bool {
 
 func (f paymentCacheFixture) ordersListCached(t *testing.T) bool {
 	t.Helper()
-	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}))
+	_, ok, err := f.cache.Get(context.Background(), cache.OrdersAdminKey(nil, nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}))
 	require.NoError(t, err)
 	return ok
 }
@@ -150,9 +150,9 @@ func TestSettlementInvalidatesOrdersButNotTheTicketList(t *testing.T) {
 	require.True(t, f.ticketListCached(t))
 
 	// Warm the admin order list too.
-	_, _, err = f.cache.Get(ctx, cache.OrdersAdminKey(nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}))
+	_, _, err = f.cache.Get(ctx, cache.OrdersAdminKey(nil, nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}))
 	require.NoError(t, err)
-	require.NoError(t, f.cache.Set(ctx, cache.OrdersAdminKey(nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}), []byte(`[]`)))
+	require.NoError(t, f.cache.Set(ctx, cache.OrdersAdminKey(nil, nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}), []byte(`[]`)))
 	require.True(t, f.ordersListCached(t))
 
 	f.settle(t, ctx)
@@ -174,7 +174,7 @@ func TestReplayedNotificationDoesNotInvalidate(t *testing.T) {
 	// Warm both lists after the first, legitimate transition.
 	_, err := f.events.TicketTypesForEventSlug(ctx, f.slug)
 	require.NoError(t, err)
-	require.NoError(t, f.cache.Set(ctx, cache.OrdersAdminKey(nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}), []byte(`[]`)))
+	require.NoError(t, f.cache.Set(ctx, cache.OrdersAdminKey(nil, nil, nil, cache.Paging{Page: 1, Size: httpx.DefaultPageSize}), []byte(`[]`)))
 	require.True(t, f.ticketListCached(t))
 	require.True(t, f.ordersListCached(t))
 

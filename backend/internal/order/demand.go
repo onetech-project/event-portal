@@ -54,6 +54,25 @@ func expandTicket(ctx context.Context, events EventProvider, tx pgx.Tx, id uuid.
 		return ExpandedItem{}, err
 	}
 
+	// Spec 022 FR-008. THIS is the seam, and putting the refusal anywhere else
+	// leaves a hole. Booking, checkout, the advisory availability check and
+	// package expansion all resolve a ticket type through
+	// TicketTypeForCheckout, so one refusal here covers four callers.
+	//
+	// Refusing only inside Book would leave POST /ticket/availability answering
+	// "buyable" for a registration-only type — and availability runs
+	// deliberately IN FRONT of the Terms & Conditions gate so a guest never
+	// reads a document for a purchase that cannot happen (spec 013). A refusal
+	// arriving one step later than that is the regression spec 013 exists to
+	// prevent.
+	// !IsVisible == registration-only. This is the seam refusal; if it inverts,
+	// every ordinary ticket type becomes unbuyable and every invitation type
+	// becomes buyable, so it is pinned by tests on both sides.
+	if !info.IsVisible {
+		return ExpandedItem{}, apperr.BadRequest(apperr.CodeTicketTypeNotOnSale,
+			fmt.Sprintf("Ticket type %q cannot be purchased.", info.Name))
+	}
+
 	if now.Before(info.SalesStart) || now.After(info.SalesEnd) {
 		return ExpandedItem{}, apperr.BadRequest(apperr.CodeTicketTypeNotOnSale,
 			fmt.Sprintf("Ticket type %q is not currently on sale.", info.Name))

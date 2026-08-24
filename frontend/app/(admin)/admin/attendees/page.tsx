@@ -4,6 +4,7 @@ import { useEffect } from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { EmptyState, Loading, PageHeading, StatusAlert } from "@/components/ui/feedback";
 import {
   Select,
@@ -31,13 +32,19 @@ export default function AdminAttendeesPage() {
   // reopens this exact view rather than page N of some other result set.
   const list = useListParams();
   const eventId = list.filters.event_id ?? ALL;
+  const search = list.filters.search ?? "";
 
   const { data: events } = useAdminEventOptions();
   const {
     data: attendees,
     isPending,
     error,
-  } = useAdminAttendees(undefined, eventId === ALL ? undefined : eventId, list.params);
+  } = useAdminAttendees(
+    undefined,
+    eventId === ALL ? undefined : eventId,
+    search || undefined,
+    list.params,
+  );
 
   // Adopt the page the server actually served, so an out-of-range bookmark
   // corrects itself instead of displaying a position the rows did not come from.
@@ -51,7 +58,7 @@ export default function AdminAttendeesPage() {
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
       <PageHeading
         title="Attendees"
-        subtitle="Everyone a ticket has been purchased for."
+        subtitle="Everyone holding a ticket — bought or registered for."
       />
 
       <Card className="mb-6">
@@ -76,6 +83,28 @@ export default function AdminAttendeesPage() {
               </SelectContent>
             </Select>
           </Field>
+
+          {/*
+            Spec 022 FR-053. This is a RECOVERY route, not a convenience. A free
+            registrant is never shown the address their e-ticket went to, so when
+            one calls to say nothing arrived, an operator has a name and at best a
+            guess at the address — a lookup demanding the exact address would
+            leave them nothing to do.
+          */}
+          <Field
+            label="Find someone"
+            hint="Part of a name, an email address, or an order number. Use this when a guest says their ticket never arrived."
+          >
+            <Input
+              type="search"
+              placeholder="e.g. Halo, or example.com"
+              defaultValue={search}
+              onChange={(e) => {
+                const next = e.currentTarget.value.trim();
+                list.setFilter("search", next === "" ? undefined : next);
+              }}
+            />
+          </Field>
         </CardContent>
       </Card>
 
@@ -92,6 +121,7 @@ export default function AdminAttendeesPage() {
                 <TableHead>Email</TableHead>
                 <TableHead>Ticket type</TableHead>
                 <TableHead>Order</TableHead>
+                <TableHead>Origin</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -102,6 +132,10 @@ export default function AdminAttendeesPage() {
                   <TableCell>{attendee.ticket_type_name}</TableCell>
                   <TableCell className="font-mono text-xs">
                     {attendee.order_number}
+                  </TableCell>
+                  {/* Legible before a resend: a registration has no receipt. */}
+                  <TableCell className="text-xs">
+                    {attendee.is_registration ? "Registered" : "Purchased"}
                   </TableCell>
                 </TableRow>
               ))}

@@ -80,9 +80,15 @@ const (
 	CodeTermsNotAccepted      = "TERMS_NOT_ACCEPTED"
 	CodeTermsNotRecorded      = "TERMS_NOT_RECORDED"
 	CodePaymentAlreadyStarted = "PAYMENT_ALREADY_STARTED"
-	CodePaymentNotStarted     = "PAYMENT_NOT_STARTED"
-	CodeOrderExpired          = "ORDER_EXPIRED"
-	CodeUnknownIcon           = "UNKNOWN_ICON"
+
+	// 409007 is RETIRED, not reassigned. It belonged to EMAIL_ALREADY_REGISTERED,
+	// the spec 022 duplicate-address refusal, which FR-023 removed — an address may
+	// now register as many times as remaining quota allows. The number is left
+	// unused deliberately: a client or e2e fixture still keyed on it should get no
+	// match rather than silently start matching some unrelated conflict.
+	CodePaymentNotStarted = "PAYMENT_NOT_STARTED"
+	CodeOrderExpired      = "ORDER_EXPIRED"
+	CodeUnknownIcon       = "UNKNOWN_ICON"
 
 	// Transport-level fallbacks used by the shared HTTP error handler.
 	CodeNotFound = "NOT_FOUND"

@@ -152,9 +152,12 @@ export class GuestJourney {
     const dialog = this.page.getByRole("dialog");
     await expect(dialog).toBeVisible();
 
-    // The checkbox is unlabelled-by-text in the DOM sense; it sits next to the
-    // "I agree to" copy inside the dialog.
-    await dialog.getByRole("checkbox").click();
+    // Spec 022 FR-045: reaching the end of the document ticks the agreement box
+    // on the guest's behalf, which is what turns Agree up. This helper takes the
+    // reading route deliberately; the guest may equally tick the box themselves
+    // without scrolling (clarified 2026-08-21), which guest-purchase.spec.ts
+    // asserts separately — the two must not be wired to one condition.
+    await this.readTermsToTheEnd();
     await dialog.getByRole("button", { name: /^agree$/i }).click();
 
     // Booking + agreement are two calls; the dialog closes and the app lands on
@@ -183,8 +186,39 @@ export class GuestJourney {
     const dialog = this.page.getByRole("dialog");
     await expect(dialog).toBeVisible();
 
-    await dialog.getByRole("checkbox").click();
+    await this.readTermsToTheEnd();
     await dialog.getByRole("button", { name: /^agree$/i }).click();
+  }
+
+  /**
+   * Scrolls the open Terms & Conditions to the bottom and waits for the gate to
+   * open (spec 022 FR-014b).
+   *
+   * Scrolls the region rather than pressing End, because the two are different
+   * assertions: this one is "the guest read it", and pressing keys is what the
+   * keyboard-only scenario tests deliberately and separately.
+   *
+   * Harmless on a SHORT document — the end counts as reached the moment it is
+   * shown (FR-014d), so the box is already ticked, this scrolls nothing and
+   * returns. That is what lets every existing purchase scenario keep its short
+   * fixture unchanged. It is also exactly why a scenario that means to test the
+   * automatic tick must seed `longTermsHtml()`: against the short fixture this
+   * helper would pass even if the automatic tick were deleted.
+   */
+  async readTermsToTheEnd(): Promise<void> {
+    const dialog = this.page.getByRole("dialog");
+    const region = dialog.getByRole("region", { name: /terms and conditions/i });
+    await expect(region).toBeVisible();
+
+    // Scroll, then let the observer fire. Repeated because a document whose
+    // images or fonts settle late can grow after the first scroll, leaving the
+    // sentinel just out of view.
+    await expect(async () => {
+      await region.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+      await expect(dialog.getByRole("button", { name: /^agree$/i })).toBeVisible({
+        timeout: 1_000,
+      });
+    }).toPass({ timeout: 15_000 });
   }
 
   orderNumberFromUrl(): string {

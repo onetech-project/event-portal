@@ -170,3 +170,60 @@ describe("EventFrame — resolved event", () => {
     expect(screen.getByText("Booking")).toBeTruthy();
   });
 });
+
+// Spec 022 FR-010a. The registration route lives under this layout only because
+// it shares the `/events/[slug]` segment — the App Router gives a nested route no
+// way to opt out of a parent layout, so the exclusion happens inside the frame.
+//
+// Left inherited, an invited guest would be shown a progress rail whose steps
+// include "Payment" on a surface FR-015 forbids from presenting any payment step,
+// and a countdown for a sale they are not part of. Both are silent: the page
+// renders, nothing errors, and only a reader notices the free invitation form is
+// advertising a checkout.
+describe("EventFrame — the free registration route is not a purchase journey", () => {
+  it("renders neither the countdown nor the booking rail", async () => {
+    pathname = `/events/${SLUG}/register/33333333-3333-3333-3333-333333333333`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(envelope(EVENT));
+
+    renderFrame();
+
+    await waitFor(() => {
+      expect(screen.getByText("nested screen")).toBeTruthy();
+    });
+
+    expect(screen.queryByText("Payment")).toBeNull();
+    expect(screen.queryByText("Booking")).toBeNull();
+    expect(screen.queryByText(/event starts in/i)).toBeNull();
+    expect(screen.queryByText("Days")).toBeNull();
+  });
+
+  it("excludes the confirmation page too, not only the form", async () => {
+    pathname = `/events/${SLUG}/register/33333333-3333-3333-3333-333333333333/success`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(envelope(EVENT));
+
+    renderFrame();
+
+    await waitFor(() => {
+      expect(screen.getByText("nested screen")).toBeTruthy();
+    });
+
+    expect(screen.queryByText("Payment")).toBeNull();
+    expect(screen.queryByText("Booking")).toBeNull();
+  });
+
+  // The exclusion is keyed on the segment, so it must not swallow the purchase
+  // journey it sits beside. Asserting only the negative would pass against a
+  // predicate that matched everything.
+  it("still frames an ordinary purchase screen", async () => {
+    pathname = `/events/${SLUG}/orders/ORD-20260801-A1B2C3D4`;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(envelope(EVENT));
+
+    renderFrame();
+
+    await waitFor(() => {
+      expect(screen.getByText("nested screen")).toBeTruthy();
+    });
+
+    expect(screen.getByText("Registration")).toBeTruthy();
+  });
+});

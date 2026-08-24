@@ -1,10 +1,10 @@
 package notification_test
 
 import (
-	"strings"
-	"regexp"
 	"bytes"
 	"image/png"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 

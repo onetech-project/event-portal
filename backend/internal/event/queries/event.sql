@@ -12,13 +12,26 @@ FROM events
 WHERE slug = $1 AND status = 'PUBLISHED';
 
 -- name: ListTicketTypesByEventID :many
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
+-- The GUEST list. Registration-only types are excluded here (spec 022 FR-006):
+-- they are obtained through /events/:slug/register/:id, never bought, so they must
+-- not appear on any purchase surface. Filtered in SQL rather than in the service
+-- so there is no per-caller filter to forget — and note the result of this query
+-- is what gets cached, so the exclusion is baked into the cached value.
+--
+-- `AND is_visible` is the whole containment. It reads as the POSITIVE now, where
+-- the earlier draft read `AND NOT is_registration_only`; is_visible is that
+-- column's negation, so dropping the NOT was the change, not an oversight.
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible
 FROM ticket_types
-WHERE event_id = $1
+WHERE event_id = $1 AND is_visible
 ORDER BY price ASC, name ASC;
 
 -- name: GetTicketTypeByID :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end
+-- Backs GetTicketTypeForCheckout — the ONE seam booking, checkout, availability and
+-- package expansion all resolve a ticket type through. It must NOT filter: the
+-- caller needs to SEE is_visible in order to refuse it (spec 022 FR-008).
+-- Filtering here would turn an explicit refusal into a "does not exist".
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible
 FROM ticket_types
 WHERE id = $1;
 
@@ -132,29 +145,40 @@ DELETE FROM events WHERE id = $1;
 -- Admin ticket-type CRUD ---------------------------------------------------
 
 -- name: ListTicketTypesAdmin :many
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
+-- Admin sees EVERYTHING, including invisible (registration-only) types
+-- (spec 022 FR-009). Containment applies to the purchase path, not to
+-- administration, so there is deliberately no is_visible filter here.
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible, created_at, updated_at
 FROM ticket_types
 WHERE event_id = $1
 ORDER BY created_at ASC;
 
 -- name: GetTicketTypeAdmin :one
-SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at
+SELECT id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible, created_at, updated_at
 FROM ticket_types
 WHERE id = $1;
 
 -- name: CreateTicketType :one
-INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at;
+INSERT INTO ticket_types (event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible, created_at, updated_at;
 
 -- name: UpdateTicketType :one
 -- `quota` is set ABSOLUTELY to the submitted remaining quota; past sales are never
 -- re-subtracted here (contracts/api.md, Admin Management).
+--
+-- This is a FULL REPLACE, and is_visible is replaced with everything else. A
+-- caller that omits it SETS it — Go's zero value for the DTO field is false, but
+-- an absent JSON key leaves whatever the decoder started with, and either way the
+-- submitted value wins over the stored one. Getting this wrong republishes an
+-- invitation ticket onto the guest purchase list, usually at price 0 (spec 022
+-- FR-004). The admin DTO therefore carries the field on every write, and a
+-- round-trip test pins that editing an unrelated field preserves it.
 UPDATE ticket_types
 SET name = $2, description = $3, price = $4, quota = $5, sales_start = $6, sales_end = $7,
-    event_start = $8, event_end = $9, updated_at = now()
+    event_start = $8, event_end = $9, is_visible = $10, updated_at = now()
 WHERE id = $1
-RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, created_at, updated_at;
+RETURNING id, event_id, name, description, price, quota, sales_start, sales_end, event_start, event_end, is_visible, created_at, updated_at;
 
 -- name: DeleteTicketType :execrows
 DELETE FROM ticket_types WHERE id = $1;

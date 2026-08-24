@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"strings"
 
@@ -123,12 +125,14 @@ func PackagesByEventKey(eventID uuid.UUID) Key {
 // of them with one INCR — which is the whole reason the generation counter
 // exists, and what lets paging multiply the entry count without multiplying the
 // invalidation work.
-func OrdersAdminKey(status *string, eventID *uuid.UUID, pg Paging) Key {
+func OrdersAdminKey(status *string, eventID *uuid.UUID, search *string, pg Paging) Key {
 	var b strings.Builder
 	b.WriteString("st=")
 	b.WriteString(optString(status))
 	b.WriteString(":ev=")
 	b.WriteString(optUUID(eventID))
+	b.WriteString(":q=")
+	b.WriteString(optSearch(search))
 	b.WriteString(":")
 	b.WriteString(pg.fingerprint())
 	return Key{Family: FamilyOrdersAdmin, Scope: Orders(), Fingerprint: b.String()}
@@ -136,12 +140,14 @@ func OrdersAdminKey(status *string, eventID *uuid.UUID, pg Paging) Key {
 
 // AttendeesAdminKey is one page of one filter combination of the admin attendee
 // list.
-func AttendeesAdminKey(orderID, eventID *uuid.UUID, pg Paging) Key {
+func AttendeesAdminKey(orderID, eventID *uuid.UUID, search *string, pg Paging) Key {
 	var b strings.Builder
 	b.WriteString("or=")
 	b.WriteString(optUUID(orderID))
 	b.WriteString(":ev=")
 	b.WriteString(optUUID(eventID))
+	b.WriteString(":q=")
+	b.WriteString(optSearch(search))
 	b.WriteString(":")
 	b.WriteString(pg.fingerprint())
 	return Key{Family: FamilyAttendeesAdmin, Scope: Orders(), Fingerprint: b.String()}
@@ -154,6 +160,27 @@ func optString(v *string) string {
 		return "_"
 	}
 	return *v
+}
+
+// optSearch renders an operator's free-text search term (spec 022 FR-053).
+//
+// HASHED rather than interpolated, unlike optString beside it, and the difference
+// is not stylistic. optString's contract rests on statuses being a closed
+// uppercase enum: no status can collide with the "_" absence marker or contain
+// the ":" that separates key components. A search term is arbitrary text an
+// operator typed. Interpolating it would let "a:ev=..." forge a different
+// filter's key and serve one search's results to another, and would let a pasted
+// paragraph produce an unbounded Redis key.
+//
+// Truncated to 128 bits, which is far beyond what an accidental collision needs
+// and keeps the key short. An absent or empty term stays "_", so the unfiltered
+// list keeps a stable, readable key.
+func optSearch(v *string) string {
+	if v == nil || *v == "" {
+		return "_"
+	}
+	sum := sha256.Sum256([]byte(*v))
+	return hex.EncodeToString(sum[:16])
 }
 
 // optUUID renders an absent id as "_", distinct from any UUID rendering.

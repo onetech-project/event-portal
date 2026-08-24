@@ -14,9 +14,17 @@ import (
 
 // --- mock EventProvider for expandItem tests --------------------------------
 
+// NOTE for anyone adding a fixture here: TicketTypeInfo.IsVisible must be set
+// EXPLICITLY on every ordinary ticket type. The database column defaults to TRUE,
+// but Go's zero value is false, and under spec 022's polarity false means
+// registration-only — so a fixture that omits it is refused by the expandTicket
+// seam with "cannot be purchased" rather than behaving like a normal ticket.
 type mockEventProvider struct {
 	tickets  map[uuid.UUID]TicketTypeInfo
 	packages map[uuid.UUID]PackageInfo
+	// registrationTargets is keyed "slug/ticketTypeID" (spec 022). Left nil by
+	// the purchase-path tests, which never reach RegistrationTargetBySlug.
+	registrationTargets map[string]RegistrationTarget
 }
 
 func (m *mockEventProvider) TicketTypeForCheckout(_ context.Context, _ pgx.Tx, id uuid.UUID) (TicketTypeInfo, error) {
@@ -35,7 +43,17 @@ func (m *mockEventProvider) RestoreQuota(_ context.Context, _ pgx.Tx, _ uuid.UUI
 }
 
 func (m *mockEventProvider) CurrentTerms(_ context.Context, eventID uuid.UUID) (EventTermsInfo, error) {
-	return EventTermsInfo{ID: uuid.New(), EventID: eventID}, nil
+	return EventTermsInfo{ID: uuid.New(), EventID: eventID, UpdatedAt: time.Now()}, nil
+}
+
+// registrationTargets, when populated, backs RegistrationTargetBySlug. Empty is
+// the honest default for the expansion tests here: they exercise the PURCHASE
+// path, which never reaches this method.
+func (m *mockEventProvider) RegistrationTargetBySlug(_ context.Context, slug string, id uuid.UUID) (RegistrationTarget, error) {
+	if t, ok := m.registrationTargets[slug+"/"+id.String()]; ok {
+		return t, nil
+	}
+	return RegistrationTarget{}, ErrRegistrationTargetMissing
 }
 
 func (m *mockEventProvider) PackageForCheckout(_ context.Context, _ pgx.Tx, id uuid.UUID) (PackageInfo, error) {
@@ -55,9 +73,9 @@ func TestExpandAndAggregateMixedCart(t *testing.T) {
 
 	events := &mockEventProvider{
 		tickets: map[uuid.UUID]TicketTypeInfo{
-			day1: {ID: day1, Name: "Day 1", Price: decimal.NewFromInt(30000),
+			day1: {ID: day1, Name: "Day 1", Price: decimal.NewFromInt(30000), IsVisible: true,
 				SalesStart: now.Add(-time.Hour), SalesEnd: now.Add(time.Hour)},
-			day2: {ID: day2, Name: "Day 2", Price: decimal.NewFromInt(20000),
+			day2: {ID: day2, Name: "Day 2", Price: decimal.NewFromInt(20000), IsVisible: true,
 				SalesStart: now.Add(-time.Hour), SalesEnd: now.Add(time.Hour)},
 		},
 		packages: map[uuid.UUID]PackageInfo{
@@ -131,9 +149,9 @@ func TestExpandPackageQuantityPerUnitMultiplier(t *testing.T) {
 
 	events := &mockEventProvider{
 		tickets: map[uuid.UUID]TicketTypeInfo{
-			ttA: {ID: ttA, Name: "Ticket A", Price: decimal.NewFromInt(10000),
+			ttA: {ID: ttA, Name: "Ticket A", Price: decimal.NewFromInt(10000), IsVisible: true,
 				SalesStart: now.Add(-time.Hour), SalesEnd: now.Add(time.Hour)},
-			ttB: {ID: ttB, Name: "Ticket B", Price: decimal.NewFromInt(10000),
+			ttB: {ID: ttB, Name: "Ticket B", Price: decimal.NewFromInt(10000), IsVisible: true,
 				SalesStart: now.Add(-time.Hour), SalesEnd: now.Add(time.Hour)},
 		},
 		packages: map[uuid.UUID]PackageInfo{

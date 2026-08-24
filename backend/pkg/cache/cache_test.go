@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -50,14 +52,26 @@ func TestKeyGrammar(t *testing.T) {
 		},
 		{
 			name:       "filtered admin list renders its fingerprint",
-			key:        OrdersAdminKey(&status, &eventID, firstPage),
-			wantPrefix: "list:orders_admin:st=PAID:ev=" + eventID.String() + ":p=1:n=20:g",
+			key:        OrdersAdminKey(&status, &eventID, nil, firstPage),
+			wantPrefix: "list:orders_admin:st=PAID:ev=" + eventID.String() + ":q=_:p=1:n=20:g",
 			wantGenKey: "gen:orders",
 		},
 		{
 			name:       "absent filters render as _, never as empty",
-			key:        OrdersAdminKey(nil, nil, firstPage),
-			wantPrefix: "list:orders_admin:st=_:ev=_:p=1:n=20:g",
+			key:        OrdersAdminKey(nil, nil, nil, firstPage),
+			wantPrefix: "list:orders_admin:st=_:ev=_:q=_:p=1:n=20:g",
+			wantGenKey: "gen:orders",
+		},
+		{
+			// Spec 022 FR-053. The search term is HASHED into the key rather than
+			// interpolated, because unlike a status it is arbitrary text an
+			// operator typed: interpolating it would let a term containing ":"
+			// forge another filter's key, and a pasted paragraph would produce an
+			// unbounded Redis key. The digest is a fixed 32 hex characters
+			// whatever the term.
+			name:       "a search term is hashed, not interpolated",
+			key:        OrdersAdminKey(nil, nil, ptr("halo@example.com"), firstPage),
+			wantPrefix: "list:orders_admin:st=_:ev=_:q=" + searchDigest("halo@example.com") + ":p=1:n=20:g",
 			wantGenKey: "gen:orders",
 		},
 	}
@@ -80,16 +94,16 @@ func TestFingerprintsAreInjective(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, k := range []Key{
-		OrdersAdminKey(nil, nil, firstPage),
-		OrdersAdminKey(&paid, nil, firstPage),
-		OrdersAdminKey(&pending, nil, firstPage),
-		OrdersAdminKey(nil, &a, firstPage),
-		OrdersAdminKey(&paid, &a, firstPage),
-		OrdersAdminKey(&paid, &b, firstPage),
-		AttendeesAdminKey(nil, nil, firstPage),
-		AttendeesAdminKey(&a, nil, firstPage),
-		AttendeesAdminKey(nil, &a, firstPage),
-		AttendeesAdminKey(&a, &b, firstPage),
+		OrdersAdminKey(nil, nil, nil, firstPage),
+		OrdersAdminKey(&paid, nil, nil, firstPage),
+		OrdersAdminKey(&pending, nil, nil, firstPage),
+		OrdersAdminKey(nil, &a, nil, firstPage),
+		OrdersAdminKey(&paid, &a, nil, firstPage),
+		OrdersAdminKey(&paid, &b, nil, firstPage),
+		AttendeesAdminKey(nil, nil, nil, firstPage),
+		AttendeesAdminKey(&a, nil, nil, firstPage),
+		AttendeesAdminKey(nil, &a, nil, firstPage),
+		AttendeesAdminKey(&a, &b, nil, firstPage),
 	} {
 		p := k.EntryPrefix()
 		require.False(t, seen[p], "collision on %s", p)
@@ -104,8 +118,8 @@ func TestFingerprintsAreStable(t *testing.T) {
 	status := "PAID"
 	for i := 0; i < 50; i++ {
 		require.Equal(t,
-			OrdersAdminKey(&status, &id, firstPage).EntryPrefix(),
-			OrdersAdminKey(&status, &id, firstPage).EntryPrefix())
+			OrdersAdminKey(&status, &id, nil, firstPage).EntryPrefix(),
+			OrdersAdminKey(&status, &id, nil, firstPage).EntryPrefix())
 	}
 }
 
@@ -185,11 +199,11 @@ func TestOneBumpInvalidatesEveryFilterVariant(t *testing.T) {
 	id := uuid.New()
 	paid := "PAID"
 	variants := []Key{
-		OrdersAdminKey(nil, nil, firstPage),
-		OrdersAdminKey(&paid, nil, firstPage),
-		OrdersAdminKey(nil, &id, firstPage),
-		OrdersAdminKey(&paid, &id, firstPage),
-		AttendeesAdminKey(nil, &id, firstPage),
+		OrdersAdminKey(nil, nil, nil, firstPage),
+		OrdersAdminKey(&paid, nil, nil, firstPage),
+		OrdersAdminKey(nil, &id, nil, firstPage),
+		OrdersAdminKey(&paid, &id, nil, firstPage),
+		AttendeesAdminKey(nil, &id, nil, firstPage),
 	}
 	for _, k := range variants {
 		require.NoError(t, c.Set(ctx, k, []byte(`["warm"]`)))
@@ -252,4 +266,34 @@ func TestFlushAllClearsEntriesAndCounters(t *testing.T) {
 	_, ok, err := c.Get(ctx, k)
 	require.NoError(t, err)
 	require.False(t, ok)
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// searchDigest mirrors optSearch, so the grammar test states the SHAPE of the key
+// without re-deriving the hash by hand.
+func searchDigest(term string) string {
+	sum := sha256.Sum256([]byte(term))
+	return hex.EncodeToString(sum[:16])
+}
+
+// A term that would break an interpolated key must not break a hashed one, and
+// two different terms must not share a page of results.
+func TestSearchTermsCannotForgeAnotherFiltersKey(t *testing.T) {
+	forged := "x:ev=11111111-2222-3333-4444-555555555555"
+	plain := "x"
+
+	require.NotEqual(t,
+		OrdersAdminKey(nil, nil, &forged, firstPage).EntryPrefix(),
+		OrdersAdminKey(nil, nil, &plain, firstPage).EntryPrefix())
+
+	require.NotContains(t,
+		OrdersAdminKey(nil, nil, &forged, firstPage).EntryPrefix(), "ev=1111",
+		"an interpolated term could name a different event's cache entry")
+
+	empty := ""
+	require.Equal(t,
+		OrdersAdminKey(nil, nil, nil, firstPage).EntryPrefix(),
+		OrdersAdminKey(nil, nil, &empty, firstPage).EntryPrefix(),
+		"an empty term is absence, not a filter matching everything")
 }

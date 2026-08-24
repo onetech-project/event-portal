@@ -148,6 +148,29 @@ to one environment and turns every promotion back into a rebuild. Each name is
 still read with that prefix as a fallback so older images keep working, and nothing
 new should use it.
 
+## Release step: flush the cache after deploying spec 022
+
+**Run once, immediately after the deploy that introduces `ticket_types.is_visible`:**
+
+```bash
+docker compose exec redis redis-cli FLUSHDB     # or bump the cache generation
+```
+
+Cache keys carry no schema version and no deploy marker. A `ticket_types_public`
+entry warmed *before* the deploy was built by a query with no visibility filter, so
+it keeps serving invitation-only ticket types on the guest page until an unrelated
+write to that event bumps its generation, or the TTL expires — whichever comes
+first, and neither is bounded by anything you control.
+
+The failure is quiet in the worst way: the page looks right, the filter is
+demonstrably correct in the database, and the only symptom is an invitation ticket
+purchasable by the public at whatever price it happens to carry. **SC-004 cannot be
+verified post-deploy without this step** — a passing check against a cold cache says
+nothing about the warm entries still being served.
+
+This is a one-off for this deploy, not a standing operational step: after the flush,
+ordinary invalidation covers the column like any other (research D19).
+
 ## Tests
 
 ```bash

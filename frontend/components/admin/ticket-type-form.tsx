@@ -1,10 +1,12 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm } from "react-hook-form";
+import { useState } from "react";
+import { Controller, useForm, useWatch } from "react-hook-form";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Field } from "@/components/ui/field";
 import { StatusAlert } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
@@ -41,8 +43,10 @@ export function TicketTypeForm({
 
   const {
     register,
+    control,
     handleSubmit,
     reset,
+    setValue,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(ticketTypeFormSchema),
@@ -55,8 +59,43 @@ export function TicketTypeForm({
       salesEnd: toDateTimeLocal(ticketType?.sales_end),
       eventStart: toDateTimeLocal(ticketType?.event_start),
       eventEnd: toDateTimeLocal(ticketType?.event_end),
+      // `?? true` is load-bearing. A new type must default to on sale, and an
+      // existing one must round-trip whatever it already is — a fallback of
+      // false would take every edited ticket off sale silently.
+      isVisible: ticketType?.is_visible ?? true,
     },
   });
+
+  // Spec 022 FR-004a/FR-004b. The price follows the on-sale decision.
+  //
+  // Watched rather than read from the checkbox's own handler because the field is
+  // also set by `reset` and by defaultValues; a handler-only rule would leave the
+  // price editable on an invitation type loaded straight from the server.
+  // useWatch, not watch(): the latter returns a fresh function the React Compiler
+  // cannot memoize, so it opts this whole component out of compilation — the same
+  // trap package-form.tsx already documents.
+  const isVisible = useWatch({ control, name: "isVisible" });
+
+  // Whether the price field was emptied by putting this ticket back on sale, as
+  // opposed to simply being blank on a new form. Only that case gets the
+  // explanation; telling someone creating a fresh ticket type that their price
+  // "was cleared" would be false.
+  const [priceClearedByToggle, setPriceClearedByToggle] = useState(false);
+
+  /**
+   * Turning the ticket off sale clears its price; turning it back on empties the
+   * field so a real one must be typed.
+   *
+   * Emptying — rather than restoring the old price — is the point. The old price
+   * is already gone from the database by then, so prefilling anything here would
+   * show a number the server does not have. An empty required field is the only
+   * honest state, and the schema refuses to save until it is filled.
+   */
+  function handleOnSaleChange(next: boolean) {
+    setValue("isVisible", next, { shouldValidate: false });
+    setValue("price", next ? "" : "0", { shouldValidate: false, shouldDirty: true });
+    setPriceClearedByToggle(next);
+  }
 
   const onSubmit = handleSubmit(async (values) => {
     const body = {
@@ -72,6 +111,10 @@ export function TicketTypeForm({
       sales_end: toApiDateTime(values.salesEnd),
       event_start: toApiDateTime(values.eventStart),
       event_end: toApiDateTime(values.eventEnd),
+      // Sent on EVERY write. Update is an absolute full replace on the server,
+      // so a body that omits this leaves the decision to the server's default
+      // rather than to the admin looking at the form.
+      is_visible: values.isVisible,
     };
 
     if (isEditing) {
@@ -103,8 +146,26 @@ export function TicketTypeForm({
             <Input {...register("name")} />
           </Field>
 
-          <Field label="Price (IDR)" error={errors.price?.message}>
-            <Input inputMode="decimal" {...register("price")} />
+          <Field
+            label="Price (IDR)"
+            error={errors.price?.message}
+            hint={
+              isVisible
+                ? priceClearedByToggle
+                  ? // FR-004b: an empty required field with no explanation is the
+                    // thing this exists to avoid. Zero is still a legal price for
+                    // a ticket on sale (FR-003 permits a genuine giveaway) — what
+                    // is refused is inheriting one nobody typed.
+                    "Cleared when this ticket was made invitation-only. Enter the price it should sell for — 0 is allowed, but it has to be deliberate."
+                  : undefined
+                : "Not charged. An invitation ticket is free whatever is stored, so the price is held at 0 while it is off sale."
+            }
+          >
+            <Input
+              inputMode="decimal"
+              disabled={!isVisible}
+              {...register("price")}
+            />
           </Field>
 
           <Field
@@ -156,6 +217,37 @@ export function TicketTypeForm({
           >
             <Input type="datetime-local" {...register("eventEnd")} />
           </Field>
+
+          {/*
+            FR-001a: the control is named for what it DOES, not for the column.
+            "Visible" alone would read as a listing preference, and an admin who
+            unticked it to tidy a list would be publishing a free ticket.
+          */}
+          <div className="sm:col-span-2">
+            <Controller
+              control={control}
+              name="isVisible"
+              render={({ field }) => (
+                <label className="flex items-start gap-3 rounded-lg border p-3">
+                  <Checkbox
+                    checked={field.value}
+                    onCheckedChange={(next) => handleOnSaleChange(Boolean(next))}
+                    aria-label="Sell this ticket type"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium">Sell this ticket type</span>
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      On by default. Untick to make it an{" "}
+                      <strong>invitation-only</strong> ticket: it disappears from the
+                      event page, cannot be bought or bundled into a package, and is
+                      obtained only through its registration link — free of charge,
+                      whatever amount is set above.
+                    </span>
+                  </span>
+                </label>
+              )}
+            />
+          </div>
 
           <div className="flex gap-2 sm:col-span-2">
             <Button type="submit" disabled={mutation.isPending}>

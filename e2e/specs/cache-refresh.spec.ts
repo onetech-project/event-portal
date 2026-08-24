@@ -5,6 +5,7 @@ import {
   adminOrdersPage,
   bookAsAnotherGuest,
   createEvent,
+  createRegistrationEvent,
   createSellableEvent,
   createTicketType,
   flushCache,
@@ -14,6 +15,7 @@ import {
   isoHoursFromNow,
   publicTicketTypes,
   putTerms,
+  request,
   updateEvent,
   updateTicketTypeWindow,
 } from "../support/api";
@@ -297,3 +299,88 @@ async function bookPaced(eventId: string, ticketTypeId: string): Promise<void> {
     }
   }
 }
+
+/**
+ * Spec 022 T077 / SC-004 + Principle VII. Containment must survive the cache.
+ *
+ * The filter lives in SQL, so what gets CACHED is the already-filtered list. That
+ * makes the cache the most likely place for the leak to reappear: the database can
+ * be demonstrably correct while a warm entry keeps serving an invitation ticket to
+ * the public — at whatever price it happens to carry.
+ *
+ * This describe runs in BOTH cache modes. With the cache off it still asserts the
+ * filter; with it on, it asserts the invalidation as well. That is the point of
+ * the kill switch being verifiable rather than assumed.
+ */
+test.describe("Registration-only types stay off the cached guest list", () => {
+  test("an invitation type never appears, warm or cold", async () => {
+    const { event, purchasable, registration } = await createRegistrationEvent(token, {
+      slug: "cache-invitation",
+    });
+
+    // Warm the list, then read it again from the warm entry.
+    const cold = await publicTicketTypes(event.slug);
+    const warm = await publicTicketTypes(event.slug);
+
+    for (const [label, listed] of [["cold", cold], ["warm", warm]] as const) {
+      const ids = listed.map((t) => t.id);
+      expect(ids, `${label} read must offer the purchasable type`).toContain(purchasable.id);
+      expect(ids, `${label} read must not offer the invitation type`).not.toContain(
+        registration.id,
+      );
+    }
+  });
+
+  // The invalidation, in the direction that actually costs money if it fails.
+  // Hiding a type must orphan the cached list, or the guest page keeps selling
+  // something the admin has just withdrawn — and keeps taking quota for it.
+  test("hiding a type removes it from the guest list on the very next read", async () => {
+    const { event, purchasable } = await createRegistrationEvent(token, {
+      slug: "cache-invitation-hide",
+    });
+
+    const before = await publicTicketTypes(event.slug);
+    expect(before.map((t) => t.id)).toContain(purchasable.id);
+
+    // Full replace: every field is sent, because omitting one would blank it — so
+    // the STORED values are read back and echoed, changing only is_visible.
+    //
+    // Recomputing the windows here instead would reintroduce a clock-skew bug:
+    // an admission window recomputed a moment later can land microseconds outside
+    // its parent event's dates, and containment refuses it with a 400 that reads
+    // like a bug in the endpoint rather than in the fixture.
+    const current = await request<{
+      name: string;
+      price: string;
+      quota: number;
+      sales_start: string;
+      sales_end: string;
+      event_start: string;
+      event_end: string;
+    }>(`/admin/ticket-types/${purchasable.id}`, { token });
+
+    const { status } = await request(`/admin/ticket-types/${purchasable.id}`, {
+      method: "PUT",
+      token,
+      body: JSON.stringify({
+        event_id: event.id,
+        name: current.data.name,
+        price: current.data.price,
+        quota: current.data.quota,
+        sales_start: current.data.sales_start,
+        sales_end: current.data.sales_end,
+        event_start: current.data.event_start,
+        event_end: current.data.event_end,
+        is_visible: false,
+      }),
+    });
+    expect(status).toBe(200);
+
+    const after = await publicTicketTypes(event.slug);
+    expect(after.map((t) => t.id)).not.toContain(
+      purchasable.id,
+      // If this fails with the cache ON and passes with it OFF, the write is not
+      // invalidating — not a filter bug.
+    );
+  });
+});

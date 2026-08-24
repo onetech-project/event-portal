@@ -70,6 +70,16 @@ export function PackageForm({
     },
   });
 
+  // Spec 022 FR-007: invitation-only types are not bundleable, so they never
+  // reach the picker. The server refuses them anyway — this is the affordance,
+  // not the enforcement — but offering a choice that will be rejected on submit
+  // is how an admin ends up thinking the refusal is a bug.
+  //
+  // Deliberately NOT applied to `selectedTypes` below: an existing package that
+  // somehow contains one must still show it, or the quota maths silently omits a
+  // constituent and the bundle claims more availability than it has.
+  const bundleable = ticketTypes.filter((ticketType) => ticketType.is_visible);
+
   // useWatch rather than watch(): the latter returns a fresh function the React
   // Compiler cannot memoize, so it opts the whole component out of compilation.
   const selectedIds = useWatch({ control, name: "components" }) ?? [];
@@ -173,7 +183,7 @@ export function PackageForm({
               still has enough remaining quota.
             </p>
 
-            {ticketTypes.length === 0 ? (
+            {bundleable.length === 0 ? (
               <p className="mt-3 text-sm text-muted-foreground">
                 This event has no ticket types yet. Add one before creating a bundle.
               </p>
@@ -188,14 +198,14 @@ export function PackageForm({
                       value={field.value}
                       onValueChange={field.onChange}
                       items={Object.fromEntries(
-                        ticketTypes.map((ticketType) => [ticketType.id, ticketType.name]),
+                        bundleable.map((ticketType) => [ticketType.id, ticketType.name]),
                       )}
                     >
                       <SelectTrigger aria-label="Ticket types" className="w-full">
                         <SelectValue placeholder="Select ticket types..." />
                       </SelectTrigger>
                       <SelectContent align="start">
-                        {ticketTypes.map((ticketType) => (
+                        {bundleable.map((ticketType) => (
                           <SelectItem key={ticketType.id} value={ticketType.id}>
                             {ticketType.name}
                             <span className="ml-auto text-xs text-muted-foreground">

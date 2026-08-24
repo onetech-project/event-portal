@@ -79,8 +79,15 @@ type EventDetail struct {
 
 // EventTermsDTO is the current Terms & Conditions document shown by the
 // booking dialog (GET /ticket/terms-condition/:event_id). Content is sanitized
-// HTML authored in the admin CMS; ID is echoed back when agreement is recorded
-// so the server can detect the document changing mid-flow (409002).
+// HTML authored in the admin CMS.
+//
+// BOTH identifiers are echoed back when agreement is recorded, and they do
+// different jobs. ID says WHICH document was shown and is what gets stamped on
+// the order. UpdatedAt says WHICH VERSION, and it is the only one of the two
+// that can detect an edit (409002): UpsertEventTerms overwrites the row in place
+// and preserves its id, so an id comparison never fires on a republish. This
+// comment previously claimed the ID served that purpose; it did not, and spec
+// 022 corrected both the claim and the check.
 type EventTermsDTO struct {
 	ID        uuid.UUID  `json:"id"`
 	Content   string     `json:"content"`

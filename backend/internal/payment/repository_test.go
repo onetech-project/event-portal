@@ -135,7 +135,7 @@ func TestCreatePaymentRoundTripsTheExternalReference(t *testing.T) {
 		"the gateway's reference survives the round trip verbatim")
 }
 
-// Empty must reach the column as NULL, not ''. The two are different facts: no
+// Empty must reach the column as NULL, not ”. The two are different facts: no
 // session-open row at all versus a gateway that answered with a blank reference,
 // and only NULL keeps them distinguishable (spec 017 FR-004).
 func TestCreatePaymentStoresAnAbsentExternalReferenceAsNull(t *testing.T) {

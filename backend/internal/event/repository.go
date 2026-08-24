@@ -45,6 +45,11 @@ type TicketTypeRow struct {
 	// Independent of the sales window in both directions.
 	EventStart time.Time
 	EventEnd   time.Time
+	// IsVisible names the ACQUISITION CHANNEL (spec 022): this type is
+	// obtained by registering, not by buying. It travels to the order domain
+	// through EventProvider so booking, checkout, availability and package
+	// expansion can all refuse it at their one shared seam.
+	IsVisible bool
 }
 
 // Repository is the only place in the codebase that talks to events/ticket_types.
@@ -132,6 +137,10 @@ func (r *Repository) ListTicketTypesByEventID(ctx context.Context, eventID uuid.
 			SalesEnd:    row.SalesEnd,
 			EventStart:  row.EventStart,
 			EventEnd:    row.EventEnd,
+			// Always false out of this query — it filters registration-only types
+			// out entirely (spec 022 FR-006) — but carried so one struct means one
+			// thing whichever query built it.
+			IsVisible: row.IsVisible,
 		})
 	}
 	return out, nil
@@ -168,6 +177,7 @@ func (r *Repository) GetTicketTypeByID(ctx context.Context, tx pgx.Tx, id uuid.U
 		SalesEnd:    row.SalesEnd,
 		EventStart:  row.EventStart,
 		EventEnd:    row.EventEnd,
+		IsVisible:   row.IsVisible,
 	}, nil
 }
 

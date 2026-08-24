@@ -29,6 +29,7 @@ const ticketTypes: TicketTypeAdminView[] = [
     sales_end: "2026-08-31T00:00:00Z",
     event_start: "2026-09-01T12:00:00Z",
     event_end: "2026-09-01T23:00:00Z",
+    is_visible: true,
   },
   {
     id: DAY_2,
@@ -42,6 +43,7 @@ const ticketTypes: TicketTypeAdminView[] = [
     sales_end: "2026-08-31T00:00:00Z",
     event_start: "2026-09-01T12:00:00Z",
     event_end: "2026-09-01T23:00:00Z",
+    is_visible: true,
   },
 ];
 
@@ -68,6 +70,27 @@ describe("PackageForm", () => {
   // FR-036: a package holds no inventory. Offering a quota input here would
   // both contradict the model and be rejected by the server, which refuses any
   // quota-like key rather than ignoring it.
+  // Spec 022 FR-007: invitation-only types are not bundleable. The server refuses
+  // them, so this is the affordance rather than the enforcement — but offering a
+  // choice that will be rejected on submit is how an admin concludes the refusal
+  // is a bug.
+  it("keeps invitation-only ticket types out of the composition picker", async () => {
+    const user = userEvent.setup();
+    const withInvitation: TicketTypeAdminView[] = [
+      ...ticketTypes,
+      { ...ticketTypes[0], id: "55555555-5555-4555-8555-555555555555", name: "VIP Invitation", is_visible: false },
+    ];
+
+    renderWithQuery(
+      <PackageForm eventId={EVENT_ID} ticketTypes={withInvitation} onDone={vi.fn()} />,
+    );
+
+    await user.click(screen.getByLabelText(/ticket types/i));
+
+    expect(screen.getByRole("option", { name: /Day 1/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /VIP Invitation/i })).not.toBeInTheDocument();
+  });
+
   it("offers no quota input, because a package owns no inventory", () => {
     renderWithQuery(
       <PackageForm eventId={EVENT_ID} ticketTypes={ticketTypes} onDone={vi.fn()} />,
