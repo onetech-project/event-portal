@@ -41,7 +41,7 @@ export function SiteHeader() {
         </div>
 
         <a
-          href="https://wa.me/6282245122667"
+          href="https://wa.me/6285894311174"
           target="_blank"
           rel="noreferrer"
           className="flex items-center gap-2 text-base font-bold tracking-[0.4px] text-white transition-opacity hover:opacity-80"
